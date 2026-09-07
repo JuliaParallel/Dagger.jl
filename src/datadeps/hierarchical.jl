@@ -140,7 +140,33 @@ end
 # space-keyed currency tracking (`arg_current` / `arg_owner` / per-space slots),
 # which is what actually breaks. It also keys on the argument object, so a
 # `ChunkView` and the `Chunk` it views are tracked separately and their sharing
-# is missed. Anyone reviving this must fix both before flipping the gate.
+# is missed.
+#
+# A third area needs re-checking, in the free loop rather than in planning.
+# `_hierarchical_copy_from_and_free!` walks one partition's object cache at a
+# time and derives each buffer's free syncdeps from *that* partition's
+# `ainfos_owner` / `ainfos_readers` / `ainfos_lookup`. That is exact today only
+# because a buffer is reachable solely from the partition whose cache allocated
+# it: every partition builds its own slots through its own
+# `AliasedObjectCacheStore`, and the one mechanism that hands a slot across a
+# partition boundary is `_sync_incoming_ownership!` below, which never runs.
+# Re-enable it and a consumer partition's boundary copy-to reads `owner_slot`, a
+# buffer living in the *producer's* cache and absent from the consumer's, so
+# per-partition tracking alone cannot see that reader. (The `freed` dedup does
+# not help: the buffer is in exactly one cache, so there is nothing to
+# deduplicate.)
+#
+# The free loop already anticipates this by also syncing on `entry.owner_task`,
+# the chunk's final global writer, which transitively covers every reader that
+# is an ancestor of it -- each cross-partition hand-off makes the consumer's
+# copy-to wait on the producer, and the next writer waits on that copy. What
+# that argument does not obviously reach is a consumer partition that only
+# *reads* the chunk and never commits ownership: its boundary copy-to is not an
+# ancestor of the final writer, so nothing orders it against the free. Confirm
+# that case (or extend the syncdeps to every partition the registry entry
+# names) before flipping the gate.
+#
+# Anyone reviving this must settle all three before flipping the gate.
 #
 # Each partition schedules with its own `DataDepsState`, so `arg_owner` /
 # `arg_history` / physical slots are per-partition. When a backing chunk is
@@ -784,6 +810,11 @@ function partition_dag(dag::SimpleDiGraph, task_metas::Vector{HierarchicalTaskMe
     if multi_owner
         owner_to_partition = Dict(o => i for (i, o) in enumerate(owners))
         default_scope = DefaultScope()
+        # Hoisted out of the per-vertex loop and refilled: these are scratch,
+        # dead across iterations, and allocating them per task put two arrays
+        # per task on the planning path.
+        write_affinity = zeros(Int, n_owners)
+        read_affinity = zeros(Int, n_owners)
         for v in 1:n
             meta = task_metas[v]
             task_scope = @something(meta.pair.spec.options.compute_scope, meta.pair.spec.options.scope, default_scope)
@@ -825,8 +856,8 @@ function partition_dag(dag::SimpleDiGraph, task_metas::Vector{HierarchicalTaskMe
             # N.B. Argument *counts*, not byte counts: `datasize` of a chunk is
             # only known on its owning rank (see `datasize(::MPIRef)`), and this
             # decision must come out identical on every rank under SPMD.
-            write_affinity = zeros(Int, n_owners)
-            read_affinity = zeros(Int, n_owners)
+            fill!(write_affinity, 0)
+            fill!(read_affinity, 0)
             for dep in meta.deps
                 arg_space = memory_space(dep.arg_w.arg)
                 arg_oid = partition_affinity_id(arg_space)
@@ -1481,6 +1512,13 @@ function _hierarchical_copy_from_and_free!(partition_states::Vector{DataDepsStat
     # several ainfos, or recorded in more than one partition's object cache, must
     # be freed exactly once. A double `unsafe_free!` is harmless on CPU (refcount
     # decrement) but releases device memory twice on GPU backends.
+    #
+    # N.B. The per-partition syncdep derivation below is exact only while a
+    # buffer is reachable from the single partition whose cache allocated it,
+    # which holds because `_sync_incoming_ownership!` (the only cross-partition
+    # slot hand-off) is currently dead code. See the constraint recorded with
+    # `SharedChunkRegistry` above before re-enabling parallel planning across
+    # memory spaces.
     freed = IdDict{Any,Nothing}()
     for pid in 1:n_partitions
         state = partition_states[pid]
@@ -1488,13 +1526,14 @@ function _hierarchical_copy_from_and_free!(partition_states::Vector{DataDepsStat
         write_num = typemax(Int) - 1
 
         # Map each tracked slot chunk to its ainfos, exactly as flat
-        # `distribute_tasks!` does. A slot's object-cache *key* ainfo is computed
-        # from the source object, so it is frequently absent from `ainfo_arg`
-        # (which is keyed by destination-space ainfos). Keying the syncdep lookup
-        # on the key ainfo alone therefore yields an empty syncdep set, and the
-        # resulting `unsafe_free!` races the very tasks still reading that slot
-        # -- freeing e.g. the copy-in buffer for an `In(::DTask)` argument out
-        # from under its consumer.
+        # `distribute_tasks!` does. A buffer that is not itself a tracked slot
+        # is not covered by this map, and its object-cache *key* ainfo cannot
+        # stand in for it (that ainfo describes the source object, in the source
+        # space); `gather_free_syncdeps!` handles those from the buffer's own
+        # recorded destination-space aliasing instead. Getting this wrong yields
+        # an empty syncdep set, and an `unsafe_free!` that races the very tasks
+        # still reading that slot -- freeing e.g. the copy-in buffer for an
+        # `In(::DTask)` argument out from under its consumer.
         chunk_to_ainfos = IdDict{Any,Vector{AliasingWrapper}}()
         for (ainfo, remote_arg_ws) in state.ainfo_arg
             for remote_arg_w in remote_arg_ws
@@ -1513,7 +1552,8 @@ function _hierarchical_copy_from_and_free!(partition_states::Vector{DataDepsStat
                 haskey(freed, remote_arg) && continue
                 freed[remote_arg] = nothing
                 free_syncdeps = Set{ThunkSyncdep}()
-                gather_free_syncdeps!(state, remote_space, ainfo, remote_arg,
+                buf_ainfo = stored_value_ainfo(obj_cache, remote_space, ainfo)
+                gather_free_syncdeps!(state, remote_space, buf_ainfo, remote_arg,
                                       write_num, chunk_to_ainfos, free_syncdeps)
                 if registry !== nothing
                     orig = get(state.remote_arg_to_original, remote_arg, nothing)

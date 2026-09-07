@@ -421,16 +421,37 @@ end
 # repeated `(f, arg-types)` shape on the submission hot path.
 const RETURN_TYPE_CACHE = LockedObject(Dict{Type,Type}())
 
-function cached_return_type(@nospecialize(f), @nospecialize(arg_types::Tuple))
-    # `Union{}` (the bottom type) is a legal inferred arg type — it arises when an
-    # upstream task is inferred never to return — but it cannot appear as a tuple
-    # field, so we can't form a `Tuple{...}` cache key for it. Such calls are rare,
-    # so infer them directly rather than caching.
+"""
+    call_signature_key(f, arg_types) -> Type or nothing
+
+The cache key shared by [`cached_return_type`](@ref) and [`cached_nothrow`](@ref).
+`nothing` when no key can be formed, which is the caller's cue to answer without
+consulting a cache.
+
+`Union{}` (the bottom type) is a legal inferred arg type — it arises when an
+upstream task is inferred never to return — but it cannot appear as a tuple
+field, so no `Tuple{...}` key exists for it. Such calls are rare, so they are
+answered directly rather than cached.
+
+Split out so a caller asking both questions about one dispatch builds it once:
+forming it splats `arg_types` into a `Type` and allocates, and the MPI path runs
+this per task, per rank (see `mpi_execute_bcast_plan`).
+"""
+function call_signature_key(@nospecialize(f), @nospecialize(arg_types::Tuple))
     for T in arg_types
-        T === Union{} && return Base.promote_op(f, arg_types...)
+        T === Union{} && return nothing
     end
-    key = Tuple{typeof(f), arg_types...}
-    return lock(RETURN_TYPE_CACHE) do cache
+    return Tuple{typeof(f), arg_types...}
+end
+
+cached_return_type(@nospecialize(f), @nospecialize(arg_types::Tuple)) =
+    cached_return_type(call_signature_key(f, arg_types), f, arg_types)
+function cached_return_type(@nospecialize(key), @nospecialize(f), @nospecialize(arg_types::Tuple))
+    key === nothing && return Base.promote_op(f, arg_types...)
+    # `@safe_lock1`, not `lock(...) do`: the closure captures `key`/`f`/`arg_types`
+    # and reassigns `rt` across the get/infer/store sequence, which puts it in a
+    # heap `Box` on a per-spawn path.
+    @safe_lock1 RETURN_TYPE_CACHE cache begin
         rt = get(cache, key, nothing)
         rt === nothing || return rt
         rt = Base.promote_op(f, arg_types...)
@@ -451,14 +472,15 @@ end
 # grew to dominate exactly as chunks got smaller with more ranks.
 const NOTHROW_CACHE = LockedObject(Dict{Type,Bool}())
 
-function cached_nothrow(@nospecialize(f), @nospecialize(arg_types::Tuple))
-    # `Union{}` cannot appear as a tuple field, so no cache key can be formed
-    # (see `cached_return_type`); assume the worst rather than infer.
-    for T in arg_types
-        T === Union{} && return false
-    end
-    key = Tuple{typeof(f), arg_types...}
-    return lock(NOTHROW_CACHE) do cache
+cached_nothrow(@nospecialize(f), @nospecialize(arg_types::Tuple)) =
+    cached_nothrow(call_signature_key(f, arg_types), f, arg_types)
+function cached_nothrow(@nospecialize(key), @nospecialize(f), @nospecialize(arg_types::Tuple))
+    # No key means `Union{}` among the arg types (see `call_signature_key`);
+    # assume the worst rather than infer.
+    key === nothing && return false
+    # `@safe_lock1` rather than `lock(...) do`, for the reason in
+    # `cached_return_type`: the closure would box `nothrow`.
+    @safe_lock1 NOTHROW_CACHE cache begin
         nothrow = get(cache, key, nothing)
         nothrow === nothing || return nothrow
         nothrow = Core.Compiler.is_nothrow(Base.infer_effects(f, arg_types))

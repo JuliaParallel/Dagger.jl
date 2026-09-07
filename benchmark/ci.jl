@@ -55,6 +55,12 @@ const EXTRA_PKGS = String[
     # with Dagger; the orchestrator/worker need it for their file-based IPC.
     #"JSON3",
 ]
+# MPI is only needed (and only installed) when the caller requests an MPI
+# benchmark run (see benchmark/benchmarks.jl's BENCHMARK_MPI_RANKS), so the
+# plain/Distributed CI runs don't pay for pulling in MPICH_jll.
+if get(ENV, "BENCHMARK_MPI_RANKS", "0") != "0"
+    push!(EXTRA_PKGS, "MPI")
+end
 
 mkpath(OUTPUT_DIR)
 
