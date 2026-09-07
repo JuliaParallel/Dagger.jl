@@ -294,3 +294,11 @@ lesson.
    and died in `ipc_export(::Matrix)`. Stamp the result from
    `value_memory_space`, and do not select IPC unless the chunktype is a
    GPU array (`ipc_type_eligible`). Space-only `ipc_eligible` is not enough.
+
+27. **Sparse `cholesky` must hook `_cholesky` / `cholesky!`, never `_chol!`.**
+   `_chol!` on a `DArray` is tiled potrf and will densify a sparse-backed
+   `DMatrix`. LinearAlgebra's generic `cholesky` is `_cholesky(cholcopy(A))`,
+   and SparseArrays already redirects `_cholesky` for `SparseMatrixCSC` for
+   the same reason. Tile type is not a `DMatrix` type parameter — read it
+   with `darray_tiletype` (lesson 22) and gather-then-factor (CHOLMOD is
+   process-local, so pin like `DaggerSparseLU`). Do not add `Dagger.spchol`.
