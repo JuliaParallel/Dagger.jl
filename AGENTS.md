@@ -305,3 +305,12 @@ lesson.
    falls into the generic AbstractMatrix path and dies on scalar indexing
    (or silently gathers). Define the adjoint/transpose `mul!` next to the
    forward one. The same trap applies to `Transpose`.
+
+28. **`[A B; C D]` of `DMatrix`s concatenates tiles, it does not nest.**
+   `Base.cat` / `hvcat` on `ArrayOp` already means "glue these arrays into
+   one bigger `DArray`" (`src/array/matrix.jl`). That is an assembled nest,
+   not PETSc `MatNest`. A block operator whose blocks stay independent
+   (matrix-free, or just not materialized as one `DMatrix`) needs its own
+   type (`BlockOperator`) and cannot reuse `hvcat`. `BlockArrays.mortar`
+   is the ecosystem name for the assembled case, but adding that dependency
+   does not give you matrix-free blocks or field-split `mul!`.

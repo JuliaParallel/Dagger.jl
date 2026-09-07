@@ -178,6 +178,30 @@ partitioned like `b`. Left and right nullspaces can be passed separately as
 case. The stored basis (`P.left` / `P.right`) is what a later AMG
 near-nullspace hook can read.
 
+## Nested / field-split operators
+
+Multiphysics problems are block systems `A = [A₁₁ A₁₂; A₂₁ A₂₂]`.
+`[A11 A12; A21 A22]` of `DMatrix`s already *concatenates* the tiles into
+one bigger `DMatrix` (see `cat`), so a nested operator is
+[`Dagger.BlockOperator`](@ref): `mul!` applies the blocks without
+assembling them. Zero blocks are `nothing`; `I` / `λ*I` scales a field.
+
+The matching preconditioner is [`Dagger.BlockDiagonalPC`](@ref) — PETSc
+`PCFIELDSPLIT` with the additive / Jacobi composition (each field gets its
+own PC). A Schur complement is a follow-up.
+
+```julia
+A = Dagger.BlockOperator(A11, A12, A21, A22)
+P = Dagger.BlockDiagonalPC((
+    Dagger.JacobiPreconditioner(A11),
+    Dagger.JacobiPreconditioner(A22),
+))
+x, stats = Krylov.gmres(A, b; M = P)
+```
+
+This is *field*-split, not tile-split: [`Dagger.BlockJacobiPreconditioner`](@ref)
+still means one operator per diagonal *tile* of a single `DMatrix`.
+
 ## Preconditioners
 
 A preconditioner accelerates convergence by approximating `A⁻¹`. Dagger's
@@ -343,6 +367,8 @@ Dagger.bicgstab
 Dagger.krylov_solve
 Dagger.Projected
 Dagger.project!
+Dagger.BlockOperator
+Dagger.BlockDiagonalPC
 Dagger.AbstractDaggerPreconditioner
 Dagger.JacobiPreconditioner
 Dagger.AbstractBlockPreconditioner

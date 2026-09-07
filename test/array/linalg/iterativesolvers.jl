@@ -593,3 +593,65 @@ end
     @test abs(dot(ones(n), r)) < 1e-8
     @test norm(r) / norm(b) < 1e-6
 end
+
+@testset "BlockOperator + field-split" begin
+    n1 = n2 = 8
+    k = 4
+    A_part = Blocks(k, k)
+    b_part = Blocks(k)
+
+    # Mildly coupled 2-field SPD system (not a saddle): off-diagonals are
+    # small enough that field-split Jacobi still converges quickly.
+    A11h = Matrix(laplacian_1d(Float64, n1))
+    A22h = Matrix(laplacian_1d(Float64, n2)) + 3 * I
+    A12h = fill(0.05, n1, n2)
+    A21h = A12h'
+    Ahost = [A11h A12h; A21h A22h]
+    Adiag = [A11h zeros(n1, n2); zeros(n2, n1) A22h]
+
+    A11 = distribute(A11h, A_part)
+    A12 = distribute(A12h, A_part)
+    A21 = distribute(A21h, A_part)
+    A22 = distribute(A22h, A_part)
+
+    A = Dagger.BlockOperator(A11, A12, A21, A22)
+    @test size(A) == (n1 + n2, n1 + n2)
+    @test eltype(A) == Float64
+
+    b = rand(n1 + n2)
+    Db = distribute(b, b_part)
+    y = similar(Db)
+
+    mul!(y, A, Db)
+    @test collect(y) ≈ Ahost * b
+
+    # Tuple constructor and a `nothing` zero block.
+    Ad = Dagger.BlockOperator((A11, nothing, nothing, A22))
+    mul!(y, Ad, Db)
+    @test collect(y) ≈ Adiag * b
+
+    # Adjoint of the nest is the nest of adjoints.
+    mul!(y, A', Db)
+    @test collect(y) ≈ Ahost' * b
+
+    # Field-split Jacobi on the diagonal blocks, then GMRES.
+    P = Dagger.BlockDiagonalPC((
+        Dagger.JacobiPreconditioner(A11),
+        Dagger.JacobiPreconditioner(A22),
+    ))
+    @test P isa Dagger.AbstractDaggerPreconditioner
+    z = similar(Db)
+    mul!(z, P, Db)
+    zref = vcat((1 / SPD_DIAG) .* b[1:n1], (1 / (SPD_DIAG + 3)) .* b[n1+1:end])
+    @test collect(z) ≈ zref
+
+    x, stats = Krylov.gmres(A, Db; M = P, atol = 1e-12, rtol = 1e-10, itmax = 200)
+    @test stats.solved
+    @test collect(x) ≈ Ahost \ b rtol = 1e-6
+
+    # Block-diagonal system: field-split Jacobi is an exact-ish diagonal
+    # scaling and CG (each field is SPD) still solves.
+    xd, sd = Krylov.cg(Ad, Db; M = P, atol = 1e-12, rtol = 1e-10, itmax = 200)
+    @test sd.solved
+    @test collect(xd) ≈ Adiag \ b rtol = 1e-6
+end
