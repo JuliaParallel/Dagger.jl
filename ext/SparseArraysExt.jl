@@ -5,7 +5,7 @@ import SparseArrays: SparseMatrixCSC, SparseVector
 import LinearAlgebra
 import Dagger
 import Dagger: Blocks, AutoBlocks, BlocksOrAuto, AssignmentType, DSparseArray, DSparseMatrix
-import Dagger: DArray, DMatrix, In, InOut, SparseCOOBucket
+import Dagger: DArray, DMatrix, SparseCOOBucket
 
 # Keep tiles sparse through `collect`/`cat`; the outer `collect` densifies.
 Dagger._sparse_collect(M::SparseMatrixCSC) = copy(M)
@@ -268,8 +268,8 @@ function _buckets_to_csc(::Type{T}, tm::Integer, tn::Integer, combine, buckets) 
 end
 
 function _combine_host_csc(A::SparseMatrixCSC, S::SparseMatrixCSC, combine)
-    nnz(A) == 0 && return S
-    nnz(S) == 0 && return A
+    SparseArrays.nnz(A) == 0 && return S
+    SparseArrays.nnz(S) == 0 && return A
     if combine === +
         return A + S
     end
@@ -302,20 +302,29 @@ function _coo_eltype_checked(V)
     return T
 end
 
+# Regular spawn (not datadeps): SparseCOOBucket is not a Datadeps-movable
+# container, and assembly is a construction graph like AllocateArray.
+function _with_replaced_chunks(A::DArray{T,N}, new_chunks) where {T,N}
+    if eltype(A.chunks) >: eltype(new_chunks)
+        copyto!(A.chunks, new_chunks)
+        return A
+    end
+    return Dagger.DArray(T, A.domain, A.subdomains, new_chunks, A.partitioning, A.concat)
+end
+
 function _sparse_add_local_coo!(A::DArray{T,2}, I, J, V, combine) where T
     m, n = size(A)
     row_cum = A.subdomains.cumlength[1]
     col_cum = A.subdomains.cumlength[2]
     buckets = Dagger._bucket_coo_chunk(I, J, V, row_cum, col_cum, m, n)
     ntr, ntc = size(A.chunks)
-    Dagger.spawn_datadeps() do
-        for tj in 1:ntc, ti in 1:ntr
-            dest = A.chunks[ti, tj]
-            Dagger.@spawn return_type=DSparseArray{T,2} Dagger._assemble_coo_into_tile(
-                InOut(dest), combine, buckets[ti, tj])
-        end
+    new_chunks = Matrix{Dagger.DTask}(undef, ntr, ntc)
+    for tj in 1:ntc, ti in 1:ntr
+        dest = A.chunks[ti, tj]
+        new_chunks[ti, tj] = Dagger.@spawn return_type=DSparseArray{T,2} Dagger._assemble_coo_into_tile(
+            dest, combine, buckets[ti, tj])
     end
-    return A
+    return _with_replaced_chunks(A, new_chunks)
 end
 
 function _sparse_add_darray_coo!(A::DArray{T,2}, I::DArray, J::DArray, V::DArray, combine) where T
@@ -328,27 +337,24 @@ function _sparse_add_darray_coo!(A::DArray{T,2}, I::DArray, J::DArray, V::DArray
     ncoo = length(Ichunks)
     ntr, ntc = size(A.chunks)
     Tv = eltype(V)
-    Dagger.spawn_datadeps() do
-        bucket_tasks = Vector{Dagger.DTask}(undef, ncoo)
-        for c in 1:ncoo
-            bucket_tasks[c] = Dagger.@spawn return_type=Matrix{SparseCOOBucket{Tv}} Dagger._bucket_coo_chunk(
-                In(Ichunks[c]), In(Jchunks[c]), In(Vchunks[c]),
-                row_cum, col_cum, m, n)
-        end
-        for tj in 1:ntc, ti in 1:ntr
-            extracts = Vector{Dagger.DTask}(undef, ncoo)
-            for c in 1:ncoo
-                extracts[c] = Dagger.@spawn return_type=SparseCOOBucket{Tv} Dagger._extract_coo_bucket(
-                    In(bucket_tasks[c]), ti, tj)
-            end
-            dest = A.chunks[ti, tj]
-            in_extracts = ntuple(c -> In(extracts[c]), ncoo)
-            Dagger.spawn(Dagger._assemble_coo_into_tile,
-                         Dagger.Options(; return_type=DSparseArray{T,2}),
-                         InOut(dest), combine, in_extracts...)
-        end
+    bucket_tasks = Vector{Dagger.DTask}(undef, ncoo)
+    for c in 1:ncoo
+        bucket_tasks[c] = Dagger.@spawn return_type=Matrix{SparseCOOBucket{Tv}} Dagger._bucket_coo_chunk(
+            Ichunks[c], Jchunks[c], Vchunks[c], row_cum, col_cum, m, n)
     end
-    return A
+    new_chunks = Matrix{Dagger.DTask}(undef, ntr, ntc)
+    for tj in 1:ntc, ti in 1:ntr
+        extracts = Vector{Dagger.DTask}(undef, ncoo)
+        for c in 1:ncoo
+            extracts[c] = Dagger.@spawn return_type=SparseCOOBucket{Tv} Dagger._extract_coo_bucket(
+                bucket_tasks[c], ti, tj)
+        end
+        dest = A.chunks[ti, tj]
+        new_chunks[ti, tj] = Dagger.spawn(Dagger._assemble_coo_into_tile,
+                                          Dagger.Options(; return_type=DSparseArray{T,2}),
+                                          dest, combine, extracts...)
+    end
+    return _with_replaced_chunks(A, new_chunks)
 end
 
 """

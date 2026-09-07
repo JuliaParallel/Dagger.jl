@@ -304,3 +304,7 @@ lesson.
    `task_processor()`). Under MPI, spawn one extract per (COO chunk, dest
    tile) even when the bucket is empty: a data-dependent skip changes the
    task graph per rank. Never build a global `SparseMatrixCSC` on the caller.
+   Do not pass `SparseCOOBucket` through `spawn_datadeps`: Datadeps requires
+   `move!` and no bucket method exists (`ArgumentError` at `memory-spaces.jl`).
+   Regular `@spawn` serializes the fragment like `AllocateArray`; replace
+   dest chunks with the assemble `DTask`s rather than `InOut`-mutating.
