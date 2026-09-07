@@ -258,13 +258,27 @@ structure follows the *finer* of the two block sizes.
 
 ## Sparse direct solvers
 
-For systems that fit on a single worker, Dagger also offers **direct** sparse
-solves via pure-Julia factorization backends. Unlike the C-bound `UmfpackLU`,
-these factorizations are plain Julia data, so Dagger can move and schedule them
-freely.
+A sparse-backed `DMatrix` used as `A \ b` (or `ldiv!` / `lu` / `factorize`)
+**never** takes the tiled dense LU path — that would silently densify the
+operator and can OOM. Those LinearAlgebra entry points dispatch to a sparse
+direct factor when `PureUMFPACK` or `PureKLU` is loaded, or to GMRES when only
+`Krylov` is loaded:
 
-Load `PureKLU` (KLU; good for unsymmetric/circuit systems) or `PureUMFPACK`
-(UMFPACK-style multifrontal LU):
+```julia
+using SparseArrays, PureUMFPACK   # or PureKLU, or just Krylov
+
+A  = distribute(sprand(2000, 2000, 0.005) + 10I, Blocks(500, 500))
+b  = distribute(rand(2000), Blocks(500))
+
+x = A \ b             # DVector, partitioned like b
+F = lu(A)             # DaggerSparseLU (direct) or SparseIterativeFactorization
+x = F \ b
+```
+
+For systems that fit on a single worker, the explicit direct backends are
+pure-Julia factorizations (unlike the C-bound `UmfpackLU`), so Dagger can move
+and schedule them freely. Load `PureKLU` (KLU; good for unsymmetric/circuit
+systems) or `PureUMFPACK` (UMFPACK-style multifrontal LU):
 
 ```julia
 using SparseArrays, PureKLU, PureUMFPACK
@@ -279,7 +293,8 @@ x = F \ b             # returns a DVector partitioned like b
 `Dagger.klu`/`Dagger.splu` gather the sparse `DMatrix` into one
 `SparseMatrixCSC` (without densifying), factor it once, and return a
 [`Dagger.DaggerSparseLU`](@ref) supporting `F \ b` and `ldiv!(x, F, b)`. Factor
-once, solve many right-hand sides cheaply.
+once, solve many right-hand sides cheaply. `lu(A)` / `factorize(A)` prefer
+`splu` when both packages are loaded.
 
 There are also **block direct preconditioners** that factor each diagonal tile
 exactly (`Dagger.BlockKLUPreconditioner`, `Dagger.BlockUMFPACKPreconditioner`),
@@ -327,6 +342,7 @@ Dagger.BlockUMFPACKPreconditioner
 Dagger.klu
 Dagger.splu
 Dagger.DaggerSparseLU
+Dagger.SparseIterativeFactorization
 Dagger.DistributedSparseLU
 Dagger.DistributedSchurLU
 ```

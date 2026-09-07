@@ -39,6 +39,7 @@ const MPIExt = Base.get_extension(Dagger, :MPIExt)
 include(joinpath(@__DIR__, "util.jl"))
 include(joinpath(@__DIR__, "array", "stencil_defs.jl"))
 include(joinpath(@__DIR__, "array", "sparse_defs.jl"))
+include(joinpath(@__DIR__, "array", "sparse_solve_defs.jl"))
 
 # Broadcast-only mutation helpers (scalar indexing is illegal on GPU arrays)
 add1!(X) = (X .+= 1; nothing)
@@ -319,6 +320,7 @@ if get(cfg, :sparse, false)
         Dagger.with_options(;scope=all_gpu_scope()) do
             test_sparse_darray(; T=elt, check_tile)
             test_sparse_solvers(; T=elt, check_tile)
+            test_sparse_solve_dispatch(; T=elt, check_tile, expect_direct=false)
             test_sparse_bare_args(; T=elt, writeback_visible = rank == 0)
         end
     end

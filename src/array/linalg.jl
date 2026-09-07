@@ -264,8 +264,12 @@ function LinearAlgebra.inv(A::DMatrix{T}) where T
     dest = DMatrix{S0}(I, n, n, A.partitioning)
     F = LinearAlgebra.factorize(convert(AbstractMatrix{S}, A))
     LinearAlgebra.ldiv!(F, dest)
-    unsafe_free!(F.factors)
-    unsafe_free!(F.ipiv)
+    # Sparse-backed `factorize` returns `DaggerSparseLU` / an iterative wrapper,
+    # which have no dense `factors`/`ipiv` to free.
+    if F isa LinearAlgebra.LU
+        unsafe_free!(F.factors)
+        unsafe_free!(F.ipiv)
+    end
     return dest
 end
 
@@ -404,6 +408,9 @@ function LinearAlgebra.ldiv!(Y::DArray, A::DMatrix, B::DArray)
 end
 
 function LinearAlgebra.ldiv!(A::DMatrix, B::DArray)
+    if is_sparse_backed(A)
+        return _sparse_ldiv!(A, B)
+    end
     F = LinearAlgebra.lu(A)
     LinearAlgebra.ldiv!(F, B)
     unsafe_free!(F.factors)

@@ -43,6 +43,7 @@ const MPIExt = Base.get_extension(Dagger, :MPIExt)
 include(joinpath(@__DIR__, "util.jl"))
 include(joinpath(@__DIR__, "array", "stencil_defs.jl"))
 include(joinpath(@__DIR__, "array", "sparse_defs.jl"))
+include(joinpath(@__DIR__, "array", "sparse_solve_defs.jl"))
 
 Dagger.accelerate!(:mpi)
 Dagger.check_uniformity!(true)
@@ -839,6 +840,9 @@ end
     end
     @testset "Solvers" begin
         test_sparse_solvers(; T=Float64)
+    end
+    @testset "Solve dispatch" begin
+        test_sparse_solve_dispatch(; T=Float64, expect_direct=false)
     end
     @testset "Bare arguments" begin
         # A bare container is replicated per-rank, and Datadeps writes back into

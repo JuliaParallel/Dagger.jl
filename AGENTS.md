@@ -294,3 +294,12 @@ lesson.
    and died in `ipc_export(::Matrix)`. Stamp the result from
    `value_memory_space`, and do not select IPC unless the chunktype is a
    GPU array (`ipc_type_eligible`). Space-only `ipc_eligible` is not enough.
+
+27. **`lu(::DMatrix)` / `ldiv!(::DMatrix, ·)` cannot see the tile backend.** A
+   sparse-backed `DMatrix{Float64}` is still `DMatrix{Float64}` and used to hit
+   tiled dense LU — an out-of-memory multiplier that a correctness test on a
+   tiny system will not catch. LinearAlgebra's generic `A \\ b` goes through
+   `lu(A)`. Check `is_sparse_backed` (`darray_tiletype <: DSparseArray`)
+   before taking a dense factorization path; the specific `lu(A, RowMaximum())`
+   / `lu!(A, NoPivot())` methods skip the default-pivot wrapper, so the guard
+   has to live in those methods too.

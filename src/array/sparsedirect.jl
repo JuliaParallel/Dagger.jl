@@ -67,14 +67,87 @@ _splu_required() = throw(ArgumentError(
 klu(A; kwargs...) = _klu_required()
 splu(A; kwargs...) = _splu_required()
 
+# Extension hooks so `lu` / `factorize` / `\\` on a sparse-backed `DMatrix` can
+# pick a loaded backend without the extensions reaching into each other.
+# `nothing` means that backend is not loaded. Preference is UMFPACK (the
+# SparseArrays `lu` analog), then KLU.
+_try_sparse_direct_lu(::Val{S}, ::DMatrix) where S = nothing
+
+function _sparse_direct_lu(A::DMatrix)
+    for backend in (Val(:splu), Val(:klu))
+        F = _try_sparse_direct_lu(backend, A)
+        F !== nothing && return F
+    end
+    return nothing
+end
+
+_sparse_lu_unavailable() = throw(ArgumentError(
+    "lu / factorize / \\ of a sparse-backed DMatrix requires a sparse solver: \
+    `using PureUMFPACK` or `using PureKLU` for a direct factor, or `using Krylov` \
+    for an iterative solve. Dense tiled LU is never used for sparse tiles \
+    (it would densify the operator)."))
+
+"""
+    SparseIterativeFactorization
+
+Returned by `lu` / `factorize` on a sparse-backed [`DMatrix`](@ref) when no
+sparse-direct backend (`PureUMFPACK` / `PureKLU`) is loaded but `Krylov` is.
+Solves use GMRES over the distributed operator; this is **not** a dense LU.
+"""
+struct SparseIterativeFactorization{M}
+    A::M
+    n::Int
+end
+
+Base.size(F::SparseIterativeFactorization) = (F.n, F.n)
+Base.size(F::SparseIterativeFactorization, i::Integer) = i <= 2 ? F.n : 1
+
+# KrylovExt adds the `DMatrix` method; the generic fallback errors instead of
+# densifying. Same specificity pattern as `klu` / `splu`.
+_sparse_iterative_lu(A) = _sparse_lu_unavailable()
+
+function _sparse_lu(A::DMatrix)
+    LinearAlgebra.checksquare(A)
+    F = _sparse_direct_lu(A)
+    F !== nothing && return F
+    return _sparse_iterative_lu(A)
+end
+
+function LinearAlgebra.factorize(A::DMatrix)
+    is_sparse_backed(A) && return _sparse_lu(A)
+    return invoke(LinearAlgebra.factorize, Tuple{AbstractMatrix}, A)
+end
+
+_promote_solve_rhs(A::DMatrix, B::DVector) = B
+_promote_solve_rhs(A::DMatrix, B::DMatrix) = B
+_promote_solve_rhs(A::DMatrix, B::AbstractVector) =
+    distribute(collect(B), Blocks(A.partitioning.blocksize[2]))
+function _promote_solve_rhs(A::DMatrix, B::AbstractMatrix)
+    mb = A.partitioning.blocksize[1]
+    return distribute(collect(B), Blocks(mb, mb))
+end
+
+# LinearAlgebra's generic `A \\ B` calls `istril`/`istriu` then `lu(A)`. The
+# `lu` methods already protect sparse tiles, but intercepting `\\` here keeps
+# structure queries off the sparse operator and is the path packages write.
+function Base.:\(A::DMatrix, B::AbstractVecOrMat)
+    is_sparse_backed(A) && return _sparse_lu(A) \ _promote_solve_rhs(A, B)
+    return invoke(Base.:\, Tuple{AbstractMatrix, AbstractVecOrMat}, A, B)
+end
+
+function _sparse_ldiv!(A::DMatrix, B::DArray)
+    return LinearAlgebra.ldiv!(_sparse_lu(A), B)
+end
+
 """
     DaggerSparseLU
 
 A direct sparse factorization of a sparse `DMatrix`, produced by
-[`Dagger.klu`](@ref) or [`Dagger.splu`](@ref). The underlying factorization is
-pure-Julia and pinned to a single worker (`fact` is a `Chunk`/`DTask` with
-`scope`). Solve `A x = b` with `F \\ b` (returns a `DVector` partitioned like
-`b`) or `ldiv!(x, F, b)`.
+[`Dagger.klu`](@ref), [`Dagger.splu`](@ref), or `lu` / `factorize` on a
+sparse-backed `DMatrix` when those packages are loaded. The underlying
+factorization is pure-Julia and pinned to a single worker (`fact` is a
+`Chunk`/`DTask` with `scope`). Solve `A x = b` with `F \\ b` (returns a
+`DVector` partitioned like `b`) or `ldiv!(x, F, b)`.
 """
 struct DaggerSparseLU{F,S,P}
     fact::F          # pinned factorization (`Chunk` / `DTask`)
@@ -190,6 +263,86 @@ end
 
 function LinearAlgebra.ldiv!(x::DVector, F::DaggerSparseLU, b::DVector)
     return copyto!(x, F \ b)
+end
+
+function _direct_solve_matrix(fact, B::AbstractMatrix)
+    x1 = fact \ B[:, 1]
+    X = similar(B, eltype(x1), size(B))
+    X[:, 1] = x1
+    for j in 2:size(B, 2)
+        X[:, j] = fact \ B[:, j]
+    end
+    return X
+end
+
+function Base.:\(F::DaggerSparseLU, B::DMatrix)
+    size(B, 1) == F.n || throw(DimensionMismatch(
+        "factorization is $(F.n)×$(F.n) but B has $(size(B, 1)) rows"))
+    X = fetch(spawn(_direct_solve_matrix, Options(; compute_scope=F.scope),
+                    F.fact, collect(B)))
+    return distribute(X, B.partitioning)
+end
+
+function Base.:\(F::DaggerSparseLU, b::AbstractVector)
+    return F \ distribute(collect(b), F.part)
+end
+
+function Base.:\(F::DaggerSparseLU, B::AbstractMatrix)
+    bs = F.part.blocksize[1]
+    return F \ distribute(collect(B), Blocks(bs, bs))
+end
+
+function LinearAlgebra.ldiv!(F::DaggerSparseLU, B::DVector)
+    return copyto!(B, F \ B)
+end
+function LinearAlgebra.ldiv!(F::DaggerSparseLU, B::DMatrix)
+    return copyto!(B, F \ B)
+end
+function LinearAlgebra.ldiv!(X::DMatrix, F::DaggerSparseLU, B::DMatrix)
+    return copyto!(X, F \ B)
+end
+
+function Base.:\(F::SparseIterativeFactorization, b::DVector)
+    length(b) == F.n || throw(DimensionMismatch(
+        "factorization is $(F.n)×$(F.n) but b has length $(length(b))"))
+    x, stats = gmres(F.A, b)
+    stats.solved || throw(ArgumentError(
+        "iterative solve of sparse DMatrix failed to converge after $(stats.niter) iterations"))
+    return x
+end
+
+function Base.:\(F::SparseIterativeFactorization, B::DMatrix)
+    size(B, 1) == F.n || throw(DimensionMismatch(
+        "factorization is $(F.n)×$(F.n) but B has $(size(B, 1)) rows"))
+    B_local = collect(B)
+    part = Blocks(F.A.partitioning.blocksize[1])
+    X_local = similar(B_local)
+    for j in axes(B_local, 2)
+        X_local[:, j] = collect(F \ distribute(B_local[:, j], part))
+    end
+    return distribute(X_local, B.partitioning)
+end
+
+function Base.:\(F::SparseIterativeFactorization, b::AbstractVector)
+    return F \ distribute(collect(b), Blocks(F.A.partitioning.blocksize[1]))
+end
+
+function Base.:\(F::SparseIterativeFactorization, B::AbstractMatrix)
+    mb = F.A.partitioning.blocksize[1]
+    return F \ distribute(collect(B), Blocks(mb, mb))
+end
+
+function LinearAlgebra.ldiv!(F::SparseIterativeFactorization, B::DVector)
+    return copyto!(B, F \ B)
+end
+function LinearAlgebra.ldiv!(F::SparseIterativeFactorization, B::DMatrix)
+    return copyto!(B, F \ B)
+end
+function LinearAlgebra.ldiv!(x::DVector, F::SparseIterativeFactorization, b::DVector)
+    return copyto!(x, F \ b)
+end
+function LinearAlgebra.ldiv!(X::DMatrix, F::SparseIterativeFactorization, B::DMatrix)
+    return copyto!(X, F \ B)
 end
 
 # ---- Stage 4b: distributed triangular solves --------------------------------

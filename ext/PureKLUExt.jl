@@ -20,6 +20,10 @@ function Dagger.klu(A::DMatrix; kwargs...)
     return Dagger._spawn_direct_factorization(A, S -> PureKLU.klu(S; kwargs...))
 end
 
+# Preferential hook for `lu` / `factorize` / `\\` on a sparse-backed DMatrix.
+# UMFPACK wins when both extensions are loaded (`Val{:splu}` is tried first).
+Dagger._try_sparse_direct_lu(::Val{:klu}, A::DMatrix) = Dagger.klu(A)
+
 # Per-tile block direct preconditioner.
 function Dagger.BlockKLUPreconditioner(A::DMatrix; kwargs...)
     build = tile -> PureKLU.klu(_as_sparse(Dagger._tile_matrix(tile)); kwargs...)

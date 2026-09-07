@@ -40,6 +40,10 @@ function Dagger.splu(A::DMatrix; distributed::Bool=false, method::Symbol=:trsv,
     end
 end
 
+# Preferential hook for `lu` / `factorize` / `\\` on a sparse-backed DMatrix
+# (SparseArrays' `lu` analog; tried before KLU).
+Dagger._try_sparse_direct_lu(::Val{:splu}, A::DMatrix) = Dagger.splu(A)
+
 # `(Rs .* A)[p, q] == L * U` with unit-lower `L` (explicit stored ones on the
 # diagonal; solve treats it as unit diagonal via `UnitLowerTriangular`).
 function Dagger._extract_lu_factors(F::PureUMFPACK.PureLU)

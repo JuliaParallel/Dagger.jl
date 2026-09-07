@@ -12,6 +12,8 @@ using PureUMFPACK
 using Metis
 using Krylov
 
+include(joinpath(@__DIR__, "..", "sparse_solve_defs.jl"))
+
 # A nonsymmetric, well-conditioned sparse system (advection-diffusion-like).
 function nonsym_1d(T, n)
     return SparseArrays.spdiagm(
@@ -256,6 +258,10 @@ end
                 @test_throws DimensionMismatch F4c \ distribute(rand(nsys ÷ 2), Blocks(bs))
             end
         end
+    end
+
+    @testset "LinearAlgebra dispatch stays sparse" begin
+        test_sparse_solve_dispatch(; expect_direct=true)
     end
 end
 
