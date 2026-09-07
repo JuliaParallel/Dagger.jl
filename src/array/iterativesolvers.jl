@@ -524,18 +524,10 @@ function _asm_copy_intersect!(dest, Ω::UnitRange{Int}, rr::UnitRange{Int},
     return dest
 end
 
-# Default: assemble into a dense block. SparseArraysExt replaces this with a
-# `_gather_sparse` + slice so CSC tiles stay CSC.
-function _asm_assemble_sparse(Ω::UnitRange{Int}, row_ranges, col_ranges, hosts)
-    nΩ = length(Ω)
-    AΩ = zeros(eltype(first(hosts)), nΩ, nΩ)
-    k = 0
-    for jr in eachindex(row_ranges), jc in eachindex(col_ranges)
-        k += 1
-        _asm_copy_intersect!(AΩ, Ω, row_ranges[jr], col_ranges[jc], hosts[k])
-    end
-    return AΩ
-end
+# SparseArraysExt adds a `_gather_sparse` + slice method so CSC tiles stay CSC.
+# The varargs fallback densifies (same signature as `_gather_sparse`'s stub).
+function _asm_assemble_sparse end
+_asm_assemble_sparse(args...) = _asm_assemble_dense(args...)
 
 function _asm_assemble_dense(Ω::UnitRange{Int}, row_ranges, col_ranges, hosts)
     nΩ = length(Ω)
