@@ -128,7 +128,8 @@ function LinearAlgebra._cholesky(A::DMatrix; kwargs...)
     if _sparse_backed_dmatrix(A)
         return _sparse_cholesky(A; kwargs...)
     end
-    return cholesky!(A; kwargs...)
+    # Qualify: a bare `cholesky!` would resolve in Dagger, not LinearAlgebra.
+    return LinearAlgebra.cholesky!(A; kwargs...)
 end
 
 function LinearAlgebra._cholesky(A::DMatrix, pivot; kwargs...)
@@ -137,7 +138,7 @@ function LinearAlgebra._cholesky(A::DMatrix, pivot; kwargs...)
             "Pivoting strategies are not supported for sparse DMatrix cholesky"))
         return _sparse_cholesky(A; kwargs...)
     end
-    return cholesky!(A, pivot; kwargs...)
+    return LinearAlgebra.cholesky!(A, pivot; kwargs...)
 end
 
 function LinearAlgebra.cholesky!(A::DMatrix, ::LinearAlgebra.NoPivot=LinearAlgebra.NoPivot();
