@@ -375,6 +375,10 @@ function SparseArrays.sparse!(A::DArray{T,2}, I::AbstractVector, J::AbstractVect
     end
 end
 
+# I/J are Integer-eltype so these win against SparseArrays'
+# `sparse(I, J, V, m, n, combine)` (otherwise `Blocks` vs `combine` is ambiguous).
+const _COOIndexVec = AbstractVector{<:Integer}
+
 """
     sparse(I, J, V, m, n, [combine=+,] part::Blocks; assignment=:arbitrary)
     sparse(part::Blocks, I, J, V, m, n, [combine=+]; assignment=:arbitrary)
@@ -385,19 +389,19 @@ may be local vectors or `DArray`s. Duplicates use `combine` (`+` by default),
 matching `SparseArrays.sparse`. Existing `sparse(I, J, V)` / `distribute`
 behavior is unchanged.
 """
-function SparseArrays.sparse(I::AbstractVector, J::AbstractVector, V::AbstractVector,
+function SparseArrays.sparse(I::_COOIndexVec, J::_COOIndexVec, V::AbstractVector,
                              m::Integer, n::Integer, combine::Function, part::Blocks{2};
                              assignment::AssignmentType=:arbitrary)
     A = SparseArrays.spzeros(part, _coo_eltype_checked(V), Int(m), Int(n); assignment)
     return SparseArrays.sparse!(A, I, J, V, combine)
 end
-SparseArrays.sparse(I::AbstractVector, J::AbstractVector, V::AbstractVector,
+SparseArrays.sparse(I::_COOIndexVec, J::_COOIndexVec, V::AbstractVector,
                     m::Integer, n::Integer, part::Blocks{2}; assignment::AssignmentType=:arbitrary) =
     SparseArrays.sparse(I, J, V, m, n, +, part; assignment)
-SparseArrays.sparse(I::AbstractVector, J::AbstractVector, V::AbstractVector,
+SparseArrays.sparse(I::_COOIndexVec, J::_COOIndexVec, V::AbstractVector,
                     m::Integer, n::Integer, combine::Function, ::AutoBlocks; assignment::AssignmentType=:arbitrary) =
     SparseArrays.sparse(I, J, V, m, n, combine, Dagger.auto_blocks((Int(m), Int(n))); assignment)
-SparseArrays.sparse(I::AbstractVector, J::AbstractVector, V::AbstractVector,
+SparseArrays.sparse(I::_COOIndexVec, J::_COOIndexVec, V::AbstractVector,
                     m::Integer, n::Integer, ::AutoBlocks; assignment::AssignmentType=:arbitrary) =
     SparseArrays.sparse(I, J, V, m, n, +, AutoBlocks(); assignment)
 
@@ -406,20 +410,20 @@ function _coo_extent(I::AbstractVector)
     return Int(maximum(I))
 end
 
-SparseArrays.sparse(I::AbstractVector, J::AbstractVector, V::AbstractVector,
+SparseArrays.sparse(I::_COOIndexVec, J::_COOIndexVec, V::AbstractVector,
                     part::Blocks{2}; assignment::AssignmentType=:arbitrary) =
     SparseArrays.sparse(I, J, V, _coo_extent(I), _coo_extent(J), +, part; assignment)
-SparseArrays.sparse(I::AbstractVector, J::AbstractVector, V::AbstractVector,
+SparseArrays.sparse(I::_COOIndexVec, J::_COOIndexVec, V::AbstractVector,
                     combine::Function, part::Blocks{2}; assignment::AssignmentType=:arbitrary) =
     SparseArrays.sparse(I, J, V, _coo_extent(I), _coo_extent(J), combine, part; assignment)
 
-SparseArrays.sparse(part::Blocks{2}, I::AbstractVector, J::AbstractVector, V::AbstractVector,
+SparseArrays.sparse(part::Blocks{2}, I::_COOIndexVec, J::_COOIndexVec, V::AbstractVector,
                     m::Integer, n::Integer; assignment::AssignmentType=:arbitrary) =
     SparseArrays.sparse(I, J, V, m, n, +, part; assignment)
-SparseArrays.sparse(part::Blocks{2}, I::AbstractVector, J::AbstractVector, V::AbstractVector,
+SparseArrays.sparse(part::Blocks{2}, I::_COOIndexVec, J::_COOIndexVec, V::AbstractVector,
                     m::Integer, n::Integer, combine::Function; assignment::AssignmentType=:arbitrary) =
     SparseArrays.sparse(I, J, V, m, n, combine, part; assignment)
-SparseArrays.sparse(part::AutoBlocks, I::AbstractVector, J::AbstractVector, V::AbstractVector,
+SparseArrays.sparse(part::AutoBlocks, I::_COOIndexVec, J::_COOIndexVec, V::AbstractVector,
                     m::Integer, n::Integer; assignment::AssignmentType=:arbitrary) =
     SparseArrays.sparse(I, J, V, m, n, part; assignment)
 
