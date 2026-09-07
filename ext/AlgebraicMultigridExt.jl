@@ -142,8 +142,8 @@ function Dagger.GlobalAMG(A::DMatrix;
                           max_levels::Integer=3,
                           max_coarse::Integer=32,
                           relax::Real=2 / 3,
-                          presweeps::Integer=1,
-                          postsweeps::Integer=1,
+                          presweeps::Integer=2,
+                          postsweeps::Integer=2,
                           jacobi_ω::Real=4 / 3,
                           kwargs...)
     method === :smoothed_aggregation || method === :ruge_stuben || throw(ArgumentError(

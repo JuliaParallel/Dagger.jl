@@ -271,8 +271,8 @@ r = similar(b); mul!(r, DA, x); axpy!(-1, b, r)
 ```
 
 This is a first cut (unsmoothed or Jacobi-smoothed aggregation, 1–2 coarse
-levels, damped-Jacobi sweeps, gathered LU on the coarsest grid). Setup still
-gathers the current level to build `P`; RAP and the V-cycle do not.
+levels, two damped-Jacobi sweeps each side, gathered LU on the coarsest grid).
+Setup still gathers the current level to build `P`; RAP and the V-cycle do not.
 
 ### Choosing a preconditioner
 

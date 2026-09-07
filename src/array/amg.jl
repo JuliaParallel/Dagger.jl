@@ -45,7 +45,9 @@ Keyword arguments:
 - `max_levels=3`, `max_coarse=32` — stop after this many levels, or when the
   operator is this small (then a gathered LU is the coarse solver).
 - `smooth=true` — Jacobi-smooth the tentative aggregation `P` (SA only).
-- `relax=2/3`, `presweeps=1`, `postsweeps=1` — damped-Jacobi V-cycle sweeps.
+- `relax=2/3`, `presweeps=2`, `postsweeps=2` — damped-Jacobi V-cycle sweeps.
+  One sweep each side is not enough for the coarse correction to beat
+  Jacobi-only on 1-D Poisson; two is the smallest count that does.
 
 Requires `AlgebraicMultigrid.jl`. A first cut: 1–2 coarse levels is enough
 for a real coarse grid; this is not HYPRE BoomerAMG.
