@@ -194,10 +194,55 @@ sort!(within_noise; by = last, rev = true)
 
 pct(r) = string(round((r - 1) * 100; digits = 1), "%")
 
+# --- Per-job summary (counts at a glance, no need to open the detail lists) -
+#
+# A "job" is a benchmark's `suite/method[+accels]` prefix -- e.g.
+# `stencil/dagger` -- which is exactly one entry of the `BENCHMARK` spec
+# (`suite:method+accel,...;...`). Grouping at that level keeps the summary to
+# one row per suite/method combination actually run, regardless of how many
+# individual benchmarks or metrics it contains.
+job_of(name) = join(split(name, '/')[1:min(2, end)], "/")
+
+job_names = Set{String}()
+for (name, _) in cur
+    name == "time_to_load" && continue
+    push!(job_names, job_of(name))
+end
+
+function job_tally(entries)
+    counts = Dict{String,Int}()
+    for (name, _metric, _ratio) in entries
+        j = job_of(name)
+        counts[j] = get(counts, j, 0) + 1
+    end
+    return counts
+end
+job_regression_counts = job_tally(regressions)
+job_improvement_counts = job_tally(improvements)
+job_noise_counts = job_tally(within_noise)
+
+# Worst jobs (most regressions, then fewest improvements) sort to the top.
+job_summary_rows = [(j, get(job_regression_counts, j, 0), get(job_improvement_counts, j, 0),
+                      get(job_noise_counts, j, 0)) for j in job_names]
+sort!(job_summary_rows; by = r -> (-r[2], -r[3], r[1]))
+
+function job_summary_table(io, rows)
+    println(io, "| Job | Regressions | Improvements | Within noise |")
+    println(io, "|:---|---:|---:|---:|")
+    for (job, nreg, nimp, nnoise) in rows
+        marker = nreg > 0 ? " ⚠️" : (nimp > 0 ? " ✅" : "")
+        println(io, "| `", job, "`", marker, " | ", nreg, " | ", nimp, " | ", nnoise, " |")
+    end
+end
+
 # --- Markdown report (for the Buildkite annotation / optional PR comment) ---
 
 open(joinpath(OUTPUT_DIR, "report.md"), "w") do io
     println(io, "### Dagger benchmarks: `$CUR_REV` vs `$BASE_REV`")
+    println(io)
+    println(io, "#### Summary by job")
+    println(io)
+    job_summary_table(io, job_summary_rows)
     println(io)
     println(io, "#### Median time")
     println(io)
@@ -255,6 +300,9 @@ open(joinpath(OUTPUT_DIR, "report.md"), "w") do io
 end
 
 # --- Summary + exit status -------------------------------------------------
+
+println("\nSummary by job:\n")
+job_summary_table(stdout, job_summary_rows)
 
 if !isempty(within_noise)
     println("\n$(length(within_noise)) metric(s) moved past their threshold but stayed within the measured spread (not counted):")

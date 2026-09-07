@@ -127,7 +127,7 @@ function supported(f, label)
 end
 
 const bench_seconds = parse(Float64, get(ENV, "BENCHMARK_SECONDS", "30"))
-const bench_samples = parse(Int, get(ENV, "BENCHMARK_SAMPLES", "5"))
+const bench_samples = parse(Int, get(ENV, "BENCHMARK_SAMPLES", "7"))
 
 # Rendering/logging are not used under AirspeedVelocity; these globals are kept
 # defined because the suite files reference them.
