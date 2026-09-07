@@ -296,3 +296,15 @@ lesson.
    and died in `ipc_export(::Matrix)`. Stamp the result from
    `value_memory_space`, and do not select IPC unless the chunktype is a
    GPU array (`ipc_type_eligible`). Space-only `ipc_eligible` is not enough.
+
+27. **One damped-Jacobi sweep each side of a GlobalAMG V-cycle can be worse
+   than Jacobi-only.** On 1-D Poisson the distributed apply matched a host
+   reference bit-for-bit, the coarse LU was exact, and RAP was `P'AP` — and
+   a 1+1 V-cycle still *increased* `‖Ax−b‖` relative to two Jacobi sweeps
+   (n=128: 1.06 vs 0.90). The coarse correction is only a win once the
+   smoother has taken enough high-frequency error; two pre and two post
+   sweeps is the smallest count that beat Jacobi (0.31 vs 0.89) and cut
+   GMRES from 128 iterations to 7. A residual cutoff like `< 0.85` is also
+   RNG-brittle; assert the V-cycle beats the same number of Jacobi sweeps.
+   And Krylov `stats.solved` at `rtol=1e-8` / `memory=50` left the true
+   residual around 2e-6 — stop tighter, then check `‖Ax−b‖`.
