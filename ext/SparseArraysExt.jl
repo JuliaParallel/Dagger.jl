@@ -25,6 +25,34 @@ function Dagger._gather_sparse(::Type{T}, tiles, row_offsets, col_offsets, m, n)
     return SparseArrays.sparse(Is, Js, Vs, m, n)
 end
 
+# Overlapping ASM: assemble the halo-expanded block from already-host tiles
+# without densifying. Offsets are relative to the bounding box of the
+# intersecting tiles; the result is then sliced down to `Ω`.
+function Dagger._asm_assemble_sparse(Ω::UnitRange{Int}, row_ranges, col_ranges, hosts)
+    T = eltype(first(hosts))
+    r0 = first(first(row_ranges))
+    r1 = last(last(row_ranges))
+    c0 = first(first(col_ranges))
+    c1 = last(last(col_ranges))
+    m = r1 - r0 + 1
+    n = c1 - c0 + 1
+    ntiles = length(hosts)
+    row_offsets = Vector{Int}(undef, ntiles)
+    col_offsets = Vector{Int}(undef, ntiles)
+    tiles = Vector{Any}(undef, ntiles)
+    k = 0
+    for jr in eachindex(row_ranges), jc in eachindex(col_ranges)
+        k += 1
+        row_offsets[k] = first(row_ranges[jr]) - r0
+        col_offsets[k] = first(col_ranges[jc]) - c0
+        tiles[k] = hosts[k]
+    end
+    S = Dagger._gather_sparse(T, tiles, row_offsets, col_offsets, m, n)
+    ri = (first(Ω) - r0 + 1):(last(Ω) - r0 + 1)
+    ci = (first(Ω) - c0 + 1):(last(Ω) - c0 + 1)
+    return S[ri, ci]
+end
+
 # Dense → sparse for Stage-4c Schur complements (fill-in is expected).
 Dagger._sparse_copy_of(S::AbstractMatrix) = SparseArrays.sparse(S)
 Dagger._sparse_copy_of(S::SparseMatrixCSC) = S

@@ -294,3 +294,13 @@ lesson.
    and died in `ipc_export(::Matrix)`. Stamp the result from
    `value_memory_space`, and do not select IPC unless the chunktype is a
    GPU array (`ipc_type_eligible`). Space-only `ipc_eligible` is not enough.
+
+27. **Restricted additive Schwarz writes back only the interior.**
+   `AdditiveSchwarzPreconditioner` is PETSc `PC_ASM_RESTRICT`: the subdomain
+   solve sees the halo-expanded residual (`A[Ω,Ω] \\ x[Ω]`), but interpolation
+   ignores overlap values and writes only the owned interior. Interiors
+   partition `1:n`, so there is no overlap reduction. Overlap 0 is block
+   Jacobi. Index-range overlap (grow the tile's row/column set by `overlap`
+   on each side) matches graph overlap on 1-D stencils; neighbor tiles are
+   gathered onto the interior tile's worker. Check the true residual
+   (lesson 19), not only `stats.solved`.

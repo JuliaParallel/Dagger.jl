@@ -170,6 +170,7 @@ The built-in preconditioners, from cheapest to strongest:
 |--------------------------------------|------------------------|--------------------------------------------|
 | [`Dagger.JacobiPreconditioner`](@ref)      | (core)            | scale by `1 ./ diag(A)`                    |
 | [`Dagger.BlockJacobiPreconditioner`](@ref) | (core)            | exact `lu` solve per diagonal tile         |
+| [`Dagger.AdditiveSchwarzPreconditioner`](@ref) | (core)        | overlapping ASM (`PC_ASM_RESTRICT`; default overlap 1) |
 | [`Dagger.BlockILUPreconditioner`](@ref)    | `IncompleteLU`    | incomplete-LU (drop tol `τ`) per tile      |
 | [`Dagger.AMGPreconditioner`](@ref)         | `AlgebraicMultigrid` | AMG V-cycle per tile                    |
 
@@ -177,9 +178,16 @@ The built-in preconditioners, from cheapest to strongest:
 using AlgebraicMultigrid, IncompleteLU
 
 x, _ = Krylov.cg(DA, b; M = Dagger.BlockJacobiPreconditioner(DA))
+x, _ = Krylov.gmres(DA, b; M = Dagger.AdditiveSchwarzPreconditioner(DA; overlap = 1))
 x, _ = Krylov.cg(DA, b; M = Dagger.BlockILUPreconditioner(DA; τ = 0.01))
 x, _ = Krylov.gmres(DA, b; M = Dagger.AMGPreconditioner(DA; method = :ruge_stuben))
 ```
+
+`AdditiveSchwarzPreconditioner` is overlapping restricted additive Schwarz
+(PETSc `PCASM` / `PC_ASM_RESTRICT`): each tile solves a halo-expanded diagonal
+block and writes back only its interior. `overlap = 0` is
+`BlockJacobiPreconditioner`; the default `overlap = 1` is PETSc's default
+multiprocess PC. Overlap rows gather neighbor tiles onto the tile's worker.
 
 ### Bringing your own preconditioner
 
@@ -254,7 +262,9 @@ structure follows the *finer* of the two block sizes.
 - **Quick baseline / very well-conditioned systems:** `JacobiPreconditioner` (or
   none) may suffice.
 - **Strong per-subdomain coupling:** `BlockJacobiPreconditioner` (exact tile
-  solves) is stronger than diagonal Jacobi.
+  solves) is stronger than diagonal Jacobi. For unstructured problems that
+  need neighbor coupling, `AdditiveSchwarzPreconditioner` (overlap 1–2) is
+  the PETSc-default next step.
 
 ## Sparse direct solvers
 
@@ -320,6 +330,7 @@ Dagger.JacobiPreconditioner
 Dagger.AbstractBlockPreconditioner
 Dagger.BlockPreconditioner
 Dagger.BlockJacobiPreconditioner
+Dagger.AdditiveSchwarzPreconditioner
 Dagger.BlockILUPreconditioner
 Dagger.AMGPreconditioner
 Dagger.BlockKLUPreconditioner
