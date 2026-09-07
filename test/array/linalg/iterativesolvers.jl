@@ -508,3 +508,88 @@ end
         @test_throws ArgumentError Krylov.lsqr(A, Db)
     end
 end
+
+# 1-D Neumann Laplacian: rows sum to zero, so the constants are the kernel.
+# Dirichlet `laplacian_1d` above is SPD (diag 4) and is the wrong operator for
+# a nullspace test.
+function neumann_laplacian_1d(T, n)
+    d = fill(T(2), n)
+    d[1] = one(T)
+    d[n] = one(T)
+    return SparseArrays.spdiagm(
+        -1 => fill(-one(T), n - 1),
+         0 => d,
+         1 => fill(-one(T), n - 1),
+    )
+end
+
+@testset "Projected nullspace (Neumann Poisson)" begin
+    n = 32
+    k = 8
+    A_part = Blocks(k, k)
+    b_part = Blocks(k)
+
+    Asp = neumann_laplacian_1d(Float64, n)
+    Ahost = Matrix(Asp)
+    @test all(abs.(sum(Ahost; dims=2)) .<= 10 * eps(Float64))   # row sums ~ 0
+
+    # Compatible RHS: drop the constant so b ⊥ ker(A').
+    b = rand(n)
+    b .-= sum(b) / n
+    Nhost = fill(1 / sqrt(n), n)
+    xref = LinearAlgebra.pinv(Ahost) * b          # minimum-norm particular solution
+
+    @testset "$(backend) operator" for backend in (:dense, :sparse)
+        DA = backend === :dense ? distribute(Ahost, A_part) : distribute(Asp, A_part)
+        Db = distribute(b, b_part)
+        # Raw ones: the constructor orthonormalizes (‖ones‖ = √n).
+        DN = distribute(ones(n), b_part)
+        PA = Dagger.Projected(DA, DN)
+
+        @test size(PA) == (n, n)
+        @test eltype(PA) == Float64
+
+        # project! drops the constant from an arbitrary vector.
+        z = distribute(rand(n), b_part)
+        Dagger.project!(z, PA.left)
+        @test abs(sum(collect(z))) < 1e-12
+
+        # mul! is P A P: project the input, apply A, project the output.
+        x = rand(n)
+        xt = x .- Nhost .* dot(Nhost, x)
+        yref = Ahost * xt
+        yref .-= Nhost .* dot(Nhost, yref)
+        y = similar(Db)
+        mul!(y, PA, distribute(x, b_part))
+        @test collect(y) ≈ yref
+
+        # Adjoint path (same N for this symmetric operator).
+        mul!(y, PA', distribute(x, b_part))
+        @test collect(y) ≈ yref
+
+        # Krylov on the projected operator. True residual of the *unwrapped*
+        # A must be orthogonal to the constant; the particular solution is
+        # unique only up to ker(A), so compare after removing the mean.
+        for solver in (Krylov.minres, Krylov.cg, Dagger.minres)
+            xsol, stats = solver(PA, Db; atol = 1e-12, rtol = 1e-10, itmax = 500)
+            @test stats.solved
+            xh = collect(xsol)
+            r = Ahost * xh - b
+            @test abs(dot(ones(n), r)) < 1e-8
+            @test norm(r) / norm(b) < 1e-6
+            @test xh .- sum(xh) / n ≈ xref rtol = 1e-5
+        end
+    end
+
+    # Multi-column basis stored as a DMatrix (one column here, the same
+    # constant mode) — the gemv project! path, not the DVector shortcut.
+    DA = distribute(Asp, A_part)
+    Db = distribute(b, b_part)
+    DN1 = distribute(reshape(ones(n), n, 1), Blocks(k, k))
+    PA1 = Dagger.Projected(DA, DN1)
+    xsol, stats = Krylov.minres(PA1, Db; atol = 1e-12, rtol = 1e-10, itmax = 500)
+    @test stats.solved
+    r = Ahost * collect(xsol) - b
+    @test abs(dot(ones(n), r)) < 1e-8
+    @test norm(r) / norm(b) < 1e-6
+end

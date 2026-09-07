@@ -143,6 +143,7 @@ include("array/lu.jl")
 include("array/qr.jl")
 include("array/svd.jl")
 include("array/iterativesolvers.jl")
+include("array/projected.jl")
 include("array/sparsedirect.jl")
 
 # GPU

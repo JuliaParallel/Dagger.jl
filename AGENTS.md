@@ -294,3 +294,14 @@ lesson.
    and died in `ipc_export(::Matrix)`. Stamp the result from
    `value_memory_space`, and do not select IPC unless the chunktype is a
    GPU array (`ipc_type_eligible`). Space-only `ipc_eligible` is not enough.
+
+27. **`Adjoint` is an `AbstractMatrix` even when its parent is not.** A
+   matrix-free wrapper (`Projected`, a stencil, a nested operator) should
+   *not* subtype `AbstractMatrix` — LinearAlgebra's generic `mul!` would
+   scalar-index it. But `A'` is `Adjoint{T,typeof(A)} <: AbstractMatrix{T}`
+   regardless of `typeof(A)`, and two-sided Krylov (`bilq`, `qmr`, least
+   squares) does `Aᴴ = A'` then `mul!(y, Aᴴ, x)`. Without a more-specific
+   `mul!(y::DVector, ::Adjoint{<:Any,<:YourOp}, x::DVector)`, that product
+   falls into the generic AbstractMatrix path and dies on scalar indexing
+   (or silently gathers). Define the adjoint/transpose `mul!` next to the
+   forward one. The same trap applies to `Transpose`.
