@@ -423,4 +423,46 @@ SparseArrays.sparse(part::AutoBlocks, I::AbstractVector, J::AbstractVector, V::A
                     m::Integer, n::Integer; assignment::AssignmentType=:arbitrary) =
     SparseArrays.sparse(I, J, V, m, n, part; assignment)
 
+"""
+    sparse(A::DMatrix) -> SparseMatrixCSC
+
+Gather a tiled `DMatrix` into one host `SparseMatrixCSC`. Sparse tiles are
+concatenated from their existing nonzeros (no densifying `cat`); a dense
+`DMatrix` is `collect`ed and then converted. `collect(A)` itself still
+returns a dense `Array`.
+"""
+function SparseArrays.sparse(A::Dagger.DMatrix{T}) where T
+    A = fetch(A)
+    isempty(A.chunks) && return SparseArrays.spzeros(T, size(A)...)
+    c0 = Dagger._resolved_chunk(first(A.chunks))
+    if Dagger.chunktype(c0) <: Dagger.DSparseArray
+        return Dagger.uniform_execution() ? _sparse_from_tiles(A) :
+               Dagger._collect_sparse_dmatrix(A)
+    else
+        return SparseArrays.sparse(Base.collect(A))
+    end
+end
+
+function _sparse_from_tiles(A::Dagger.DMatrix{T}) where T
+    m, n = size(A)
+    Ac = A.chunks
+    mt, nt = size(Ac)
+    ntiles = mt * nt
+    row_offsets = Vector{Int}(undef, ntiles)
+    col_offsets = Vector{Int}(undef, ntiles)
+    tiles = Vector{Any}(undef, ntiles)
+    idx = 1
+    for i in 1:mt, j in 1:nt
+        dom = A.subdomains[i, j]
+        row_offsets[idx] = first(dom.indexes[1]) - 1
+        col_offsets[idx] = first(dom.indexes[2]) - 1
+        tiles[idx] = Ac[i, j]
+        idx += 1
+    end
+    scope = Dagger._select_factor_scope(A)
+    return fetch(Dagger.spawn(Dagger._gather_sparse_from_tiles,
+                              Dagger.Options(; compute_scope=scope),
+                              T, row_offsets, col_offsets, m, n, tiles...))
+end
+
 end # module SparseArraysExt

@@ -101,10 +101,12 @@ global CSC would not fit on one process.
 
 ### Converting back to a dense array
 
-`collect` gathers the tiles and returns a **dense** `Array`:
+`collect` gathers the tiles and returns a **dense** `Array`. To gather without
+densifying, use `sparse` on the `DArray`:
 
 ```julia
 M = collect(DA)   # dense Matrix{Float64}
+S = sparse(DA)    # SparseMatrixCSC, assembled from tile nonzeros
 ```
 
 To keep data sparse and distributed, operate on the `DArray` directly rather
@@ -232,7 +234,7 @@ suite; prefer `SparseArrays` unless you specifically need a Finch format.
 
 ## Limitations
 
-- `collect` densifies; there is no sparse-preserving global gather.
+- `collect` densifies; use `sparse(DA)` to gather tiles into one `SparseMatrixCSC`.
 - A sparse tile is aliased as a whole — Datadeps cannot track independent writes
   to disjoint sub-regions of a single sparse tile (use finer tiling instead).
 - Not every dense `DArray` operation has a sparse counterpart yet; sparse support

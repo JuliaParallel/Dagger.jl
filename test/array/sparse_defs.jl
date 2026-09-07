@@ -302,3 +302,18 @@ function test_sparse_assembly(; scope=nothing, check_tile=nothing, T=Float64)
         @test collect(SparseArrays.sparse(I, J, V, n, n, part_rect)) ≈ Matrix(Aref)
     end
 end
+
+# `collect` densifies; `sparse(::DMatrix)` gathers tiles without a dense cat.
+function test_sparse_collect(; scope=nothing, T=Float64)
+    n, k = 16, 4
+    part = Blocks(k, k)
+    Aref = sparse_defs_laplacian_1d(T, n)
+    _sparse_defs_with_scope(scope) do
+        DA = distribute(Aref, part)
+        S = SparseArrays.sparse(DA)
+        @test S isa SparseArrays.SparseMatrixCSC
+        @test S ≈ Aref
+        DD = distribute(Matrix(Aref), part)
+        @test SparseArrays.sparse(DD) ≈ Aref
+    end
+end

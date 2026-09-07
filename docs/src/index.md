@@ -395,7 +395,7 @@ y = DA * x        # distributed sparse matrix-vector multiply (dense result)
 C = DA * DA       # distributed sparse-sparse matmul (sparse result)
 ```
 
-`collect(DA)` returns a dense `Array`; operate on the `DArray` to stay sparse.
+`collect(DA)` returns a dense `Array`; `sparse(DA)` gathers to a `SparseMatrixCSC`. Operate on the `DArray` to stay distributed.
 
 -----
 

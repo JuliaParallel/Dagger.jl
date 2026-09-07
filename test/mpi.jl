@@ -847,6 +847,7 @@ end
     end
     @testset "Assembly" begin
         test_sparse_assembly(; T=Float64)
+        test_sparse_collect(; T=Float64)
     end
 end
 

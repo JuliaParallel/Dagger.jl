@@ -113,6 +113,12 @@ function _gather_sparse end
 _gather_sparse(args...) = throw(ArgumentError(
     "gathering a sparse DMatrix requires SparseArrays to be loaded"))
 
+# Named so a gather task can take tiles as spawn arguments (scheduler moves
+# them) rather than a single Array-of-chunks that would not be walked.
+function _gather_sparse_from_tiles(::Type{T}, row_offsets, col_offsets, m, n, tiles...) where T
+    return _gather_sparse(T, tiles, row_offsets, col_offsets, m, n)
+end
+
 # Backend-specific extraction of `(L, U, p, q, Rs)` from a factored object.
 # Implemented for `PureUMFPACK.PureLU` in `PureUMFPACKExt`.
 function _extract_lu_factors end
