@@ -144,6 +144,7 @@ include("array/qr.jl")
 include("array/svd.jl")
 include("array/iterativesolvers.jl")
 include("array/sparsedirect.jl")
+include("array/amg.jl")
 
 # GPU
 include("gpu.jl")
