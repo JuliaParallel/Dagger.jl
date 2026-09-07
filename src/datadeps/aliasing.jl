@@ -460,8 +460,13 @@ function resolve_pending!(cache::AliasedObjectCacheStore)
     # rendezvous per copy, which asking one at a time here would reintroduce.
     values = Chunk[value for (_, value) in entries]
     dep_mods = Any[identity for _ in entries]
-    for (i, ainfo) in enumerate(batch_ainfos(cache.accel, values, dep_mods))
-        cache.derived[ainfo] = first(entries[i])
+    for (i, value_ainfo) in enumerate(batch_ainfos(cache.accel, values, dep_mods))
+        key, value = entries[i]
+        cache.derived[value_ainfo] = key
+        # Keep `value_ainfo` around: this is the one point where the buffer's own
+        # aliasing is computed on every rank, and the free loop needs it later.
+        ainfos_dict = get!(Dict{AbstractAliasing,AbstractAliasing}, cache.value_ainfos, memory_space(value))
+        ainfos_dict[key] = value_ainfo
     end
     return true
 end
@@ -508,10 +513,6 @@ function set_stored!(cache::AliasedObjectCacheStore, dest_space::MemorySpace, va
     push!(get!(Set{AbstractAliasing}, cache.stored, dest_space), key)
     values_dict = get!(Dict{AbstractAliasing,Chunk}, cache.values, dest_space)
     values_dict[key] = value
-    # Keep `value_ainfo` around: this is the one point where the buffer's own
-    # aliasing is computed on every rank, and the free loop needs it later.
-    ainfos_dict = get!(Dict{AbstractAliasing,AbstractAliasing}, cache.value_ainfos, dest_space)
-    ainfos_dict[key] = value_ainfo
     return
 end
 
@@ -519,14 +520,21 @@ end
     stored_value_ainfo(cache, space, key) -> Union{AbstractAliasing,Nothing}
 
 The aliasing of the buffer `cache.values[space][key]` *in `space`*, as recorded
-by `set_stored!` when the buffer was allocated. `nothing` for the user's
-original data, which never gets one (and is never freed).
+by `set_stored!` when the buffer was allocated (possibly deferred; see
+`resolve_pending!`). `nothing` for the user's original data, which never gets
+one (and is never freed).
 
 This is deliberately a lookup rather than a fresh `aliasing` call: under uniform
 (SPMD) execution `aliasing` is a collective, so the buffer's extent cannot be
-recomputed once planning is over.
+recomputed once planning is over. A miss instead resolves any batch of copies
+still pending, exactly like `derived_key` -- the free loop may be the first
+thing to ask about a copy that no other lookup happened to flush already.
 """
 function stored_value_ainfo(cache::AliasedObjectCacheStore, space::MemorySpace, key::AbstractAliasing)
+    ainfos = get(cache.value_ainfos, space, nothing)
+    value = ainfos === nothing ? nothing : get(ainfos, key, nothing)
+    value === nothing || return value
+    resolve_pending!(cache) || return nothing
     ainfos = get(cache.value_ainfos, space, nothing)
     ainfos === nothing && return nothing
     return get(ainfos, key, nothing)
