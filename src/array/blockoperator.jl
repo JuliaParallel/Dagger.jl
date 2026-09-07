@@ -38,7 +38,14 @@ struct BlockOperator{B}
 end
 
 function BlockOperator(A11, A12, A21, A22; row_sizes=nothing, col_sizes=nothing)
-    return BlockOperator(Any[A11 A12; A21 A22]; row_sizes, col_sizes)
+    # Do *not* write `Any[A11 A12; A21 A22]`: DMatrix <: AbstractArray, so
+    # hvcat concatenates tiles into one DMatrix{Any} (see AGENTS.md lesson 28).
+    blocks = Matrix{Any}(undef, 2, 2)
+    blocks[1, 1] = A11
+    blocks[1, 2] = A12
+    blocks[2, 1] = A21
+    blocks[2, 2] = A22
+    return BlockOperator(blocks; row_sizes, col_sizes)
 end
 
 function BlockOperator(blocks::NTuple{4,Any}; row_sizes=nothing, col_sizes=nothing)
