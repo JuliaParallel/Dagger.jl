@@ -132,21 +132,24 @@ function _orthonormalize_basis(N::DVector)
 end
 
 function _orthonormalize_basis(N::DMatrix)
-    Q = copy(N)
-    k = size(Q, 2)
+    # Tall-skinny (n × k, k typically 1–6): gather, MGS on the host, redistribute.
+    # Column `getindex` of a DMatrix is an n×1 DArray whose tiles are themselves
+    # DArrays; `rmul!` then asks Datadeps to alias a `DArray` and throws
+    # `ConcurrencyViolationError`. Construction is not a hot path.
+    Qh = Matrix(collect(N))
+    k = size(Qh, 2)
     for j in 1:k
-        qj = Q[:, j]
+        qj = view(Qh, :, j)
         for i in 1:j-1
-            qi = Q[:, i]
+            qi = view(Qh, :, i)
             LinearAlgebra.axpy!(-LinearAlgebra.dot(qi, qj), qi, qj)
         end
-        nrm = LinearAlgebra.norm2(qj)
+        nrm = LinearAlgebra.norm(qj)
         iszero(nrm) && throw(ArgumentError(
             "nullspace column $j is linearly dependent (or zero)"))
         LinearAlgebra.rmul!(qj, inv(nrm))
-        Q[:, j] = qj
     end
-    return Q
+    return distribute(Qh, N.partitioning)
 end
 
 # Copy-and-project the input so `mul!(y, A, x)` never mutates `x`. The extra
