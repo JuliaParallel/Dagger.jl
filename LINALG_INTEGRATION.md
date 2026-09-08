@@ -6,7 +6,7 @@ branches; they do **not** merge into this workspace branch, and they do **not**
 edit other agents' rows here. Report status in your final message so the
 coordinator can update the table.
 
-Last coordinator pass: 2026-09-08 (P2 workstreams on origin; AWS job `2d19db10113920ac`). All assigned P0/P1 workstreams are merged. Performance / Bottlenecks P0 is **out of scope** this pass.
+Last coordinator pass: 2026-09-08 (P2 completeness merged; AWS job `2d19db10113920ac` still mine). All assigned P0/P1/P2 workstreams that were accepted are merged. Performance / Bottlenecks P0 is **out of scope** this pass. `vmbench.py` now tags EC2 `Name`/`vmbench-label` with the launch `--label` (plus pid/start); **batchd does not pass `label=` into `provision_vm`**, so `batchctl` VMs still get EC2 `Name=vmbench`. Identify jobs by **job id**. Do not `done` by label.
 
 ---
 
@@ -259,10 +259,10 @@ Priority: **P0 done** / **P1 done** = merged onto `Dagger-linalg-ultra`. **P2** 
 | P1 | near-nullspace | done | `linalg/near-nullspace` @ `d2277c01` | `SmoothedAggregationPreconditioner(A; nullspace=N)` and `GlobalAMG(Projected(A, N))`. `AMGPreconditioner` unchanged. Default SA setup is now tiled (`global-amg-distributed-P`); `nullspace=N` still gathers `A`+`N` so coarse levels get `R`. AWS: near-nullspace 40, GlobalAMG 113, iterativesolvers 395. | 2026-09-07 |
 | P1 | block-krylov | done | `linalg/block-krylov` @ `22cc9ae0` | Sparse `A \\ B` / `ldiv!` uses Krylov `block_gmres` (not a column loop). LinearSolve GMRES/MINRES accept `DMatrix` RHS. Kept ultra `_solve_pinned_dvector`; incoming lesson 35 is 45. AWS: iterativesolvers 421, LinearSolve 34. | 2026-09-07 |
 | P1 | slicing | done | `linalg/slicing` @ `48bc09d4` | Range `getindex` / `view` / `setindex!` match Base and stay tiled (one task per tile pair). **`view` remains `SubArray`** (intentional; not a DArray-valued view). StepRange `copyto!` still throws. AWS: indexing 251, copyto 650. | 2026-09-07 |
-| P2 | symm-hemm | in progress | `linalg/symm-hemm` @ `0ae4e350` | Dense `BLAS.symm!` / `BLAS.hemm!` and `mul!` of `Symmetric`/`Hermitian` `DMatrix`. First AWS matmul: 710 pass / 4 error (`BLAS.symm!` ambiguous vs stdlib `AbstractMatrix{Float64}`). Fix: type-specific `Float32`/`Float64` methods. Re-test in flight. | 2026-09-08 |
-| P2 | sparse-qr | in progress | `linalg/sparse-qr` @ `0f93b02e` | Sparse-backed `qr` / `qr!` gather-then-SPQR (`DaggerSparseQR`). First AWS: 15 pass / 1 error (multi-RHS used square `_direct_solve_matrix`). Fix: `_direct_solve` so tall SPQR returns `n×p`. Lesson 46. Re-test pending. | 2026-09-08 |
-| P2 | matrix-io | in progress | `linalg/matrix-io` @ `ec1a8114` | `MatrixMarket.mmread` / `mmwrite` and `DelimitedFiles.readdlm` / `writedlm` on `DArray` / `Blocks`. Sparse write via `_collect_sparse_dmatrix`. AWS pending (instantiate root + test after checkout). | 2026-09-08 |
-| P2 | dense-schur | in progress | `linalg/dense-schur` @ `2c1e32b9` | `schur(::DMatrix)` gather-then-LAPACK for dense tiles; sparse-backed throws. Does **not** replace LOBPCG `eigen`. Lesson 47. AWS pending. | 2026-09-08 |
+| P2 | symm-hemm | done | `linalg/symm-hemm` @ `ce57f916` | Dense `BLAS.symm!` / `BLAS.hemm!` and `mul!` of `Symmetric`/`Hermitian` `DMatrix`. Typed α/β match stdlib; `Number` converts (`1+0im`). AWS matmul 718/718 on job `2d19db10113920ac`. | 2026-09-08 |
+| P2 | sparse-qr | done | `linalg/sparse-qr` @ `0f93b02e` | Sparse-backed `qr` / `qr!` gather-then-SPQR (`DaggerSparseQR`). Multi-RHS uses `_direct_solve` (tall `n×p`). Lesson 46. AWS: sparseqr 18/18, dense qr 184/184. | 2026-09-08 |
+| P2 | matrix-io | done | `linalg/matrix-io` @ `d2a05594` | `MatrixMarket.mmread` / `mmwrite` and `DelimitedFiles.readdlm` / `writedlm` on `DArray` / `Blocks`. Sparse write via `_collect_sparse_dmatrix`. AWS: matrixio 9/9 (`Pkg.resolve()` on the test project). | 2026-09-08 |
+| P2 | dense-schur | done | `linalg/dense-schur` @ `2c1e32b9` | `schur(::DMatrix)` gather-then-LAPACK for dense tiles; sparse-backed throws. Does **not** replace LOBPCG `eigen`. Lesson 47. AWS: schur 8/8, eigen 34/34. | 2026-09-08 |
 | P2 | einsum | skipped | — | **FLAG:** TensorOperations / OMEinsum / Tullio have no honest `DArray` hook (they need a tensor backend). FEATURES_ROADMAP "Einsum" would be a novel `Dagger.einsum`. Skip rather than invent. | 2026-09-08 |
 | P2 | mpi-vecghost | skipped | — | **FLAG:** MPI chunks are already rank-owned; `HaloArray` / `@stencil` already express ghosts. A public `Dagger.VecGhost` would be a new type. Discuss only — do not ship. | 2026-09-08 |
 | P2 | sparse-inv | skipped | — | Already `factorize` + `ldiv!` into `I`. Result is a dense inverse; that is LinearAlgebra's `inv`, not an API hole. | 2026-09-08 |
@@ -298,6 +298,10 @@ Priority: **P0 done** / **P1 done** = merged onto `Dagger-linalg-ultra`. **P2** 
 | 2026-09-07 | `c835b8ab` `linalg/block-krylov` @ `22cc9ae0` | Conflicts: `AGENTS.md` (kept 35–44; incoming block-krylov lesson 35 is 45), `ext/LinearSolveExt.jl` (union: incoming `_require_darray_rhs` / `DMatrix` RHS plus HEAD `lu!` reuse), `src/array/mul.jl` (kept HEAD mixed-eltype GEMM; took incoming host×`DMatrix` GEMM), `test/array/linalg/linearsolve.jl` (kept both `lu!` reuse and multi-RHS testsets). Auto-merge also duplicated `DaggerSparseLU \\ DVector`; kept ultra `_solve_pinned_dvector` and dropped the incoming `invoke`. `FEATURES_ROADMAP.md` / Performance tables unchanged. AWS: iterativesolvers 421, LinearSolve 34. |
 | 2026-09-08 | tracking doc + profile harness | `linalg_profile.jl` (`LINALG_BENCH_PROFILE=…`) and a Bottlenecks section from AWS MT profiles at `862841e5`. No Dagger API changes. |
 | 2026-09-08 | tracking doc only | P2 backlog: accept `symm-hemm`, `sparse-qr`, `matrix-io`, `dense-schur`. Flag/skip einsum, VecGhost, sparse `inv`, BSR, stencil GMG transfers. No feature-branch merges yet. |
+| 2026-09-08 | `ced9fdd0` `linalg/symm-hemm` @ `ce57f916` | No conflicts. AWS matmul 718/718. |
+| 2026-09-08 | `7186a439` `linalg/sparse-qr` @ `0f93b02e` | No conflicts. Lesson 46. AWS sparseqr 18, qr 184. Kept ultra `_solve_pinned_dvector`. |
+| 2026-09-08 | `026385e6` `linalg/dense-schur` @ `2c1e32b9` | Conflict: `AGENTS.md` (kept sparse-QR 46; incoming schur is 47). Docs/`runtests` auto-merged. AWS schur 8, eigen 34. |
+| 2026-09-08 | `0770052b` `linalg/matrix-io` @ `d2a05594` | No conflicts. AWS matrixio 9/9. |
 
 ## Remaining follow-ups
 
@@ -324,7 +328,7 @@ P2 flags (completeness, not scheduled):
 - **`@stencil` restriction/prolongation** — not usable for GMG (lesson 37). Matrix `GeometricMultigrid` is the transfer path.
 - **Full dense geev / ScaLAPACK Schur** — not required. `eigen` stays LOBPCG; P2 `schur` is gather-then-LAPACK for dense tiles only.
 
-`AGENTS.md` lessons 27–45 are the union of the per-workstream lesson 27s (LinearSolve `DefaultLinearSolver`; ASM `:restrict` / `:basic`; GlobalAMG vs per-tile residual; qualify `cholesky!`/`mul!`; `SparseCOOBucket` not in datadeps; Projected orthonormalize / `Adjoint` `mul!`; `hvcat` is not `MatNest`; GPU block-PC `ProcessScope` gather; sparse `lu!(F, A)` / PureUMFPACK cannot cheap-refactor; `@stencil` cannot express GMG transfers; `view(::DArray)` stays `SubArray`; near-nullspace on the GlobalAMG constructor; graph partition is `partitioner=`/`perm=` on geometric `Blocks`, not `Dagger.metis`; mixed-eltype `mul!` / FP32 PC apply; tiled GlobalAMG `P` does not collect `A`; `eigen(::DMatrix)` is LOBPCG, not dense geev; host CSR tiles need range `getindex` / rebuild `copyto_view`; block Krylov cannot use one `SM` for both the tall basis and the Hessenberg). Lesson 20 remains unused (pre-existing gap).
+`AGENTS.md` lessons 27–47 are the union of the per-workstream lessons (through block Krylov 45; sparse `qr` is 46; dense `schur` is 47). Lesson 20 remains unused (pre-existing gap). Lesson 35 is GPU-PC; do not reuse that number.
 
 ---
 
