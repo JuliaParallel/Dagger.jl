@@ -423,4 +423,7 @@ lesson.
    `AbstractMatrix{FC}` / `AbstractVector{FC}` parameterization *and* the
    `FC <: FloatOrComplex` bound; specializing only `Q` or leaving `FC`
    unconstrained is less specific on `R`/`τ`/`buffer` and is ambiguous
-   with the generic.
+   with the generic. Same for `mul!(::SM, A, B, α, β)` versus LinearAlgebra's
+   `mul!(::AbstractMatrix, ::AbstractVecOrMat, ::AbstractVecOrMat, α, β)`:
+   add the `AbstractVecOrMat` arm; keep an unconstrained `A` for matrix-free
+   operators.

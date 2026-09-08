@@ -230,6 +230,18 @@ function LinearAlgebra.mul!(C::BlockKrylovMatrix, A, B, α::Number, β::Number)
     LinearAlgebra.mul!(_bk_data(C), _bk_data(A), _bk_data(B), α, β)
     return C
 end
+# Beat LinearAlgebra's `mul!(::AbstractMatrix, ::AbstractVecOrMat,
+# ::AbstractVecOrMat, α, β)` — unconstrained `A`/`B` is less specific on
+# those arguments. Keep the unconstrained methods above for a matrix-free
+# operator that is not an `AbstractVecOrMat`.
+function LinearAlgebra.mul!(C::BlockKrylovMatrix, A::AbstractVecOrMat, B::AbstractVecOrMat)
+    LinearAlgebra.mul!(_bk_data(C), _bk_data(A), _bk_data(B))
+    return C
+end
+function LinearAlgebra.mul!(C::BlockKrylovMatrix, A::AbstractVecOrMat, B::AbstractVecOrMat, α::Number, β::Number)
+    LinearAlgebra.mul!(_bk_data(C), _bk_data(A), _bk_data(B), α, β)
+    return C
+end
 # More specific than `mul!(::BlockKrylovMatrix, A, B)` ×
 # `mul!(::AbstractMatrix, ::AdjOrTrans{<:BlockKrylovMatrix}, ::BlockKrylovMatrix)`.
 function LinearAlgebra.mul!(
