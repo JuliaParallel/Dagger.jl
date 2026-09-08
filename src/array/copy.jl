@@ -72,7 +72,7 @@ allocate_copy_buffer(part::Blocks{N}, A::DArray{T,N}) where {T,N} =
     allocate_tiled(darray_tiletype(A), T, part, size(A))
 
 """
-    repartition(A::DArray, part::Blocks) -> DArray
+    repartition(A::DArray, part::Blocks; partitioner=nothing, perm=nothing) -> DArray
 
 A copy of `A` re-tiled to `part`, preserving the tile backend (sparse tiles stay
 sparse). Returns `A` itself if it is already partitioned that way.
@@ -82,8 +82,39 @@ lifetime is not tied to a call: that function frees its buffers as soon as its
 body returns, which is wrong whenever the re-tiled *tiles* outlive the call —
 e.g. a block preconditioner, whose per-tile operators are built from them by
 tasks it does not await.
+
+# Graph partitioning
+
+`Blocks` tiles are geometric (index-range slabs). For an unstructured mesh the
+adjacency of a sparse square operator should be partitioned first so those
+slabs have few off-diagonal nonzeros. Pass a graph partitioner, or a
+precomputed permutation — not a new `Dagger.metis` API:
+
+```julia
+using Metis
+# nparts = cld(n, k) from `part`
+A2 = Dagger.repartition(A, Blocks(k, k); partitioner=Metis)
+# same partitioner as `Metis.partition`:
+A2 = Dagger.repartition(A, Blocks(k, k); partitioner=Metis.partition)
+
+# Apply the same ordering to a RHS (METIS is not a promise of bit-stability
+# across calls; compute `perm` once):
+nparts = cld(size(A, 1), k)
+perm = Dagger.partition_perm(Dagger.partition_graph(Metis, A, nparts))
+A2 = Dagger.repartition(A, Blocks(k, k); perm)
+b2 = Dagger.repartition(b, Blocks(k); perm)
+```
+
+`partitioner` is `Metis` / `Metis.partition` after `using Metis`, or a function
+`f(A, nparts) -> Vector{Int}` (KaHIP / custom). The pattern is gathered; the
+result is still a geometric `Blocks` array of the symmetrically permuted
+operator. Do not pass `partitioner` and `perm` together.
 """
-function repartition(A::DArray{T,N}, part::Blocks{N}) where {T,N}
+function repartition(A::DArray{T,N}, part::Blocks{N};
+                     partitioner=nothing, perm=nothing) where {T,N}
+    if partitioner !== nothing || perm !== nothing
+        return _repartition_with_perm(A, part; partitioner, perm)
+    end
     A.partitioning == part && return A
     B = allocate_tiled(darray_tiletype(A), T, part, size(A))
     copyto!(B, A)
