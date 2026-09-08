@@ -312,6 +312,11 @@ function Base.:\(F::DaggerSparseLU, B::DMatrix)
     return distribute(X, B.partitioning)
 end
 
+# More specific than `_PinnedSparseFactor \ DVector` × `DaggerSparseLU \ AbstractVector`.
+function Base.:\(F::DaggerSparseLU, b::DVector)
+    return invoke(Base.:\, Tuple{_PinnedSparseFactor, DVector}, F, b)
+end
+
 function Base.:\(F::DaggerSparseLU, b::AbstractVector)
     return F \ distribute(collect(b), F.part)
 end
