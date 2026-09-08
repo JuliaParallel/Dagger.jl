@@ -414,3 +414,7 @@ lesson.
     Schur system and cannot update; `lu!` on those types errors. The gather
     uses `findnz` (drops stored zeros), so a value that becomes exactly 0
     can change the CSC pattern; KLU then falls back to a full `klu`.
+    `\(F::DaggerSparseLU, ::AbstractVector)` and `\(F::_PinnedSparseFactor, ::DVector)`
+    are ambiguous (`DVector <: AbstractVector`); GlobalAMG's coarse solve hits
+    that. Give `DaggerSparseLU` / `DaggerSparseCholesky` their own `DVector`
+    methods instead of a Union.
