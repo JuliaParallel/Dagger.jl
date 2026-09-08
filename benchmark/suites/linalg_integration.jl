@@ -15,6 +15,9 @@
 #   LINALG_BENCH_SAMPLES  timed iters       (default 5)
 #   LINALG_BENCH_SCALE    default | small | mpi
 #
+# Profile mode (attribution, not the published table):
+#   LINALG_BENCH_PROFILE=1|cpu|alloc|logs|all  → linalg_profile.jl via the driver
+#
 # Methodology (AGENTS.md lesson 4): deep warmup, GC.gc(), min of timed runs.
 # Dagger uses BLAS threads = 1 (task parallelism). Host dense uses BLAS = nthreads.
 # Iterative methods share atol/rtol/itmax; tables report iterations + true residual.

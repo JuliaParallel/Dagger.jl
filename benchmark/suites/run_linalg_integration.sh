@@ -31,6 +31,11 @@ fi
 export LINALG_BENCH_MODE="$MODE"
 export LINALG_BENCH_OUT="$OUT"
 
+SUITE="$ROOT/benchmark/suites/linalg_integration.jl"
+if [[ -n "${LINALG_BENCH_PROFILE:-}" && "${LINALG_BENCH_PROFILE}" != "0" ]]; then
+  SUITE="$ROOT/benchmark/suites/linalg_profile.jl"
+fi
+
 if [[ "$MODE" == "mpi" ]]; then
   # One rank per VM. The batchctl hostfile has slots=<vcpus>, and OpenMPI's
   # default-by-slot mapping would otherwise pack every rank onto node 0.
@@ -47,12 +52,15 @@ if [[ "$MODE" == "mpi" ]]; then
     -x LINALG_BENCH_MODE -x LINALG_BENCH_OUT -x LINALG_BENCH_SCALE \
     -x LINALG_BENCH_WARMUP -x LINALG_BENCH_SAMPLES \
     -x LINALG_BENCH_INSTANCE -x LINALG_BENCH_ONLY \
+    -x LINALG_BENCH_PROFILE -x LINALG_BENCH_PROFILE_REPS \
+    -x LINALG_BENCH_PROFILE_ITMAX -x LINALG_BENCH_PROFILE_WARMUP \
+    -x LINALG_BENCH_PROFILE_SAMPLES \
     -x DAGGER_MPI_DEADLOCK_TIMEOUT \
     -x OMPI_MCA_btl_vader_single_copy_mechanism \
     "$JULIA" --project="$PROJ" -t "${THREADS}" \
-      "$ROOT/benchmark/suites/linalg_integration.jl"
+      "$SUITE"
 else
   THREADS="${THREADS:-16}"
   exec "$JULIA" --project="$PROJ" -t "${THREADS}" \
-    "$ROOT/benchmark/suites/linalg_integration.jl"
+    "$SUITE"
 fi
