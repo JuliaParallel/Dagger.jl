@@ -3,6 +3,7 @@ import Dagger: DAGSpec, DatadepsArgSpec, dag_add_task!,
                datadeps_dag_equivalent, datadeps_argspec_equivalent,
                datadeps_ainfo_equivalent, datadeps_schedule_cache,
                LayeredScheduler, RoundRobinScheduler, GreedyScheduler, DataDepsScheduler,
+               IteratedGreedyScheduler, iterated_greedy_schedule!, iterated_greedy_step!,
                ScheduleState, cost_of_schedule, greedy_assign_task!, greedy_schedule!,
                NoAliasing, UnknownAliasing, ContiguousAliasing,
                StridedAliasing, TriangularAliasing, DiagonalAliasing,
@@ -10,6 +11,7 @@ import Dagger: DAGSpec, DatadepsArgSpec, dag_add_task!,
                DATADEPS_SCHEDULER, In, Out, InOut, Deps
 import Dagger
 using LinearAlgebra
+using Random
 using Test
 
 # ---------- equivalent_structure unit tests ----------
@@ -926,5 +928,356 @@ end
         @test s1.task_proc == s2.task_proc
         @test s1.task_finish_ns == s2.task_finish_ns
         @test cost_of_schedule(s1) == cost_of_schedule(s2)
+    end
+end
+
+# Helper: build a DAGSpec by running `f()` inside spawn_datadeps with a
+# GreedyScheduler that has a fresh cache, then extracting the just-cached spec.
+# Returns (dag_spec, all_procs, snap) so tests can drive primitives directly.
+function _capture_dag(f)
+    spec_pair = nothing
+    Base.ScopedValues.with(DATADEPS_SCHEDULER => GreedyScheduler()) do
+        cache = datadeps_schedule_cache(GreedyScheduler())
+        empty!(cache)
+        f()
+        spec_pair = first(cache)
+    end
+    return (spec_pair.first,
+            collect(Dagger.all_processors()),
+            Dagger.MT.snapshot(Dagger.MT.global_metrics_cache()))
+end
+
+# Build a multi-task DAG (mock_cholesky on a small grid) so IG has more than
+# one task to permute. Returns the same triple as _capture_dag.
+function _capture_cholesky_dag(grid_size::Int=3, block_size::Int=16)
+    M = make_spd_blocks(grid_size * block_size, block_size)
+    return _capture_dag(() -> Dagger.spawn_datadeps() do
+        mock_cholesky!(M)
+    end)
+end
+
+@testset "IteratedGreedyScheduler" begin
+    @testset "Type registration and constructor validation" begin
+        @test IteratedGreedyScheduler() isa DataDepsScheduler
+        @test IteratedGreedyScheduler() isa IteratedGreedyScheduler{GreedyScheduler}
+
+        # Defaults are reachable
+        s = IteratedGreedyScheduler()
+        @test s.n_iters == Dagger.IG_DEFAULT_N_ITERS
+        @test s.destroy_frac == Dagger.IG_DEFAULT_DESTROY_FRAC
+
+        # Explicit overrides round-trip
+        s2 = IteratedGreedyScheduler(GreedyScheduler();
+                                     n_iters=7, destroy_frac=0.5,
+                                     rng=MersenneTwister(42))
+        @test s2.n_iters == 7
+        @test s2.destroy_frac == 0.5
+        @test s2.rng isa MersenneTwister
+
+        # Validation
+        @test_throws ArgumentError IteratedGreedyScheduler(; n_iters=-1)
+        @test_throws ArgumentError IteratedGreedyScheduler(; destroy_frac=0.0)
+        @test_throws ArgumentError IteratedGreedyScheduler(; destroy_frac=1.5)
+        @test_throws ArgumentError IteratedGreedyScheduler(; destroy_frac=-0.1)
+    end
+
+    @testset "Cache delegation to inner scheduler" begin
+        # IG{Greedy} should reuse the same underlying cache vector as
+        # GreedyScheduler, so equivalent DAGs hit the cache regardless of
+        # which wrapper produced them.
+        cache_ig = datadeps_schedule_cache(IteratedGreedyScheduler())
+        cache_gr = datadeps_schedule_cache(GreedyScheduler())
+        @test cache_ig === cache_gr
+    end
+
+    @testset "Empty DAG: iterated_greedy_schedule! is a no-op" begin
+        empty_dag = DAGSpec()
+        all_procs = collect(Dagger.all_processors())
+        snap = Dagger.MT.snapshot(Dagger.MT.global_metrics_cache())
+
+        state = ScheduleState()
+        out = iterated_greedy_schedule!(state, snap, empty_dag, all_procs;
+                                         n_iters=10, destroy_frac=0.5,
+                                         rng=MersenneTwister(0))
+        @test out === state
+        @test isempty(state)
+        @test cost_of_schedule(state) == 0.0
+    end
+
+    @testset "n_iters=0 returns the seed state untouched" begin
+        dag_spec, all_procs, snap = _capture_cholesky_dag(3, 16)
+
+        seed = ScheduleState()
+        greedy_schedule!(seed, snap, dag_spec, all_procs)
+        seed_cost = cost_of_schedule(seed)
+        seed_proc = copy(seed.task_proc)
+        seed_finish = copy(seed.task_finish_ns)
+
+        result = iterated_greedy_schedule!(copy(seed), snap, dag_spec, all_procs;
+                                            n_iters=0, destroy_frac=0.3,
+                                            rng=MersenneTwister(0))
+        @test cost_of_schedule(result) == seed_cost
+        @test result.task_proc == seed_proc
+        @test result.task_finish_ns == seed_finish
+    end
+
+    @testset "Non-worsening invariant: IG cost ≤ Greedy seed cost" begin
+        dag_spec, all_procs, snap = _capture_cholesky_dag(3, 16)
+
+        seed = ScheduleState()
+        greedy_schedule!(seed, snap, dag_spec, all_procs)
+        seed_cost = cost_of_schedule(seed)
+
+        # Run multiple seeds — IG must never worsen the seed cost on ANY of them.
+        for trial_seed in (1, 7, 42, 123, 9001)
+            result = iterated_greedy_schedule!(copy(seed), snap, dag_spec, all_procs;
+                                                n_iters=16, destroy_frac=0.3,
+                                                rng=MersenneTwister(trial_seed))
+            @test cost_of_schedule(result) <= seed_cost
+        end
+    end
+
+    @testset "Non-worsening invariant across DAG shapes × RNG seeds" begin
+        # The accept-only-on-improvement rule is the central correctness
+        # guarantee of IG: for any DAG, any seed, any RNG sequence,
+        # `cost_of_schedule(IG_result) ≤ cost_of_schedule(seed)`. This guards
+        # against future changes to destroy/replay silently breaking that
+        # rule (e.g. by corrupting proc_ready_ns on a particular DAG shape).
+        #
+        # Shapes:
+        #   :single   — one task; the boundary case
+        #   :chain    — linear precedence t1 → t2 → … → tN via a single InOut
+        #   :fanout   — t0 writes a buffer; t1..tN each read it into their own
+        #   :fanin    — t1..tN each write their own buffer; t_final reads all
+        #
+        # For each shape × seed: build the DAG via spawn_datadeps, run Greedy
+        # to seed, then IG. Assert the invariant holds. Also assert that the
+        # ScheduleState invariants from the destroy/replay step survive
+        # (every proc_ready_ns ≥ max finish_time on that proc).
+
+        seeds = (1, 7, 42, 123, 9001)
+
+        function _build_dag(shape::Symbol; n::Int=6)
+            if shape === :single
+                A = rand(64); B = rand(64)
+                return _capture_dag(() -> Dagger.spawn_datadeps() do
+                    Dagger.@spawn add!(InOut(A), In(B))
+                end)
+            elseif shape === :chain
+                acc = rand(64)
+                addends = [rand(64) for _ in 1:n]
+                return _capture_dag(() -> Dagger.spawn_datadeps() do
+                    for i in 1:n
+                        Dagger.@spawn add!(InOut(acc), In(addends[i]))
+                    end
+                end)
+            elseif shape === :fanout
+                src = rand(64)
+                sinks = [rand(64) for _ in 1:n]
+                return _capture_dag(() -> Dagger.spawn_datadeps() do
+                    # First task writes `src`; subsequent tasks each read `src`
+                    # and write into their own distinct sink buffer.
+                    seed_addend = rand(64)
+                    Dagger.@spawn add!(InOut(src), In(seed_addend))
+                    for i in 1:n
+                        Dagger.@spawn add!(InOut(sinks[i]), In(src))
+                    end
+                end)
+            elseif shape === :fanin
+                sources = [rand(64) for _ in 1:n]
+                sink = rand(64)
+                return _capture_dag(() -> Dagger.spawn_datadeps() do
+                    seed_addend = rand(64)
+                    for i in 1:n
+                        Dagger.@spawn add!(InOut(sources[i]), In(seed_addend))
+                    end
+                    # Final task reads all source buffers via successive `In`
+                    # arguments, creating a fan-in into a single sink.
+                    for i in 1:n
+                        Dagger.@spawn add!(InOut(sink), In(sources[i]))
+                    end
+                end)
+            else
+                error("Unknown shape $shape")
+            end
+        end
+
+        for shape in (:single, :chain, :fanout, :fanin)
+            dag_spec, all_procs, snap = _build_dag(shape; n=6)
+            seed = ScheduleState()
+            greedy_schedule!(seed, snap, dag_spec, all_procs)
+            seed_cost = cost_of_schedule(seed)
+            for trial_seed in seeds
+                result = iterated_greedy_schedule!(copy(seed), snap, dag_spec, all_procs;
+                                                    n_iters=16, destroy_frac=0.3,
+                                                    rng=MersenneTwister(trial_seed))
+                @test cost_of_schedule(result) <= seed_cost
+
+                # ScheduleState invariant: per-proc readiness must dominate
+                # the max finish-time scheduled on that proc. Catches
+                # destroy/replay leaving proc_ready_ns stale.
+                proc_max_finish = Dict{Dagger.Processor, Float64}()
+                for (idx, proc) in result.task_proc
+                    f = result.task_finish_ns[idx]
+                    proc_max_finish[proc] = max(get(proc_max_finish, proc, 0.0), f)
+                end
+                for (proc, max_f) in proc_max_finish
+                    @test result.proc_ready_ns[proc] >= max_f
+                end
+            end
+        end
+    end
+
+    @testset "Reproducibility: identical RNG seed → identical result" begin
+        dag_spec, all_procs, snap = _capture_cholesky_dag(3, 16)
+        seed = ScheduleState(); greedy_schedule!(seed, snap, dag_spec, all_procs)
+
+        r1 = iterated_greedy_schedule!(copy(seed), snap, dag_spec, all_procs;
+                                        n_iters=8, destroy_frac=0.4,
+                                        rng=MersenneTwister(2025))
+        r2 = iterated_greedy_schedule!(copy(seed), snap, dag_spec, all_procs;
+                                        n_iters=8, destroy_frac=0.4,
+                                        rng=MersenneTwister(2025))
+        @test r1.task_proc == r2.task_proc
+        @test r1.task_finish_ns == r2.task_finish_ns
+    end
+
+    @testset "Per-task scope is respected after IG iteration" begin
+        # Pin one task to ThreadProc(1, 1) and run IG with a candidate set
+        # that includes that pin plus several other procs. The destroyed
+        # task — when reassigned — must still end up on the pinned proc.
+        A = rand(64); B = rand(64)
+        target_proc = Dagger.ThreadProc(1, 1)
+        dag_spec, _, _ = _capture_dag(() -> Dagger.spawn_datadeps() do
+            Dagger.@spawn scope=Dagger.ExactScope(target_proc) add!(InOut(A), In(B))
+        end)
+
+        candidate_procs = Dagger.Processor[
+            Dagger.ThreadProc(1, 2),
+            target_proc,
+            Dagger.ThreadProc(1, 3),
+        ]
+        snap = Dagger.MT.snapshot(Dagger.MT.global_metrics_cache())
+
+        # Seed via greedy_schedule! on the candidate set, then run IG.
+        for trial in 1:5
+            seed = ScheduleState()
+            greedy_schedule!(seed, snap, dag_spec, candidate_procs)
+            @test seed.task_proc[1] === target_proc
+            result = iterated_greedy_schedule!(copy(seed), snap, dag_spec,
+                                                candidate_procs;
+                                                n_iters=8, destroy_frac=1.0,
+                                                rng=MersenneTwister(trial))
+            @test result.task_proc[1] === target_proc
+        end
+    end
+
+    @testset "Throws SchedulingException when no compatible processor exists" begin
+        A = rand(64); B = rand(64)
+        target_proc = Dagger.ThreadProc(1, 1)
+        dag_spec, _, _ = _capture_dag(() -> Dagger.spawn_datadeps() do
+            Dagger.@spawn scope=Dagger.ExactScope(target_proc) add!(InOut(A), In(B))
+        end)
+
+        # Candidate set excludes target_proc entirely.
+        incompatible_procs = Dagger.Processor[
+            Dagger.ThreadProc(1, 2),
+            Dagger.ThreadProc(1, 3),
+        ]
+        snap = Dagger.MT.snapshot(Dagger.MT.global_metrics_cache())
+
+        state = ScheduleState()
+        @test_throws Dagger.Sch.SchedulingException iterated_greedy_schedule!(
+            state, snap, dag_spec, incompatible_procs;
+            n_iters=4, destroy_frac=1.0, rng=MersenneTwister(0))
+    end
+
+    @testset "destroy_frac=1.0 → equivalent to repeated full rebuilds" begin
+        dag_spec, all_procs, snap = _capture_cholesky_dag(3, 16)
+        seed = ScheduleState(); greedy_schedule!(seed, snap, dag_spec, all_procs)
+
+        # destroy_frac=1.0 wipes every assignment per iteration. Because
+        # greedy_assign_task! is deterministic given a fixed (snap, dag, procs)
+        # — see the existing "deterministic" test — every rebuild yields
+        # the same state, and IG must not worsen the seed.
+        result = iterated_greedy_schedule!(copy(seed), snap, dag_spec, all_procs;
+                                            n_iters=4, destroy_frac=1.0,
+                                            rng=MersenneTwister(0))
+        @test cost_of_schedule(result) <= cost_of_schedule(seed)
+        @test length(result) == length(seed)
+    end
+
+    @testset "iterated_greedy_step! preserves invariants" begin
+        dag_spec, all_procs, snap = _capture_cholesky_dag(3, 16)
+        seed = ScheduleState(); greedy_schedule!(seed, snap, dag_spec, all_procs)
+
+        # Destroy IDs {2, 4}; replay should reassign exactly those two.
+        n_tasks = Dagger.nv(dag_spec.g)
+        destroyed_ids = Set([2, min(4, n_tasks)])
+
+        before_proc = copy(seed.task_proc)
+        after = iterated_greedy_step!(copy(seed), snap, dag_spec, all_procs, destroyed_ids)
+
+        # All task IDs still assigned.
+        @test sort(collect(keys(after.task_proc))) == collect(1:n_tasks)
+        @test sort(collect(keys(after.task_finish_ns))) == collect(1:n_tasks)
+
+        # Non-destroyed tasks must keep their proc (the only mutation is
+        # proc_ready_ns being recomputed, which is internal).
+        for idx in 1:n_tasks
+            idx in destroyed_ids && continue
+            @test after.task_proc[idx] === before_proc[idx]
+        end
+
+        # Finish-time monotonicity vs proc_ready_ns: every proc_ready_ns
+        # must be ≥ the max finish_time assigned to that proc.
+        proc_max_finish = Dict{Dagger.Processor, Float64}()
+        for (idx, proc) in after.task_proc
+            f = after.task_finish_ns[idx]
+            proc_max_finish[proc] = max(get(proc_max_finish, proc, 0.0), f)
+        end
+        for (proc, max_f) in proc_max_finish
+            @test after.proc_ready_ns[proc] >= max_f
+        end
+    end
+
+    @testset "End-to-end via spawn_datadeps: matmul produces correct result" begin
+        # A small tile-grid matmul under IG: verifies the AOT path wires up,
+        # that the schedule cache is populated, and that the numeric result
+        # matches the dense reference.
+        nb = 16
+        nt = 2
+        A = [rand(nb, nb) for _ in 1:nt, _ in 1:nt]
+        B = [rand(nb, nb) for _ in 1:nt, _ in 1:nt]
+        C = [zeros(nb, nb) for _ in 1:nt, _ in 1:nt]
+
+        ig = IteratedGreedyScheduler(; n_iters=4, destroy_frac=0.5,
+                                       rng=MersenneTwister(13))
+        cache = datadeps_schedule_cache(ig)
+        empty!(cache)
+
+        Base.ScopedValues.with(DATADEPS_SCHEDULER => ig) do
+            Dagger.spawn_datadeps() do
+                for i in 1:nt, j in 1:nt, k in 1:nt
+                    Dagger.@spawn LinearAlgebra.BLAS.gemm!('N', 'N', 1.0,
+                                                           In(A[i, k]),
+                                                           In(B[k, j]), 1.0,
+                                                           InOut(C[i, j]))
+                end
+            end
+        end
+
+        # Reassemble C and compare to dense A*B
+        sz = nt * nb
+        dense_A = zeros(sz, sz); dense_B = zeros(sz, sz); dense_C = zeros(sz, sz)
+        for i in 1:nt, j in 1:nt
+            dense_A[(i-1)*nb+1:i*nb, (j-1)*nb+1:j*nb] .= A[i, j]
+            dense_B[(i-1)*nb+1:i*nb, (j-1)*nb+1:j*nb] .= B[i, j]
+            dense_C[(i-1)*nb+1:i*nb, (j-1)*nb+1:j*nb] .= C[i, j]
+        end
+        @test dense_C ≈ dense_A * dense_B
+
+        # Cache populated by the IG run (shares with Greedy's cache).
+        @test !isempty(cache)
     end
 end
