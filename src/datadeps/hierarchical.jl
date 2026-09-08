@@ -1853,10 +1853,31 @@ function _distribute_tasks_hierarchical!(queue::DataDepsTaskQueue,
     partition_schedules = Vector{Dict{DTask,Processor}}(undef, n_partitions)
     partition_states = @hier_phase schedule try
         if use_shared_state
-            # The sequential path shares one state across partitions, so it also
-            # shares one schedule: the whole-region one when cached, else empty
-            # (each vertex falls back to JIT).
-            shared_schedule = something(precomputed_schedule, Dict{DTask,Processor}())
+            # This path shares one `DataDepsState` across partitions and walks
+            # the whole DAG in topological order, so it takes one *region-wide*
+            # schedule rather than per-partition ones: planned over `all_procs`
+            # on a miss, or recovered from the cache on a hit.
+            # N.B. Planning here is not optional. This branch is taken whenever
+            # `all_procs` spans more than one memory space -- i.e. every
+            # multi-worker run, which is exactly where placement matters most.
+            # Leaving the schedule empty would silently reduce every AOT
+            # scheduler to JIT round-robin there.
+            shared_schedule = if precomputed_schedule !== nothing
+                precomputed_schedule
+            else
+                region_scope = UnionScope(map(ExactScope, all_procs))
+                _rdag, sched = datadeps_build_schedule!(queue.scheduler, seen_tasks,
+                                                        all_procs, region_scope)
+                sched
+            end
+            # `datadeps_build_schedule!` already cached what it computed, keyed
+            # on the region DAG, so there is nothing further to persist below.
+            # N.B. `_schedule_vertex!` drops any assignment naming a processor
+            # outside its partition's `local_procs`. When the region is
+            # single-owner every partition holds all of `all_procs`, so the
+            # whole plan applies; when it is multi-owner, partitioning has
+            # already fixed each task's owner for data-locality reasons and AOT
+            # only refines placement within that choice.
             for pid in 1:n_partitions
                 partition_schedules[pid] = Dict{DTask,Processor}()
             end
@@ -1895,7 +1916,7 @@ function _distribute_tasks_hierarchical!(queue::DataDepsTaskQueue,
 
     # Merge the per-partition assignments and cache them under the whole-region
     # DAG, so an equivalent region next time skips partition-local planning.
-    if precomputed_schedule === nothing
+    if precomputed_schedule === nothing && !use_shared_state
         _hierarchical_persist_schedule!(queue.scheduler, region_dag_spec,
                                         partition_schedules)
     end
