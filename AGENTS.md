@@ -416,3 +416,8 @@ lesson.
    `getindex` must not call `length` on an integer (`to_indices` leaves
    integers as integers). Allocate the same-ndims slice with `i:i`, copy,
    then dropdims. `DArray{T}(undef, ...)` densifies; use `allocate_tiled`.
+   Linear `A[I]` on an N>1 array is a `SubArray` of a `ReshapedArray` of
+   the `DArray`, not a `SubArray` of the `DArray` — Base `copyto!` then
+   scalar-indexes; unwrap with `parent(parent(view))` and the linear
+   `parentindices`. `[]` is `Vector{Any}`, so copy-index helpers must
+   accept `AbstractVector`, not only `AbstractVector{<:Integer}`.

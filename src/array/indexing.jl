@@ -82,7 +82,8 @@ _as_getindex_index(x::Base.LogicalIndex) = collect(Int, x)
 _as_getindex_index(x::Base.Slice) = Int(first(x)):Int(last(x))
 _as_getindex_index(x::Base.OneTo) = UnitRange{Int}(x)
 _as_getindex_index(x::UnitRange{<:Integer}) = UnitRange{Int}(x)
-_as_getindex_index(x::AbstractVector{<:Integer}) = x isa Vector{Int} ? x : collect(Int, x)
+# `[]` is `Vector{Any}`, not `AbstractVector{<:Integer}`.
+_as_getindex_index(x::AbstractVector) = x isa Vector{Int} ? x : collect(Int, x)
 _as_getindex_index(x) = x
 
 _slice_index_length(x::Integer) = 1
@@ -233,6 +234,13 @@ end
 function Base.fill!(A::SubArray{T,N,<:DArray}, x) where {T,N}
     isempty(A) && return A
     tmp = allocate_tiled(darray_tiletype(parent(A)), T, auto_blocks(size(A)), size(A))
+    fill!(tmp, x)
+    copyto!(A, tmp)
+    return A
+end
+function Base.fill!(A::LinearDArrayView{T}, x) where T
+    isempty(A) && return A
+    tmp = allocate_tiled(darray_tiletype(_linear_view_parent(A)), T, auto_blocks(size(A)), size(A))
     fill!(tmp, x)
     copyto!(A, tmp)
     return A

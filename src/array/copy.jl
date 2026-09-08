@@ -107,7 +107,9 @@ _copy_index(x::Integer) = Int(x):Int(x)
 _copy_index(x::Base.OneTo) = UnitRange{Int}(x)
 _copy_index(x::Base.Slice) = Int(first(x)):Int(last(x))
 _copy_index(::StepRange) = throw(ArgumentError("Cannot convert StepRange to UnitRange"))
-_copy_index(x::AbstractVector{<:Integer}) = x isa Vector{Int} ? x : collect(Int, x)
+# `[]` is `Vector{Any}`; `to_indices` leaves it alone. Empty and mixed
+# integer vectors still copy (the scattered path no-ops on a zero selection).
+_copy_index(x::AbstractVector) = x isa Vector{Int} ? x : collect(Int, x)
 _copy_index(x::Base.LogicalIndex) = collect(Int, x)
 _copy_index(x) = throw(ArgumentError("Cannot convert $(typeof(x)) to a copy index"))
 
@@ -343,11 +345,38 @@ Base.copyto!(B::DArray, A::SubArray{T,N,<:Array}) where {T,N} =
 
 StridedDArray{T,N} = Union{<:DArray{T,N}, SubArray{T,N,<:DArray{T,NP}} where NP}
 
+# `view(A::DArray{T,N}, i)` for N>1 is a linear SubArray of a ReshapedArray,
+# not a SubArray of the DArray. Base copyto! then scalar-indexes.
+const LinearDArrayView{T} = SubArray{T,1,<:Base.ReshapedArray{T,1,<:DArray}}
+_linear_view_parent(A::LinearDArrayView) = parent(parent(A))
+
 Base.copyto!(B::StridedDArray, A::StridedDArray) =
     darray_copyto!(parent(B), parent(A), parentindices(B), parentindices(A))
 function Base.copyto!(B::Array, A::StridedDArray)
     DB = view(B, AutoBlocks())
     darray_copyto!(DB, parent(A), parentindices(DB), parentindices(A))
+    return B
+end
+function Base.copyto!(B::StridedDArray, A::LinearDArrayView)
+    darray_copyto!(parent(B), _linear_view_parent(A), parentindices(B), parentindices(A))
+    return B
+end
+function Base.copyto!(B::LinearDArrayView, A::StridedDArray)
+    darray_copyto!(_linear_view_parent(B), parent(A), parentindices(B), parentindices(A))
+    return B
+end
+function Base.copyto!(B::LinearDArrayView, A::LinearDArrayView)
+    darray_copyto!(_linear_view_parent(B), _linear_view_parent(A), parentindices(B), parentindices(A))
+    return B
+end
+function Base.copyto!(B::Array, A::LinearDArrayView)
+    DB = view(B, AutoBlocks())
+    darray_copyto!(DB, _linear_view_parent(A), parentindices(DB), parentindices(A))
+    return B
+end
+function Base.copyto!(B::LinearDArrayView, A::AbstractArray)
+    DA = view(A, AutoBlocks())
+    darray_copyto!(_linear_view_parent(B), DA, parentindices(B), axes(DA))
     return B
 end
 # `view(::DArray, I, J)` is a Base `SubArray`. Sending that parent through

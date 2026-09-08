@@ -148,6 +148,11 @@ end
         @test collect(A[:]) == vec(collect(A))
         @test collect(A[1:2:9, :]) == collect(A)[1:2:9, :]
         @test collect(A[:, 10:-1:1]) == collect(A)[:, 10:-1:1]
+
+        A[3:8] = 0.0
+        href = reshape(Float64.(1:100), 10, 10)
+        href[3:8] .= 0
+        @test collect(A) == href
     end
 
     # copyto! of a StepRange view stays an error (intentional contract).
