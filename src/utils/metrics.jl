@@ -1,49 +1,52 @@
 import Statistics
 
-const TASK_SIGNATURE = ScopedValue{Union{Vector{Any}, Nothing}}(nothing)
-const TASK_PROCESSOR = ScopedValue{Union{Processor, Nothing}}(nothing)
-const TASK_WORKER = ScopedValue{Union{Int, Nothing}}(nothing)
-const TASK_TRANSFER_SIZE = ScopedValue{Union{UInt64, Nothing}}(nothing)
-const TASK_TRANSFER_TIME = ScopedValue{Union{UInt64, Nothing}}(nothing)
+# The facts a task's metrics record live on its `DTaskTLS` (set once by
+# `Sch.do_task`), not in `ScopedValue`s. Entering a scope for five of them cost
+# ~939 allocations / 32 KB per task on a `fetch(@spawn 1+1)` round-trip --
+# more than the entire rest of the scheduler path -- and `set_tls!` already
+# runs once per thunk, so reading from it is free.
+_metrics_tls() = DTASK_TLS[]
 
 struct SignatureMetric <: MT.AbstractMetric end
 MT.metric_applies(::SignatureMetric, ::Val{:execute!}) = true
 MT.metric_type(::Type{SignatureMetric}) = Union{Vector{Any}, Nothing}
 MT.start_metric(::SignatureMetric) = nothing
-MT.stop_metric(::SignatureMetric, _) = TASK_SIGNATURE[]
+MT.stop_metric(::SignatureMetric, _) = (tls = _metrics_tls(); tls === nothing ? nothing : tls.metrics_sig)
 
 struct ProcessorMetric <: MT.AbstractMetric end
 MT.metric_applies(::ProcessorMetric, ::Val{:execute!}) = true
 MT.metric_type(::Type{ProcessorMetric}) = Union{Processor, Nothing}
 MT.start_metric(::ProcessorMetric) = nothing
-MT.stop_metric(::ProcessorMetric, _) = TASK_PROCESSOR[]
+MT.stop_metric(::ProcessorMetric, _) = (tls = _metrics_tls(); tls === nothing ? nothing : tls.processor)
 
 struct WorkerMetric <: MT.AbstractMetric end
 MT.metric_applies(::WorkerMetric, ::Val{:execute!}) = true
 MT.metric_type(::Type{WorkerMetric}) = Union{Int, Nothing}
 MT.start_metric(::WorkerMetric) = nothing
-MT.stop_metric(::WorkerMetric, _) = TASK_WORKER[]
+MT.stop_metric(::WorkerMetric, _) = (_metrics_tls() === nothing ? nothing : myid())
 
 struct TransferSizeMetric <: MT.AbstractMetric end
 MT.metric_applies(::TransferSizeMetric, ::Val{:execute!}) = true
 MT.metric_type(::Type{TransferSizeMetric}) = Union{UInt64, Nothing}
 MT.start_metric(::TransferSizeMetric) = nothing
-MT.stop_metric(::TransferSizeMetric, _) = TASK_TRANSFER_SIZE[]
+MT.stop_metric(::TransferSizeMetric, _) = (tls = _metrics_tls(); tls === nothing || tls.metrics_transfer_size == 0 ? nothing : tls.metrics_transfer_size)
 
 struct TransferTimeMetric <: MT.AbstractMetric end
 MT.metric_applies(::TransferTimeMetric, ::Val{:execute!}) = true
 MT.metric_type(::Type{TransferTimeMetric}) = Union{UInt64, Nothing}
 MT.start_metric(::TransferTimeMetric) = nothing
-MT.stop_metric(::TransferTimeMetric, _) = TASK_TRANSFER_TIME[]
+MT.stop_metric(::TransferTimeMetric, _) = (tls = _metrics_tls(); tls === nothing || tls.metrics_transfer_time == 0 ? nothing : tls.metrics_transfer_time)
 
 struct TransferRateMetric <: MT.AbstractMetric end
 MT.metric_applies(::TransferRateMetric, ::Val{:execute!}) = true
 MT.metric_type(::Type{TransferRateMetric}) = Union{UInt64, Nothing}
 MT.start_metric(::TransferRateMetric) = nothing
 function MT.stop_metric(::TransferRateMetric, _)
-    size = TASK_TRANSFER_SIZE[]
-    elapsed = TASK_TRANSFER_TIME[]
-    if size === nothing || elapsed === nothing || elapsed == 0 || size == 0
+    tls = _metrics_tls()
+    tls === nothing && return nothing
+    size = tls.metrics_transfer_size
+    elapsed = tls.metrics_transfer_time
+    if elapsed == 0 || size == 0
         return nothing
     end
     return round(UInt64, Float64(size) / (Float64(elapsed) / 1e9))
@@ -289,6 +292,109 @@ function metrics_lookup_runtime_from_index(idx::SignatureRuntimeIndex,
     end
     (vals === nothing || isempty(vals)) && return nothing
     return _reduce_uint64(reducer, vals)
+end
+
+"""
+    SignatureRuntimeIndexCache
+
+Per-task memo of `build_signature_runtime_index` results, keyed by signature
+hash and valid only for one snapshot object.
+
+Building an index is a full scan of the snapshot's signature storage — measured
+at 770 allocations / 30 KB — and the scheduler builds one per scheduling pass.
+But the index is a pure function of `(snapshot, signature)`, and in steady state
+both repeat: signatures recur across tasks, and the cost model reuses one
+snapshot for as long as it is allowed to go stale. Memoizing therefore collapses
+the per-task build to a dictionary lookup.
+
+Keyed on the snapshot's `objectid`, so a rebuild invalidates every entry at
+once. Task-local, so no locking and no sharing between the concurrent
+scheduling tasks the hierarchical path spawns.
+"""
+mutable struct SignatureRuntimeIndexCache
+    snap_id::UInt
+    entries::Dict{UInt, SignatureRuntimeIndex}
+    # `metrics_lookup_alloc` and `metrics_lookup_transfer_rate` both resolve
+    # through `MT.find_keys`, which scans every storage and every key of the
+    # snapshot while building `Set{Any}`s -- and they run once per candidate
+    # processor per task. Unlike the runtime lookup they have no index, so
+    # their (small) results are memoized directly. This is the single largest
+    # remaining cost on the scheduling path; profiling attributes it to
+    # `MetricsTracker/lookup.jl`'s scan loop.
+    # N.B. A miss is a meaningful result and is cached as such: the scan costs
+    # the same whether or not it finds anything, so `nothing` must be memoized
+    # too or the common no-samples case keeps paying full price.
+    alloc::Dict{Tuple{UInt, UInt}, Union{UInt64, Nothing}}
+    rate::Dict{Tuple{UInt, Int}, Union{UInt64, Nothing}}
+end
+SignatureRuntimeIndexCache() =
+    SignatureRuntimeIndexCache(UInt(0), Dict{UInt, SignatureRuntimeIndex}(),
+                               Dict{Tuple{UInt, UInt}, Union{UInt64, Nothing}}(),
+                               Dict{Tuple{UInt, Int}, Union{UInt64, Nothing}}())
+
+const SIGNATURE_RUNTIME_INDEX_CACHE =
+    TaskLocalValue{SignatureRuntimeIndexCache}(() -> SignatureRuntimeIndexCache())
+
+"""
+    cached_signature_runtime_index(snap, sig, sig_hash) -> SignatureRuntimeIndex
+
+`build_signature_runtime_index`, memoized per `(snapshot, sig_hash)`. See
+[`SignatureRuntimeIndexCache`](@ref).
+"""
+function cached_signature_runtime_index(snap::MT.MetricsSnapshot, sig::Vector, sig_hash::UInt)
+    cache = SIGNATURE_RUNTIME_INDEX_CACHE[]
+    snap_id = objectid(snap)
+    _reset_cost_cache_if_stale!(cache, snap_id)
+    existing = get(cache.entries, sig_hash, nothing)
+    existing === nothing || return existing
+    idx = build_signature_runtime_index(snap, sig)
+    cache.entries[sig_hash] = idx
+    return idx
+end
+
+function _reset_cost_cache_if_stale!(cache::SignatureRuntimeIndexCache, snap_id::UInt)
+    if cache.snap_id != snap_id
+        # New snapshot: every memoized result describes the old one.
+        empty!(cache.entries)
+        empty!(cache.alloc)
+        empty!(cache.rate)
+        cache.snap_id = snap_id
+    end
+    return
+end
+
+"""
+    cached_metrics_lookup_alloc(snap, sig, sig_hash, proc)
+
+`metrics_lookup_alloc`, memoized per `(snapshot, sig_hash, proc)`. See
+[`SignatureRuntimeIndexCache`](@ref) for why.
+"""
+function cached_metrics_lookup_alloc(snap::MT.MetricsSnapshot, sig::Vector,
+                                     sig_hash::UInt, proc::Processor)
+    cache = SIGNATURE_RUNTIME_INDEX_CACHE[]
+    _reset_cost_cache_if_stale!(cache, objectid(snap))
+    key = (sig_hash, hash(proc))
+    haskey(cache.alloc, key) && return cache.alloc[key]
+    val = metrics_lookup_alloc(snap, sig, proc)
+    cache.alloc[key] = val
+    return val
+end
+
+"""
+    cached_metrics_lookup_transfer_rate(snap, proc, worker_id)
+
+`metrics_lookup_transfer_rate`, memoized per `(snapshot, proc, worker_id)`. See
+[`SignatureRuntimeIndexCache`](@ref) for why.
+"""
+function cached_metrics_lookup_transfer_rate(snap::MT.MetricsSnapshot,
+                                             proc::Processor, worker_id::Int)
+    cache = SIGNATURE_RUNTIME_INDEX_CACHE[]
+    _reset_cost_cache_if_stale!(cache, objectid(snap))
+    key = (hash(proc), worker_id)
+    haskey(cache.rate, key) && return cache.rate[key]
+    val = metrics_lookup_transfer_rate(snap, proc, worker_id)
+    cache.rate[key] = val
+    return val
 end
 
 metrics_lookup_runtime_mean(snap, sig, proc, worker_id) =

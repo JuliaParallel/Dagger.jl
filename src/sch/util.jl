@@ -596,7 +596,7 @@ function has_capacity(state, p, gp, time_util, alloc_util, occupancy, sig;
     # Snapshotting per candidate processor would deep-copy the whole metrics
     # cache once per processor on every scheduling decision, because other
     # threads bump the cache's generation on every task completion.
-    snap = snap === nothing ? MT.snapshot(MT.global_metrics_cache()) : snap
+    snap = snap === nothing ? MT.snapshot_stale(MT.global_metrics_cache(), COST_MODEL_SNAPSHOT_MAX_AGE_NS) : snap
     worker_id = gp isa Int ? gp : (gp isa OSProc ? gp.pid : myid())
     # FIXME: MaxUtilization
     est_time_util = if time_util !== nothing && haskey(time_util, T)
@@ -612,7 +612,8 @@ function has_capacity(state, p, gp, time_util, alloc_util, occupancy, sig;
     est_alloc_util = if alloc_util !== nothing && haskey(alloc_util, T)
         (alloc_util[T])::UInt64
     else
-        alloc = metrics_lookup_alloc(snap, sig_vec, p)
+        alloc = cached_metrics_lookup_alloc(snap, sig_vec,
+                                            sig isa Dagger.Signature ? sig.hash : hash(sig_vec), p)
         alloc !== nothing ? alloc : UInt64(0)
     end
     est_occupancy::UInt32 = typemax(UInt32)
@@ -752,7 +753,7 @@ const DEFAULT_TRANSFER_RATE = UInt64(1_000_000)
     end
     sig_vec = sig isa Dagger.Signature ? sig.sig : sig
     # Reuse the caller's per-pass snapshot (schedule_one!) when provided.
-    snap = snap === nothing ? MT.snapshot(MT.global_metrics_cache()) : snap
+    snap = snap === nothing ? MT.snapshot_stale(MT.global_metrics_cache(), COST_MODEL_SNAPSHOT_MAX_AGE_NS) : snap
 
     # Build the per-signature runtime index once. Every candidate processor in
     # this call shares `sig_vec`, so only the first pattern in the lookup chain
@@ -762,7 +763,8 @@ const DEFAULT_TRANSFER_RATE = UInt64(1_000_000)
     # time -- O(W x N) per task submission -- while the index makes it one
     # O(N) scan plus O(1) lookups, with the fallback chain preserved exactly.
     if runtime_index === nothing
-        runtime_index = build_signature_runtime_index(snap, sig_vec)
+        runtime_index = cached_signature_runtime_index(snap, sig_vec,
+                                                       sig isa Dagger.Signature ? sig.hash : hash(sig_vec))
     end
 
     # Estimate network transfer cost per *parent* processor. Chunks are located
@@ -823,7 +825,7 @@ const DEFAULT_TRANSFER_RATE = UInt64(1_000_000)
         # in seconds while every other term here is in nanoseconds. Scale it
         # up, or transfer cost is discounted by a factor of a billion and data
         # locality never affects the choice of processor.
-        rate = metrics_lookup_transfer_rate(snap, proc, pid)
+        rate = cached_metrics_lookup_transfer_rate(snap, proc, pid)
         tx_rate = rate !== nothing ? rate : DEFAULT_TRANSFER_RATE
         tx_cost = (tx_costs[gproc]/tx_rate) * 1e9
         cost = est_time_util + pressures[idx] + tx_cost + task_xfer_cost

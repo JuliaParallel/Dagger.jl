@@ -35,12 +35,16 @@ import TaskLocalValues: TaskLocalValue
 import ScopedValues: ScopedValue, @with, with
 
 import ..Dagger: SignatureMetric, ProcessorMetric, WorkerMetric, TransferSizeMetric, TransferTimeMetric, TransferRateMetric
-import ..Dagger: TASK_SIGNATURE, TASK_PROCESSOR, TASK_WORKER, TASK_TRANSFER_SIZE, TASK_TRANSFER_TIME
 import ..Dagger: execute_metrics_spec, metrics_lookup_runtime, metrics_lookup_alloc, metrics_lookup_transfer_rate
-import ..Dagger: SignatureRuntimeIndex, build_signature_runtime_index, metrics_lookup_runtime_from_index
+import ..Dagger: SignatureRuntimeIndex, build_signature_runtime_index, cached_signature_runtime_index, metrics_lookup_runtime_from_index
+import ..Dagger: cached_metrics_lookup_alloc, cached_metrics_lookup_transfer_rate
 import ..Dagger: extract_collected_metrics, apply_collected_metrics!
 import ..Dagger.MetricsTracker as MT
 
+
+# How stale a metrics snapshot the cost model will accept before rebuilding.
+# See the `snapshot_stale` call in `schedule_one!`.
+const COST_MODEL_SNAPSHOT_MAX_AGE_NS = UInt64(100_000_000) # 100ms
 
 include("util.jl")
 include("fault-handler.jl")
@@ -1013,9 +1017,18 @@ concurrently across threads.
     # per-signature index serves both callers: each is then O(1) per processor
     # after a single O(N) build, instead of two independent end-to-end scans
     # per task.
-    snap = MT.snapshot(MT.global_metrics_cache())
+    # N.B. `snapshot_stale`, not `snapshot`. A rebuild deep-copies every context
+    # and storage (273 allocs / 67 KB against a 488-value cache), and the
+    # cache's generation advances on every task completion -- so an exact
+    # snapshot here means a full copy per scheduling pass, which is what put
+    # `test/allocations.jl` 2.5-6x over bound. The cost model reduces many
+    # samples to an estimate, so a view a few milliseconds old is
+    # indistinguishable in effect; this bounds rebuilds by time instead of by
+    # task completion rate.
+    snap = MT.snapshot_stale(MT.global_metrics_cache(), COST_MODEL_SNAPSHOT_MAX_AGE_NS)
     sig_vec_for_index = sig isa Dagger.Signature ? sig.sig : sig
-    runtime_index = build_signature_runtime_index(snap, sig_vec_for_index)
+    sig_hash_for_index = sig isa Dagger.Signature ? sig.hash : hash(sig_vec_for_index)
+    runtime_index = cached_signature_runtime_index(snap, sig_vec_for_index, sig_hash_for_index)
     estimate_task_costs!(sorted_procs, costs, state, input_procs, task;
                          sig, runtime_index, snap)
     empty!(input_procs)
@@ -2419,19 +2432,23 @@ Executes a single task specified by `task` on `to_proc`.
         # Set TLS variables (positional form: no NamedTuple per task)
         Dagger.set_tls!(to_proc, task.sch_uid, task.sch_handle::SchedulerHandle, task,
                         Dagger.DTASK_CANCEL_TOKEN[], logging_enabled,
-                        Dagger.current_acceleration(), local_metrics_cache)
+                        Dagger.current_acceleration(), local_metrics_cache,
+                        task_sig, transfer_size, transfer_time)
 
         result = Dagger.with_options(propagated) do
-            @with TASK_SIGNATURE => task_sig TASK_PROCESSOR => to_proc TASK_WORKER => myid() TASK_TRANSFER_SIZE => transfer_size TASK_TRANSFER_TIME => transfer_time begin
-                MT.with_metrics(mspec, Dagger, :execute!, thunk_id, MT.SyncInto(local_metrics_cache)) do
-                    # Execute
-                    # N.B. Splatting an empty kwargs Vector still materializes a
-                    # NamedTuple via merge; skip it in the common no-kwargs case
-                    if isempty(fetched_kwargs)
-                        execute!(to_proc, f, fetched_args...)
-                    else
-                        execute!(to_proc, f, fetched_args...; fetched_kwargs...)
-                    end
+            # N.B. The facts these metrics record (signature, processor,
+            # worker, transfer stats) reach them through the thunk's TLS, set
+            # just above. They used to be passed in a `@with` over five
+            # `ScopedValue`s, which cost ~939 allocations / 32 KB per task --
+            # more than the entire rest of the scheduler path.
+            MT.with_metrics(mspec, Dagger, :execute!, thunk_id, MT.SyncInto(local_metrics_cache)) do
+                # Execute
+                # N.B. Splatting an empty kwargs Vector still materializes a
+                # NamedTuple via merge; skip it in the common no-kwargs case
+                if isempty(fetched_kwargs)
+                    execute!(to_proc, f, fetched_args...)
+                else
+                    execute!(to_proc, f, fetched_args...; fetched_kwargs...)
                 end
             end
         end
