@@ -263,5 +263,47 @@ end
     @testset "LinearAlgebra dispatch stays sparse" begin
         test_sparse_solve_dispatch(; expect_direct=true)
     end
+
+    @testset "numeric reuse lu!(F, A)" begin
+        function factor_objectid(F)
+            return fetch(Dagger.spawn(Dagger._pinned_factor_objectid,
+                                      Dagger.Options(; compute_scope=F.scope), F.fact))
+        end
+        Asp2 = 2 * Asp   # same CSC pattern, new values
+        xref2 = Matrix(Asp2) \ b
+        DA2 = distribute(Asp2, A_part)
+        # Pattern change: an extra corner entry.
+        Asp3 = Asp + SparseArrays.sparse([1], [n], [0.5], n, n)
+        xref3 = Matrix(Asp3) \ b
+        DA3 = distribute(Asp3, A_part)
+        Db = distribute(b, Db_part)
+
+        @testset "$(solver)" for solver in (:klu, :splu)
+            DA = distribute(Asp, A_part)
+            F = solver === :klu ? Dagger.klu(DA) : Dagger.splu(DA)
+            id0 = factor_objectid(F)
+            @test collect(F \ Db) ≈ xref
+
+            @test LinearAlgebra.lu!(F, DA2) === F
+            @test collect(F \ Db) ≈ xref2
+            id1 = factor_objectid(F)
+            if solver === :klu
+                @test id0 == id1
+            end
+
+            # Pattern change: KLU falls back to a full factor; UMFPACK rebuilds.
+            @test LinearAlgebra.lu!(F, DA3) === F
+            @test collect(F \ Db) ≈ xref3
+
+            @test_throws DimensionMismatch LinearAlgebra.lu!(F, distribute(Asp[1:n÷2, 1:n÷2],
+                                                             Blocks(k, k)))
+        end
+
+        Fdist = Dagger.splu(distribute(Asp, A_part); distributed=true)
+        @test_throws ArgumentError LinearAlgebra.lu!(Fdist, DA2)
+        Fschur = Dagger.splu(distribute(lap2d(Float64, 8), Blocks(16, 16));
+                             distributed=true, method=:schur, nparts=2)
+        @test_throws ArgumentError LinearAlgebra.lu!(Fschur, distribute(lap2d(Float64, 8), Blocks(16, 16)))
+    end
 end
 
