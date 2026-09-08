@@ -109,6 +109,7 @@ include("sch/Sch.jl"); using .Sch
 include("tochunk.jl")
 
 # Data dependency task queue
+include("datadeps/types.jl")
 include("datadeps/aliasing.jl")
 include("datadeps/chunkview.jl")
 include("datadeps/remainders.jl")
