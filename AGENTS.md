@@ -420,6 +420,7 @@ lesson.
    the matching `mul!` AdjOrTrans pair) are ambiguous when both sides are
    `SM` — Krylov's `copyto!(V[1], R₀)` and `mul!(R, V', Q)` hit that.
    `householder!` / `kunmqr!` wrappers must also match Krylov's
-   `AbstractMatrix{FC}` / `AbstractVector{FC}` parameterization; specializing
-   only the `Q` argument is less specific on `R`/`τ`/`buffer` and is
-   ambiguous with the generic.
+   `AbstractMatrix{FC}` / `AbstractVector{FC}` parameterization *and* the
+   `FC <: FloatOrComplex` bound; specializing only `Q` or leaving `FC`
+   unconstrained is less specific on `R`/`τ`/`buffer` and is ambiguous
+   with the generic.

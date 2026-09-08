@@ -1,7 +1,7 @@
 module KrylovExt
 
 import Krylov
-import Krylov: KrylovConstructor
+import Krylov: KrylovConstructor, FloatOrComplex
 import Dagger
 import Dagger: DVector, DMatrix, Blocks
 import LinearAlgebra
@@ -291,16 +291,16 @@ end
 # ::AbstractVector{FC}[, ::AbstractVector{FC}])`. A method that only specializes
 # `Q::BlockKrylovMatrix` / `Q::DMatrix` is *less* specific on `R`/`τ`/`buffer`
 # and Julia will not pick it.
-function Krylov.householder!(Q::DMatrix{FC}, R::AbstractMatrix{FC}, τ::AbstractVector{FC}; compact::Bool=false) where {FC}
+function Krylov.householder!(Q::DMatrix{FC}, R::AbstractMatrix{FC}, τ::AbstractVector{FC}; compact::Bool=false) where {FC <: FloatOrComplex}
     return _householder_dmatrix!(Q, R, τ, nothing; compact)
 end
-function Krylov.householder!(Q::DMatrix{FC}, R::AbstractMatrix{FC}, τ::AbstractVector{FC}, buffer::AbstractVector{FC}; compact::Bool=false) where {FC}
+function Krylov.householder!(Q::DMatrix{FC}, R::AbstractMatrix{FC}, τ::AbstractVector{FC}, buffer::AbstractVector{FC}; compact::Bool=false) where {FC <: FloatOrComplex}
     return _householder_dmatrix!(Q, R, τ, buffer; compact)
 end
-function Krylov.householder!(Q::BlockKrylovMatrix{FC}, R::AbstractMatrix{FC}, τ::AbstractVector{FC}; compact::Bool=false) where {FC}
+function Krylov.householder!(Q::BlockKrylovMatrix{FC}, R::AbstractMatrix{FC}, τ::AbstractVector{FC}; compact::Bool=false) where {FC <: FloatOrComplex}
     return Krylov.householder!(Q.data, R isa BlockKrylovMatrix ? R.data : R, τ; compact)
 end
-function Krylov.householder!(Q::BlockKrylovMatrix{FC}, R::AbstractMatrix{FC}, τ::AbstractVector{FC}, buffer::AbstractVector{FC}; compact::Bool=false) where {FC}
+function Krylov.householder!(Q::BlockKrylovMatrix{FC}, R::AbstractMatrix{FC}, τ::AbstractVector{FC}, buffer::AbstractVector{FC}; compact::Bool=false) where {FC <: FloatOrComplex}
     return Krylov.householder!(Q.data, R isa BlockKrylovMatrix ? R.data : R, τ, buffer; compact)
 end
 
@@ -310,14 +310,14 @@ end
 function Krylov.kungqr_buffer!(A::Union{DMatrix,BlockKrylovMatrix}, τ::AbstractVector)
     return 0
 end
-function Krylov.kunmqr_buffer!(side::Char, trans::Char, A::BlockKrylovMatrix{T}, τ::AbstractVector{T}, C::AbstractMatrix{T}) where {T}
+function Krylov.kunmqr_buffer!(side::Char, trans::Char, A::BlockKrylovMatrix{T}, τ::AbstractVector{T}, C::AbstractMatrix{T}) where {T <: LinearAlgebra.BlasFloat}
     return Krylov.kunmqr_buffer!(side, trans, A.data, τ, C isa BlockKrylovMatrix ? C.data : C)
 end
-function Krylov.kunmqr!(side::Char, trans::Char, A::BlockKrylovMatrix{T}, τ::AbstractVector{T}, C::BlockKrylovMatrix{T}) where {T}
+function Krylov.kunmqr!(side::Char, trans::Char, A::BlockKrylovMatrix{T}, τ::AbstractVector{T}, C::BlockKrylovMatrix{T}) where {T <: LinearAlgebra.BlasFloat}
     Krylov.kunmqr!(side, trans, A.data, τ, C.data)
     return C
 end
-function Krylov.kunmqr!(side::Char, trans::Char, A::BlockKrylovMatrix{T}, τ::AbstractVector{T}, C::BlockKrylovMatrix{T}, buffer::AbstractVector{T}) where {T}
+function Krylov.kunmqr!(side::Char, trans::Char, A::BlockKrylovMatrix{T}, τ::AbstractVector{T}, C::BlockKrylovMatrix{T}, buffer::AbstractVector{T}) where {T <: LinearAlgebra.BlasFloat}
     Krylov.kunmqr!(side, trans, A.data, τ, C.data, buffer)
     return C
 end
