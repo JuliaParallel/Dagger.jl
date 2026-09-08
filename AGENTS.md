@@ -303,3 +303,16 @@ lesson.
    before taking a dense factorization path; the specific `lu(A, RowMaximum())`
    / `lu!(A, NoPivot())` methods skip the default-pivot wrapper, so the guard
    has to live in those methods too.
+
+28. **LinearSolve's `DefaultLinearSolver` is the wrong default for a `DArray`.**
+   `needs_concrete_A(::DefaultLinearSolver) = true`, and its `init_cacheval`
+   materializes every polyalgorithm slot (LU, QR, KLU, …). Returning
+   `DefaultLinearSolver(KrylovJL_GMRES)` for a `DMatrix` or a matrix-free
+   operator therefore tries to LU-init a distributed / abstract operator —
+   the generic `defaultalg` fallback looks like it chose Krylov, but the
+   wrapper is what ODE/NonlinearSolve actually init. `defaultalg` must
+   return `KrylovJL_GMRES()` / `PureKLUFactorization()` /
+   `PureUMFPACKFactorization()` directly. Do not invent a `Dagger.xyz`
+   solver type; hook LinearSolve's existing algorithms. And do not reach
+   into `KrylovExt` from `LinearSolveExt` (lesson 17): build Krylov
+   workspaces with `KrylovConstructor` yourself.

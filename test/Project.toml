@@ -1,6 +1,7 @@
 [deps]
 # Direct dep so the [compat] pin below applies. AlgebraicMultigrid -> LinearSolve
 # -> SparseColumnPivotedQR's AMD extension reads AMD.SS_Int, which 0.5.4 removed.
+# LinearSolve is also a first-class test dep for array/linalg/linearsolve.jl.
 AMD = "14f7f29c-3bd6-536c-9a0b-7339e30b5a3e"
 AlgebraicMultigrid = "2169fc97-5a83-5252-b627-83903c6c433c"
 ArgParse = "c7e460c6-2fb9-53a9-8c5b-16f535851c63"
@@ -18,6 +19,7 @@ JSON3 = "0f8b85d8-7281-11e9-16c2-39a750bddbf1"
 KernelAbstractions = "63c18a36-062a-441e-b654-da1e3ab1ce7c"
 Krylov = "ba0b0d4f-ebba-5204-a429-3ac8c609bfb7"
 LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
+LinearSolve = "7ed4a6bd-45f5-4d41-b270-4a48e9bafcae"
 LinuxPerf = "b4c46c6c-4fb0-484d-a11a-41bc3392d094"
 MemPool = "f9f48841-c794-520a-933b-121f7ba6ed94"
 Metis = "2679e427-3c69-5b7f-982b-ece356f1e94b"
