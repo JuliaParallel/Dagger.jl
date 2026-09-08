@@ -6,8 +6,18 @@
 # benchmark's `setup` (and freed in `teardown`) so only the running size is
 # resident; sizes whose estimated peak allocation exceeds the memory budget are
 # skipped.
+#
+# Sparse variants of the neighborhood kernels run the same stencil over sparse
+# tiles, and are gated the same way.
 
 import Dagger: @stencil, Wrap, Pad, Reflect, Clamp
+
+@everywhere using SparseArrays
+
+# Fraction of stored entries in a sparse stencil operand. Chosen below the point
+# where restricting the sweep to the dilated nonzero pattern stops paying --
+# roughly `(2*neigh_dist+1)^-ndims`, about 11% for the 3x3 2-D stencils here.
+const stencil_density = parse(Float64, get(ENV, "BENCHMARK_STENCIL_DENSITY", "0.01"))
 
 # BenchmarkTools cannot parse @stencil inside @benchmarkable, so each kernel is
 # wrapped in a plain function.
@@ -40,6 +50,10 @@ function stencil_alloc_neighbors_wrap(A)
     return @stencil sum(@neighbors(A[idx], 1, Wrap()))
 end
 
+function stencil_alloc_neighbors_pad(A)
+    return @stencil sum(@neighbors(A[idx], 1, Pad(0)))
+end
+
 function stencil_update_plus!(A, B)
     @stencil B[idx] = B[idx] + A[idx]
     return B
@@ -52,6 +66,31 @@ function stencil_multi_expr!(A, B, ::Type{T}) where {T}
     end
     return B
 end
+
+# The `zero_preserving=true` option is newer than `@stencil` itself, and an
+# unrecognized option is a *macroexpansion* error -- which `supported` cannot
+# catch, since it would abort this file's load rather than a benchmark's run. So
+# define these kernels through `@eval` and treat a failure as "baseline lacks the
+# option", the same way `supported` treats a failing probe.
+const zero_preserving_ok = try
+    @eval function stencil_neighbors_pad_zp!(A, B)
+        @stencil zero_preserving=true B[idx] = sum(@neighbors(A[idx], 1, Pad(0)))
+        return B
+    end
+    @eval function stencil_alloc_neighbors_pad_zp(A)
+        return @stencil zero_preserving=true sum(@neighbors(A[idx], 1, Pad(0)))
+    end
+    true
+catch err
+    @warn "Skipping unsupported benchmark(s): stencil/sparse (zero_preserving)" exception = (err, catch_backtrace())
+    false
+end
+
+# Sparse operands, built on the driver and distributed -- mirroring the sparse
+# linalg suite. `sprand`/`spzeros` have `Blocks`-aware methods, but going through
+# `distribute` keeps this runnable on a baseline revision that lacks them.
+sparse_rand(T, N, b, density) = distribute(sprand(T, N, N, density), Blocks(b, b))
+sparse_zeros(T, N, b) = distribute(spzeros(T, N, N), Blocks(b, b))
 
 function stencil_suite(ctx; method, accels)
     @assert method == "dagger" "Stencil suite only supports `dagger` execution"
@@ -104,6 +143,25 @@ function stencil_suite(ctx; method, accels)
         stencil_multi_expr!(A, B, T)
     end
 
+    sparse_ok = supported("stencil/sparse (neighbors Pad)") do
+        A = sparse_rand(T, 8, 4, 0.5)
+        B = sparse_zeros(T, 8, 4)
+        stencil_neighbors_pad!(A, B)
+    end
+    sparse_zp_ok = zero_preserving_ok && supported("stencil/sparse (zero_preserving)") do
+        A = sparse_rand(T, 8, 4, 0.5)
+        B = sparse_zeros(T, 8, 4)
+        stencil_neighbors_pad_zp!(A, B)
+    end
+    sparse_alloc_ok = supported("stencil/sparse alloc (Pad)") do
+        A = sparse_rand(T, 8, 4, 0.5)
+        wait(stencil_alloc_neighbors_pad(A))
+    end
+    sparse_zp_alloc_ok = zero_preserving_ok && supported("stencil/sparse alloc (zero_preserving)") do
+        A = sparse_rand(T, 8, 4, 0.5)
+        wait(stencil_alloc_neighbors_pad_zp(A))
+    end
+
     for N in scales
         b = square_block(N)
         sub = BenchmarkGroup()
@@ -151,6 +209,46 @@ function stencil_suite(ctx; method, accels)
                     setup = (A = zeros(Blocks($b, $b), $T, $N, $N);
                              B = zeros(Blocks($b, $b), $T, $N, $N); wait(A)),
                     teardown = (A = nothing; B = nothing; @everywhere GC.gc()))
+            end
+        end
+
+        # Sparse tiles, same kernel and same blocking as the dense entries above,
+        # so the two are directly comparable at a given N. Budgeted against
+        # *dense* bytes despite the sparse storage: an unrestricted sweep visits
+        # every index of every tile, so its cost tracks N^2 rather than the
+        # nonzero count, and this keeps that work bounded on the same ladder the
+        # dense entries stop at.
+        if fits_budget(dense_bytes(N; nmats=2, T=T))
+            if sparse_ok
+                sub["sparse neighbors (Pad)"] = @benchmarkable(stencil_neighbors_pad!(A, B),
+                    setup = (A = sparse_rand($T, $N, $b, $stencil_density);
+                             B = sparse_zeros($T, $N, $b); wait(A)),
+                    teardown = (A = nothing; B = nothing; @everywhere GC.gc()))
+            end
+
+            # Same kernel and same result as the entry above; the option asserts
+            # the kernel is zero-preserving, which lets the sweep skip every index
+            # outside the operands' nonzero pattern dilated by `neigh_dist`.
+            if sparse_zp_ok
+                sub["sparse neighbors (Pad, zero_preserving)"] = @benchmarkable(stencil_neighbors_pad_zp!(A, B),
+                    setup = (A = sparse_rand($T, $N, $b, $stencil_density);
+                             B = sparse_zeros($T, $N, $b); wait(A)),
+                    teardown = (A = nothing; B = nothing; @everywhere GC.gc()))
+            end
+        end
+
+        # Out-of-place sparse: allocates its sparse output as well as filling it.
+        if fits_budget(dense_bytes(N; nmats=3, T=T))
+            if sparse_alloc_ok
+                sub["sparse alloc (Pad)"] = @benchmarkable(wait(stencil_alloc_neighbors_pad(A)),
+                    setup = (A = sparse_rand($T, $N, $b, $stencil_density); wait(A)),
+                    teardown = (A = nothing; @everywhere GC.gc()))
+            end
+
+            if sparse_zp_alloc_ok
+                sub["sparse alloc (Pad, zero_preserving)"] = @benchmarkable(wait(stencil_alloc_neighbors_pad_zp(A)),
+                    setup = (A = sparse_rand($T, $N, $b, $stencil_density); wait(A)),
+                    teardown = (A = nothing; @everywhere GC.gc()))
             end
         end
 

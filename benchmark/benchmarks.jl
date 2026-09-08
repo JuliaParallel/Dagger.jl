@@ -53,6 +53,8 @@
 #                  cholesky, lu, qr, svd, solve)
 #     - "sparse" : sparse distributed linear algebra (spmv, spgemm, and
 #                  iterative Krylov solve)
+#     - "stencil": distributed stencil computations (`@stencil`), dense and
+#                  sparse
 #     - "dtable" : DTables data operations (legacy; opt-in, see below)
 #   Available methods: "raw" (non-Dagger), "dagger" (Dagger).
 #   Available accelerations: "cuda", "amdgpu" (require the relevant packages,
