@@ -152,6 +152,13 @@ mismatched partitionings automatically.
     some earlier operation still solves correctly, with nothing to special-case
     at the call site.
 
+    Unstructured meshes should not use raw geometric `Blocks` on the mesh
+    numbering. `repartition(A, Blocks(k, k); partitioner=Metis)` (after
+    `using Metis`) permutes by the adjacency graph so tiles cut fewer edges;
+    apply the same `perm` to `b` (see [Sparse Arrays](@ref)). Per-tile
+    Jacobi / ILU / AMG still see only the diagonal tiles — a better numbering
+    is what makes those tiles a useful restriction, not a global coarse grid.
+
 ## Known nullspaces
 
 Neumann Poisson, Stokes, and Maxwell operators have a small, known kernel

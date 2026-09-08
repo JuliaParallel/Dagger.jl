@@ -631,7 +631,11 @@ end
 auto_blocks(A::AbstractArray{T,N}) where {T,N} = auto_blocks(size(A))
 
 distribute(A::AbstractArray, assignment::AssignmentType = :arbitrary) = distribute(A, AutoBlocks(), assignment)
-function distribute(A::AbstractArray{T,N}, dist::Blocks{N}, assignment::AssignmentType{N} = :arbitrary) where {T,N}
+function distribute(A::AbstractArray{T,N}, dist::Blocks{N}, assignment::AssignmentType{N} = :arbitrary;
+                    partitioner=nothing, perm=nothing) where {T,N}
+    if partitioner !== nothing || perm !== nothing
+        return _distribute_with_perm(A, dist, assignment; partitioner, perm)
+    end
     procgrid = build_procgrid(assignment, size(A), dist.blocksize, current_acceleration())
     return _to_darray(Distribute(dist, A, procgrid))
 end

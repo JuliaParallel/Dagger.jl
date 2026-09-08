@@ -57,6 +57,7 @@ tests = [
     ("Array - LinearAlgebra - Sparse Direct", "array/linalg/sparsedirect.jl"),
     ("Array - LinearAlgebra - LinearSolve", "array/linalg/linearsolve.jl"),
     ("Array - LinearAlgebra - Sparse Assembly", "array/linalg/assembly.jl"),
+    ("Array - LinearAlgebra - Graph Partition", "array/linalg/partition.jl"),
     ("Array - Permute", "array/permute.jl"),
     ("Array - Random", "array/random.jl"),
     ("Array - Stencils", "array/stencil.jl"),
