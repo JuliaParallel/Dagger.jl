@@ -44,6 +44,13 @@ end
 # (SparseArrays' `lu` analog; tried before KLU).
 Dagger._try_sparse_direct_lu(::Val{:splu}, A::DMatrix) = Dagger.splu(A)
 
+# PureUMFPACK has no `splu!` / numeric-only update. `lu!(F, A)` still works
+# (same pinned box, same `F`), but it rebuilds the whole factor. Prefer
+# `Dagger.klu` when the values will change and the pattern will not.
+function Dagger._update_sparse_lu!(::PureUMFPACK.PureLU, S; kwargs...)
+    return PureUMFPACK.splu(_as_sparse(S); kwargs...)
+end
+
 # `(Rs .* A)[p, q] == L * U` with unit-lower `L` (explicit stored ones on the
 # diagonal; solve treats it as unit diagonal via `UnitLowerTriangular`).
 function Dagger._extract_lu_factors(F::PureUMFPACK.PureLU)

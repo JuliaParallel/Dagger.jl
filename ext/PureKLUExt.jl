@@ -24,6 +24,24 @@ end
 # UMFPACK wins when both extensions are loaded (`Val{:splu}` is tried first).
 Dagger._try_sparse_direct_lu(::Val{:klu}, A::DMatrix) = Dagger.klu(A)
 
+# Numeric reuse: same CSC pattern → `klu!` (symbolic + workspace stay).
+# A pattern change (e.g. a stored entry became a structural zero after gather)
+# falls back to a full `klu` into the pinned box.
+function Dagger._update_sparse_lu!(F::PureKLU.KLUFactorization, S; kwargs...)
+    S = _as_sparse(S)
+    try
+        return PureKLU.klu!(F, S; kwargs...)
+    catch e
+        if e isa ArgumentError
+            msg = e.msg
+            if occursin("pattern", msg) || occursin("Sizes of K and S", msg)
+                return PureKLU.klu(S; kwargs...)
+            end
+        end
+        rethrow()
+    end
+end
+
 # Per-tile block direct preconditioner.
 function Dagger.BlockKLUPreconditioner(A::DMatrix; kwargs...)
     build = tile -> PureKLU.klu(_as_sparse(Dagger._tile_matrix(tile)); kwargs...)

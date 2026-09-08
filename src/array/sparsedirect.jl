@@ -6,8 +6,7 @@
 # UMFPACK resources and can't be moved between workers), these factorizations are
 # plain Julia data: serializable and movable, so Dagger can schedule them freely.
 #
-# Two entry points are exposed (implemented in `ext/PureKLUExt.jl` /
-# `ext/PureUMFPACKExt.jl`):
+# Paths (implemented in `ext/PureKLUExt.jl` / `ext/PureUMFPACKExt.jl`):
 #
 #   - A whole-matrix direct solve: `Dagger.klu(A)` / `Dagger.splu(A)` gather the
 #     (sparse) `DMatrix` onto a single worker (the one owning the most tiles),
@@ -26,6 +25,10 @@
 #   - Per-tile block direct solves (`BlockKLUPreconditioner` /
 #     `BlockUMFPACKPreconditioner`, in `iterativesolvers.jl`), which reuse the
 #     block-preconditioner machinery.
+#   - Numeric reuse when values change but the sparsity pattern does not:
+#     `lu!(F, A)` / `cholesky!(F, A)` gather onto the pinned worker and
+#     re-numericize. KLU uses `klu!`; CHOLMOD uses `cholesky!(F, S)`.
+#     PureUMFPACK has no `splu!`, so that path rebuilds into the same pinned box.
 
 """
     klu(A::DMatrix; kwargs...) -> DaggerSparseLU
@@ -36,7 +39,8 @@ once; the factor stays pinned there. Solve with `F \\ b` or `ldiv!(x, F, b)` ove
 `DVector`s. Requires `PureKLU.jl` to be loaded.
 
 KLU is well suited to unsymmetric systems with near-triangular structure (e.g.
-circuit simulation). See also [`splu`](@ref).
+circuit simulation). When only the stored values change, refresh with
+`lu!(F, A)` (`klu!` reuses the symbolic analysis). See also [`splu`](@ref).
 """
 function klu end
 
@@ -148,6 +152,16 @@ sparse-backed `DMatrix` when those packages are loaded. The underlying
 factorization is pure-Julia and pinned to a single worker (`fact` is a
 `Chunk`/`DTask` with `scope`). Solve `A x = b` with `F \\ b` (returns a
 `DVector` partitioned like `b`) or `ldiv!(x, F, b)`.
+
+When the operator keeps the same sparsity and only the stored values change
+(implicit time stepping), refresh the factor with `lu!(F, A)` rather than
+calling `klu`/`splu`/`lu` again. That is the LinearAlgebra update API; there
+is no `Dagger.refactor`. KLU reuses the symbolic analysis (`klu!`).
+PureUMFPACK has no in-place numeric update, so `lu!(F, A)` on an `splu`
+factor rebuilds `splu` in the same pinned box. Prefer [`klu`](@ref) when
+the values will change. `lu!(F, A)` is not defined for
+[`DistributedSparseLU`](@ref) / [`DistributedSchurLU`](@ref) (the triangular
+factors are already extracted).
 """
 struct DaggerSparseLU{F,S,P}
     fact::F          # pinned factorization (`Chunk` / `DTask`)
@@ -171,6 +185,11 @@ This is the sparse analogue of `LinearAlgebra.Cholesky` / `CHOLMOD.Factor`: the
 public name is still `cholesky`, not a `Dagger.spchol` entry point. The wrapper
 exists because a CHOLMOD factor is process-local (C pointers) and cannot move
 between workers — the same gather-then-pin contract as [`DaggerSparseLU`](@ref).
+
+Refresh an existing factor with `cholesky!(F, A)` when the sparsity pattern is
+unchanged and only the values move (CHOLMOD reuses the symbolic analysis).
+`cholesky!(A)` with a `DMatrix` first argument is still a fresh factor, not
+an in-place potrf on sparse tiles.
 """
 struct DaggerSparseCholesky{T,F,S,P} <: LinearAlgebra.Factorization{T}
     fact::F
@@ -185,6 +204,35 @@ Base.size(F::DaggerSparseCholesky) = (F.n, F.n)
 Base.size(F::DaggerSparseCholesky, i::Integer) = i <= 2 ? F.n : 1
 
 const _PinnedSparseFactor = Union{DaggerSparseLU, DaggerSparseCholesky}
+
+# Worker-local box around the backend factor. `lu!(F, A)` / `cholesky!(F, A)`
+# mutate `inner` (KLU/`klu!`, CHOLMOD/`cholesky!`, or a replacement PureLU)
+# without moving the object off the pinned worker or changing `F.fact`.
+mutable struct _MutablePinnedFactor{F}
+    inner::F
+end
+
+_factor_inner(F::_MutablePinnedFactor) = F.inner
+_factor_inner(F) = F
+Base.:\(F::_MutablePinnedFactor, b::AbstractVecOrMat) = F.inner \ b
+# Test/debug: objectid of the backend factor (same after a KLU/CHOLMOD reuse).
+_pinned_factor_objectid(F::_MutablePinnedFactor) = objectid(F.inner)
+_pinned_factor_objectid(F) = objectid(F)
+
+# Backend hook for `lu!(::DaggerSparseLU, A)`. Extensions add methods.
+# The 3-arg form carries a NamedTuple so `spawn` does not need a closure.
+function _update_sparse_lu! end
+_update_sparse_lu!(F, S, kwargs::NamedTuple) = _update_sparse_lu!(F, S; kwargs...)
+_update_sparse_lu!(F, S; kwargs...) = throw(ArgumentError(
+    "lu!(::DaggerSparseLU, A) cannot update a $(typeof(F)) factor. \
+    Build a new factorization with Dagger.klu / Dagger.splu / lu."))
+
+function _update_sparse_chol!(F, S, kwargs::NamedTuple)
+    return _update_sparse_chol!(F, S; kwargs...)
+end
+function _update_sparse_chol!(F, S; kwargs...)
+    return LinearAlgebra.cholesky!(F, S; kwargs...)
+end
 
 """
     DistributedSparseLU
@@ -222,6 +270,7 @@ end
 # Backend-specific extraction of `(L, U, p, q, Rs)` from a factored object.
 # Implemented for `PureUMFPACK.PureLU` in `PureUMFPACKExt`.
 function _extract_lu_factors end
+_extract_lu_factors(F::_MutablePinnedFactor) = _extract_lu_factors(F.inner)
 _extract_lu_factors(F) = throw(ArgumentError(
     "distributed sparse LU requires a PureUMFPACK.PureLU factor (got $(typeof(F))). \
     Use `Dagger.splu(A; distributed=true)` with PureUMFPACK.jl loaded."))
@@ -250,13 +299,28 @@ function _assemble_and_factor_pinned(factorize, ::Type{T}, row_offsets, col_offs
     S = _gather_sparse(T, tiles, row_offsets, col_offsets, m, n)
     F = factorize(S)
     proc = task_processor()
-    return tochunk(F, proc, ProcessScope(root_worker_id(proc)))
+    return tochunk(_MutablePinnedFactor(F), proc, ProcessScope(root_worker_id(proc)))
 end
 
-# Shared path for `klu` / `splu`: pick a worker, spawn assemble+factor there.
-function _spawn_direct_factorization(A::DMatrix{T}, factorize) where T
-    n = LinearAlgebra.checksquare(A)
-    scope = _select_factor_scope(A)
+# Re-numericize (or rebuild) the pinned box. Returns `nothing`; the box is
+# mutated in place so `F.fact` stays the original chunk/task.
+function _assemble_and_update_pinned(update!, box, kwargs, ::Type{T},
+                                    row_offsets, col_offsets, m, n, tiles...) where T
+    S = _gather_sparse(T, tiles, row_offsets, col_offsets, m, n)
+    inner = _factor_inner(box)
+    newF = update!(inner, S, kwargs)
+    if box isa _MutablePinnedFactor
+        box.inner = newF
+        return nothing
+    end
+    # Unboxed legacy factor: only in-place backends can update without a box.
+    newF === inner || throw(ArgumentError(
+        "sparse factor update replaced the backend object but the pinned wrapper \
+        was missing; call klu / splu / cholesky again."))
+    return nothing
+end
+
+function _direct_factor_tile_args(A::DMatrix{T}) where T
     Ac = A.chunks
     mt, nt = size(Ac)
     ntiles = mt * nt
@@ -271,11 +335,52 @@ function _spawn_direct_factorization(A::DMatrix{T}, factorize) where T
         tiles[idx] = Ac[i, j]
         idx += 1
     end
-    mA, nA = size(A)
+    return T, row_offsets, col_offsets, size(A)..., tiles
+end
+
+function _spawn_factor_update(update!, F::_PinnedSparseFactor, A::DMatrix; kwargs...)
+    LinearAlgebra.checksquare(A)
+    size(A, 1) == F.n && size(A, 2) == F.n || throw(DimensionMismatch(
+        "factorization is $(F.n)×$(F.n) but A is $(size(A, 1))×$(size(A, 2))"))
+    T, row_offsets, col_offsets, mA, nA, tiles = _direct_factor_tile_args(A)
+    fetch(spawn(_assemble_and_update_pinned, Options(; compute_scope=F.scope),
+                update!, F.fact, (; kwargs...), T,
+                row_offsets, col_offsets, mA, nA, tiles...))
+    return F
+end
+
+# Shared path for `klu` / `splu`: pick a worker, spawn assemble+factor there.
+function _spawn_direct_factorization(A::DMatrix{T}, factorize) where T
+    n = LinearAlgebra.checksquare(A)
+    scope = _select_factor_scope(A)
+    Ttile, row_offsets, col_offsets, mA, nA, tiles = _direct_factor_tile_args(A)
     part = Blocks(A.partitioning.blocksize[2])
     fact = spawn(_assemble_and_factor_pinned, Options(; compute_scope=scope),
-                 factorize, T, row_offsets, col_offsets, mA, nA, tiles...)
+                 factorize, Ttile, row_offsets, col_offsets, mA, nA, tiles...)
     return DaggerSparseLU(fact, scope, n, part)
+end
+
+"""
+    lu!(F::DaggerSparseLU, A::DMatrix) -> F
+
+Re-numericize a gathered sparse LU with the current values of `A`, reusing the
+pinned factor on `F`'s worker. Same sparsity is required for a cheap KLU
+update (`klu!`); a pattern change falls back to a full `klu`. An `splu`
+factor is rebuilt (PureUMFPACK has no `splu!`). Returns `F`.
+"""
+function LinearAlgebra.lu!(F::DaggerSparseLU, A::DMatrix; kwargs...)
+    return _spawn_factor_update(_update_sparse_lu!, F, A; kwargs...)
+end
+
+"""
+    cholesky!(F::DaggerSparseCholesky, A::DMatrix) -> F
+
+Re-numericize a gathered sparse Cholesky with the current values of `A`,
+reusing CHOLMOD's symbolic analysis when the sparsity pattern is unchanged.
+This is distinct from `cholesky!(A::DMatrix)`, which builds a new factor.
+"""
+function LinearAlgebra.cholesky!(F::DaggerSparseCholesky, A::DMatrix; kwargs...)
+    return _spawn_factor_update(_update_sparse_chol!, F, A; kwargs...)
 end
 
 # Gather RHS chunks, solve against the pinned factor, return the dense solution.
@@ -506,6 +611,18 @@ end
 
 Base.size(F::DistributedSchurLU) = (F.n, F.n)
 Base.size(F::DistributedSchurLU, i::Integer) = i <= 2 ? F.n : 1
+
+function LinearAlgebra.lu!(::DistributedSparseLU, ::DMatrix; kwargs...)
+    throw(ArgumentError(
+        "lu! cannot numeric-update a DistributedSparseLU (L and U are already extracted). \
+        Call Dagger.splu(A; distributed=true) to factor the new values."))
+end
+
+function LinearAlgebra.lu!(::DistributedSchurLU, ::DMatrix; kwargs...)
+    throw(ArgumentError(
+        "lu! cannot numeric-update a DistributedSchurLU. \
+        Call Dagger.splu(A; distributed=true, method=:schur) to factor the new values."))
+end
 
 # METIS partition + separator (implemented in `MetisExt`).
 function _nested_dissection_partition end
