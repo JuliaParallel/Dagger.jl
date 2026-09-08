@@ -214,6 +214,9 @@ A sparse `DArray` already has wrapped tiles, so it can be written to directly.
 Sparse `DArray`s support the array operations that have distributed
 implementations, including:
 
+- **Sparse QR** (`qr` / `qr!`) gathers tiles to one worker and factors with
+  SuiteSparse SPQR. This is the same gather-then-pin contract as sparse
+  `lu` / `cholesky` — tiled dense Compact-WY QR would densify the operator.
 - **Matrix–matrix multiply** (`A * B`, `mul!`), sparse × sparse, producing a
   sparse result.
 - **Sparse matrix–vector multiply** (SpMV: `A * x`, `mul!(y, A, x)`) with a

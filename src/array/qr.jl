@@ -832,7 +832,17 @@ In-place tiled Compact-WY QR factorization of a distributed matrix.
   tiling with `mt % p == 0`; on shared-memory multi-threading it is rarely faster
   than `p=1`.
 """
+# Sparse-backed `qr` is gather-then-SPQR (`sparsedirect.jl`). Declared here so
+# `qr!` can branch without depending on include order.
+function _sparse_qr end
+
 function LinearAlgebra.qr!(A::DMatrix{T}; ib::Union{Int,Nothing}=nothing, p::Int=1) where {T<:Number}
+    if is_sparse_backed(A)
+        (ib === nothing && p == 1) || throw(ArgumentError(
+            "ib and p select dense tiled Compact-WY QR; a sparse-backed DMatrix \
+             uses SuiteSparse QR (SPQR). Call qr(A) without those keywords."))
+        return _sparse_qr(A)
+    end
     p >= 1 || throw(ArgumentError("p must be >= 1, got $p"))
     ib === nothing || ib >= 1 || throw(ArgumentError("ib must be >= 1, got $ib"))
 

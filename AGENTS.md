@@ -616,3 +616,17 @@ lesson.
    `mul!(::AbstractMatrix, ::AbstractVecOrMat, ::AbstractVecOrMat, α, β)`:
    add the `AbstractVecOrMat` arm; keep an unconstrained `A` for matrix-free
    operators.
+
+46. **Sparse `qr` must not take tiled Compact-WY.** `qr!` / `qr` on a
+   sparse-backed `DMatrix` used to hit NextLA geqrf — an out-of-memory
+   densify, the same footgun as sparse `lu` / `cholesky` (lessons 27 / 31).
+   Tile type is not a `DMatrix` parameter; branch on `is_sparse_backed` in
+   `qr!` and in `qr(::DMatrix)` (LinearAlgebra's generic `qr` is
+   `qr!(copy(...))`, but an explicit method keeps pivot strategies off the
+   dense path). Gather-then-SPQR, pin like `DaggerSparseLU`. Do not add
+   `Dagger.spqr`. Do not fold `DaggerSparseQR` into `_PinnedSparseFactor`:
+   least-squares `b` has length `m` and `x` has length `n`. Do not reuse
+   `_direct_solve_matrix` for `F \\ B`: that helper does `similar(B)` and
+   writes column solutions of length `n` into an `m×p` dest. Use
+   `_direct_solve` (`fact \\ B`). Dense `ib` / `p` keywords throw on
+   sparse tiles. Check `‖Ax−b‖` against host `qr(A)\\b`.

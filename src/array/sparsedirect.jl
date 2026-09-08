@@ -203,6 +203,95 @@ DaggerSparseCholesky{T}(fact, scope, n, part) where T =
 Base.size(F::DaggerSparseCholesky) = (F.n, F.n)
 Base.size(F::DaggerSparseCholesky, i::Integer) = i <= 2 ? F.n : 1
 
+"""
+    DaggerSparseQR
+
+A sparse QR factorization of a sparse-backed `DMatrix`, produced by `qr(A)` /
+`qr!(A)`. Tiles are gathered onto one worker and factored with
+`LinearAlgebra.qr` (SuiteSparse SPQR when `SparseArrays` is loaded); the
+factor is pinned there. Solve least-squares / square systems with `F \\ b`
+or `ldiv!(x, F, b)` over `DVector`s.
+
+This is the sparse analogue of `SparseArrays`' SPQR factor: the public name
+is still `qr`, not a `Dagger.spqr` entry point. The wrapper exists because
+an SPQR factor is process-local (C pointers) and cannot move between
+workers — the same gather-then-pin contract as [`DaggerSparseLU`](@ref).
+
+`qr!(A)` on a sparse-backed `DMatrix` still gathers; it does not overwrite
+sparse tiles with Householder reflectors. Dense tiled Compact-WY `qr!` is
+unchanged. The factor is rectangular (`m×n`); do not fold it into the
+square pinned LU/Cholesky union.
+"""
+struct DaggerSparseQR{F,S,P,BP}
+    fact::F
+    scope::S
+    m::Int
+    n::Int
+    part::P    # solution (n,) — column blocks of `A`
+    bpart::BP  # RHS (m,) — row blocks of `A`
+end
+
+Base.size(F::DaggerSparseQR) = (F.m, F.n)
+Base.size(F::DaggerSparseQR, i::Integer) =
+    i == 1 ? F.m : i == 2 ? F.n : 1
+
+function _sparse_qr(A::DMatrix)
+    is_sparse_backed(A) || throw(ArgumentError(
+        "_sparse_qr is only for a sparse-backed DMatrix"))
+    m, n = size(A)
+    scope = _select_factor_scope(A)
+    Ttile, row_offsets, col_offsets, mA, nA, tiles = _direct_factor_tile_args(A)
+    part = Blocks(A.partitioning.blocksize[2])
+    bpart = Blocks(A.partitioning.blocksize[1])
+    fact = spawn(_assemble_and_factor_pinned, Options(; compute_scope=scope),
+                 LinearAlgebra.qr, Ttile, row_offsets, col_offsets, mA, nA, tiles...)
+    return DaggerSparseQR(fact, scope, m, n, part, bpart)
+end
+
+function LinearAlgebra.qr(A::DMatrix{T}; ib::Union{Int,Nothing}=nothing,
+                          p::Int=1) where {T<:Number}
+    is_sparse_backed(A) && return _sparse_qr(A)
+    return LinearAlgebra.qr!(copy(A); ib, p)
+end
+
+function LinearAlgebra.qr(A::DMatrix, ::LinearAlgebra.PivotingStrategy; kwargs...)
+    is_sparse_backed(A) && return _sparse_qr(A)
+    throw(ArgumentError(
+        "pivoted QR is not implemented for dense DMatrix; use qr(A) (Compact-WY)"))
+end
+
+function Base.:\(F::DaggerSparseQR, b::DVector)
+    length(b) == F.m || throw(DimensionMismatch(
+        "QR is $(F.m)×$(F.n) but b has length $(length(b))"))
+    x = fetch(spawn(_direct_solve, Options(; compute_scope=F.scope),
+                    F.fact, b.chunks...))
+    return distribute(x, F.part)
+end
+
+function Base.:\(F::DaggerSparseQR, b::AbstractVector)
+    return F \ distribute(collect(b), F.bpart)
+end
+
+function Base.:\(F::DaggerSparseQR, B::DMatrix)
+    size(B, 1) == F.m || throw(DimensionMismatch(
+        "QR is $(F.m)×$(F.n) but B has $(size(B, 1)) rows"))
+    # `_direct_solve_matrix` is square (`similar(B)`). Tall SPQR returns n×p.
+    X = fetch(spawn(_direct_solve, Options(; compute_scope=F.scope),
+                    F.fact, collect(B)))
+    nb = F.part.blocksize[1]
+    kb = B.partitioning.blocksize[min(2, ndims(B))]
+    return distribute(X, Blocks(nb, kb))
+end
+
+function Base.:\(F::DaggerSparseQR, B::AbstractMatrix)
+    return F \ distribute(collect(B), Blocks(F.bpart.blocksize[1],
+                                            F.part.blocksize[1]))
+end
+
+function LinearAlgebra.ldiv!(x::DVector, F::DaggerSparseQR, b::DVector)
+    return copyto!(x, F \ b)
+end
+
 const _PinnedSparseFactor = Union{DaggerSparseLU, DaggerSparseCholesky}
 
 # Worker-local box around the backend factor. `lu!(F, A)` / `cholesky!(F, A)`
