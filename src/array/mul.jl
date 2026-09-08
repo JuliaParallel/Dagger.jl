@@ -86,25 +86,29 @@ function matmatmul!(
     )
 end
 
+# Eltypes need not match: LinearAlgebra's `mul!` already promotes
+# (`DMatrix{Float32} * DVector{Float64} → DVector{Float64}`). Same-type tiles
+# still hit the `Matrix{T}` `BLAS.gemm!` method above; mixed tiles fall through
+# to `LinearAlgebra.generic_matmatmul!` the same way host `mul!` does.
 function LinearAlgebra.generic_matmatmul!(
-    C::DMatrix{T},
+    C::DMatrix,
     transA::Char,
     transB::Char,
-    A::DMatrix{T},
-    B::DMatrix{T},
+    A::DMatrix,
+    B::DMatrix,
     _add::LinearAlgebra.MulAddMul,
-) where {T}
+)
     return LinearAlgebra.generic_matmatmul!(C, transA, transB, A, B, _add.alpha, _add.beta)
 end
 function LinearAlgebra.generic_matmatmul!(
-    C::DMatrix{T},
+    C::DMatrix,
     transA::Char,
     transB::Char,
-    A::DMatrix{T},
-    B::DMatrix{T},
+    A::DMatrix,
+    B::DMatrix,
     alpha::Number,
     beta::Number,
-) where {T}
+)
     partC, partA, partB = _repartition_matmatmul(C, A, B, transA, transB)
 
     if all(in(('N', 'T', 'C')), (transA, transB))
@@ -129,7 +133,6 @@ function LinearAlgebra.generic_matmatmul!(
         return gemm_dagger!(C, transA, transB, A, B, alpha, beta)
     end
 end
-# FIXME: Mixed-precision methods
 function _repartition_matmatmul(C, A, B, transA::Char, transB::Char)
     partA = A.partitioning.blocksize
     partB = B.partitioning.blocksize
@@ -195,14 +198,15 @@ alpha and beta are scalars, and A, B and C  are matrices, with op( A )
 an m by k matrix, op( B ) a k by n matrix and C an m by n matrix.
 """
 function gemm_dagger!(
-    C::DMatrix{T},
+    C::DMatrix,
     transA::Char,
     transB::Char,
-    A::DMatrix{T},
-    B::DMatrix{T},
+    A::DMatrix,
+    B::DMatrix,
     _alpha,
     _beta,
-) where {T}
+)
+    T = eltype(C)
     Ac = A.chunks
     Bc = B.chunks
     Cc = C.chunks
@@ -307,13 +311,13 @@ matrix and A is an n-by-k matrix in the first case and a k-by-n
 matrix in the second case.
 """
 function syrk_dagger!(
-    C::DMatrix{T},
+    C::DMatrix,
     trans::Char,
-    A::DMatrix{T},
+    A::DMatrix,
     _alpha,
     _beta,
-) where {T}
-
+)
+    T = eltype(C)
     Ac = A.chunks
     Cc = C.chunks
     Amt, Ant = size(Ac)
@@ -463,22 +467,22 @@ function copydiagtile!(A, uplo)
 end
 
 function LinearAlgebra.generic_matvecmul!(
-    C::DVector{T},
+    C::DVector,
     transA::Char,
-    A::DMatrix{T},
-    B::DVector{T},
+    A::DMatrix,
+    B::DVector,
     _add::LinearAlgebra.MulAddMul,
-) where {T}
+)
     return LinearAlgebra.generic_matvecmul!(C, transA, A, B, _add.alpha, _add.beta)
 end
 function LinearAlgebra.generic_matvecmul!(
-    C::DVector{T},
+    C::DVector,
     transA::Char,
-    A::DMatrix{T},
-    B::DVector{T},
+    A::DMatrix,
+    B::DVector,
     _alpha::Number,
     _beta::Number,
-) where {T}
+)
     partC, partA, partB = _repartition_matvecmul(C, A, B, transA)
     return maybe_copy_buffered(C=>partC, A=>partA, B=>partB) do C, A, B
         return gemv_dagger!(C, transA, A, B, _alpha, _beta)
@@ -519,18 +523,27 @@ extension) using a sparse matrix-vector product. This is the matvec analogue of
 [`matmatmul!`](@ref).
 """
 function matvecmul!(C, transA::Char, A, B, alpha, beta)
-    BLAS.gemv!(transA, alpha, A, B, beta, C)
+    # Same-eltype tiles keep `BLAS.gemv!` (GPU backends overload it). Mixed
+    # eltypes use LinearAlgebra's mixed `generic_matvecmul!`, matching host
+    # `mul!`. Sparse / Finch / vendor-GPU methods are more specific than this.
+    TC = eltype(C)
+    if TC === eltype(A) === eltype(B)
+        BLAS.gemv!(transA, convert(TC, alpha), A, B, convert(TC, beta), C)
+    else
+        LinearAlgebra.generic_matvecmul!(C, transA, A, B, alpha, beta)
+    end
     return C
 end
 
 function gemv_dagger!(
-    C::DVector{T},
+    C::DVector,
     transA::Char,
-    A::DMatrix{T},
-    B::DVector{T},
+    A::DMatrix,
+    B::DVector,
     _alpha,
     _beta,
-) where {T}
+)
+    T = eltype(C)
     Ac = A.chunks
     Bc = B.chunks
     Cc = C.chunks
