@@ -708,6 +708,12 @@ Allocation with:
 - `sprand`
 - `ones`/`zeros`
 
+From `MatrixMarket` (when loaded):
+- `mmread(path, Blocks(...))` / `mmwrite(path, A)` (sparse-backed `DMatrix`; write gathers CSC)
+
+From `DelimitedFiles` (when loaded):
+- `readdlm(path, Blocks(...))` / `writedlm(path, A)` (dense `DArray`; sparse `writedlm` throws)
+
 From `Base`:
 - `getindex`/`setindex!`
 - Broadcasting
