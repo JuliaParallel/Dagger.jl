@@ -401,21 +401,18 @@ lesson.
    does not give you matrix-free blocks or field-split `mul!`.
 
 35. **GlobalAMG builds `P` from tiles, not a gathered CSC of `A`.** Per-tile
-   StandardAggregation / Ruge–Stüben on the diagonal tile, plus a
-   lightweight pairwise merge of local aggregates that share an
-   interface edge (off-diagonal entries in the same row). Matching only
-   the *unaggregated* leftovers is a no-op on 1-D Poisson: local SA
-   assigns every node, `niface=0`, and `P` stays block-diagonal — a
-   second coarse level of that `P` can make a V-cycle *worse* than
-   Jacobi (n=128, 8 tiles). Unrestricted union-find along the interface
-   chain is also wrong: if a tile's two ends share an aggregate, the
-   whole chain collapses to one coarse variable (V-cycle residuals
-   O(1)–O(5)). Each aggregate merges at most once. Jacobi-smooth `P ← T − ω D⁻¹ A T` with
-   distributed SpGEMM (`Dᵢᵢ` is the row 1-norm, matching AMG.jl's
-   `JacobiProlongation`). The caller fetches only per-tile headers
-   (`nagg` + interface pairs and local aggregate ids), not `A`. Galerkin
-   RAP stays distributed. The coarsest solve is still a gathered LU
-   (`_gather_sparse`, not `_collect_sparse_dmatrix`).
+   StandardAggregation / Ruge–Stüben on the diagonal tile, leftover
+   matching of *unaggregated* interface nodes, then Jacobi-smooth
+   `P ← T − ω D⁻¹ A T` via distributed SpGEMM (`Dᵢᵢ` is the row 1-norm,
+   matching AMG.jl's `JacobiProlongation`). On 1-D Poisson local SA
+   assigns every node, so leftover matching is a no-op and tentative `P`
+   is block-diagonal; smoothing through `A T` is what couples tiles.
+   Do **not** merge already-assigned interface aggregates: that produced
+   V-cycle residuals of O(1)–O(5) vs Jacobi (union-find collapse, and
+   even pairwise merge). A second tiled coarsening on ≤3 tiles of the
+   RAP product is also worse than Jacobi — skip it and LU that operator
+   (`_gather_sparse`, not `_collect_sparse_dmatrix`). The caller fetches
+   only per-tile headers (`nagg` + interface pairs), not `A`.
    `COLLECT_SPARSE_DMATRIX_MAXSIZE` lets tests prove setup does not
    gather the fine operator. Do not treat `stats.solved` as `Ax≈b`
    (lessons 19/32). `AMGPreconditioner` is still per-tile Schwarz — do
