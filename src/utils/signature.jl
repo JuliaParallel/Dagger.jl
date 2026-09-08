@@ -12,8 +12,7 @@ struct Signature
         #
         # This changes the hash *values*, which is safe here because `Signature`
         # hashes never cross a process boundary: they are only ever used as keys
-        # in process-local tables -- `state.signature_time_cost` /
-        # `state.signature_alloc_cost` (scheduler-local `LockedObject{Dict}`s) and
+        # in process-local tables -- the MetricsTracker cost model's lookups and
         # `SIGNATURE_DEFAULT_CACHE` (a `TaskLocalValue`) -- and `Signature`s
         # themselves are only stored in `Thunk.sig`, which is never serialized.
         # Hash full signature

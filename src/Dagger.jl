@@ -35,6 +35,12 @@ import GPUArraysCore
 
 import Preferences: @load_preference, @set_preferences!
 
+include(joinpath(@__DIR__, "../lib/MetricsTracker/src/MetricsTracker.jl"))
+import .MetricsTracker as MT
+
+const reuse_metrics = @load_preference("reuse-metrics", false)
+const metrics_path = @load_preference("metrics-path", "dagger-metrics.dat")
+
 if @load_preference("distributed-package") == "DistributedNext"
     import DistributedNext
     import DistributedNext: Future, RemoteChannel, myid, workers, nworkers, procs, remotecall, remotecall_wait, remotecall_fetch, check_same_host
@@ -92,6 +98,7 @@ include("utils/interval_tree.jl")
 include("utils/libc-array.jl")
 include("memory-spaces.jl")
 include("acceleration.jl")
+include("utils/metrics.jl")
 
 # Task scheduling
 include("compute.jl")
@@ -243,6 +250,52 @@ function __init__()
     end
 
     HIER_TIMING[] = parse(Bool, get(ENV, "JULIA_DAGGER_HIER_TIMING", "0"))
+
+    # Optionally reload scheduler metrics recorded by a previous session, and
+    # keep them journaled so a crash does not lose the cost model. Only the
+    # scheduler's own worker owns the file.
+    if reuse_metrics && myid() == 1
+        try
+            if isfile(metrics_path * ".base") || isfile(metrics_path)
+                MT.load_metrics!(MT.global_metrics_cache(), metrics_path)
+            end
+            MT.attach_journal!(MT.global_metrics_cache(), metrics_path)
+        catch err
+            @warn "Failed to initialize Dagger metrics persistence" exception=err
+        end
+        atexit() do
+            try
+                MT.save_metrics!(MT.global_metrics_cache(), metrics_path)
+                MT.detach_journal!(MT.global_metrics_cache())
+            catch err
+                @warn "Failed to save Dagger metrics on exit" exception=err
+            end
+        end
+    end
+end
+
+"""
+    set_reuse_metrics!(value::Bool)
+
+Set a [preference](https://github.com/JuliaPackaging/Preferences.jl) for whether
+to persist scheduler metrics across Julia sessions. Restart Julia for the
+change to take effect.
+"""
+function set_reuse_metrics!(value::Bool)
+    @set_preferences!("reuse-metrics" => value)
+    @info "Dagger.jl preference has been set, restart your Julia session for this change to take effect!"
+end
+
+"""
+    set_metrics_path!(value::String)
+
+Set a [preference](https://github.com/JuliaPackaging/Preferences.jl) for the
+file path used to persist scheduler metrics. Restart Julia for the change to
+take effect.
+"""
+function set_metrics_path!(value::String)
+    @set_preferences!("metrics-path" => value)
+    @info "Dagger.jl preference has been set, restart your Julia session for this change to take effect!"
 end
 
 end # module

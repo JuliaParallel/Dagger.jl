@@ -90,11 +90,14 @@ function datadeps_schedule_task(sched::UltraScheduler, state::DataDepsState, all
     f_chunk = tochunk(value(spec.fargs[1]))
     task_time = remotecall_fetch(1, f_chunk, args) do f, args
         Sch.init_eager()
-        sch_state = Sch.EAGER_STATE[]
-        return @lock sch_state.lock begin
-            sig = Sch.signature(sch_state, f, args)
-            return lock(sch_state.signature_time_cost) do stc; get(stc, sig, 1000^3); end
-        end
+        # The measured runtime for this signature lives in the scheduler's
+        # MetricsTracker cache, which is owned by worker 1 (where this call
+        # runs). Fall back to the same 1s default the cost model uses when no
+        # measurement exists yet.
+        sig = Sch.signature(f, args)
+        snap = MT.snapshot(MT.global_metrics_cache())
+        runtime = metrics_lookup_runtime(snap, sig.sig, processor(f), myid())
+        return runtime !== nothing ? runtime : UInt64(1000^3)
     end
 
     # FIXME: Copy deps are computed eagerly

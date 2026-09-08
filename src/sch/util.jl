@@ -589,17 +589,22 @@ end
 
 function has_capacity(state, p, gp, time_util, alloc_util, occupancy, sig)
     T = typeof(p)
+    sig_vec = sig isa Dagger.Signature ? sig.sig : sig
+    snap = MT.snapshot(MT.global_metrics_cache())
+    worker_id = gp isa Int ? gp : (gp isa OSProc ? gp.pid : myid())
     # FIXME: MaxUtilization
-    est_time_util = round(UInt64, if time_util !== nothing && haskey(time_util, T)
-        time_util[T] * 1000^3
+    est_time_util = if time_util !== nothing && haskey(time_util, T)
+        round(UInt64, time_util[T] * 1000^3)::UInt64
     else
-        lock(state.signature_time_cost) do stc; get(stc, sig, 1000^3); end
-    end)::UInt64
+        runtime = metrics_lookup_runtime(snap, sig_vec, p, worker_id)
+        runtime !== nothing ? runtime : UInt64(1000^3)
+    end
     est_alloc_util = if alloc_util !== nothing && haskey(alloc_util, T)
-        alloc_util[T]
+        (alloc_util[T])::UInt64
     else
-        lock(state.signature_alloc_cost) do sac; get(sac, sig, UInt64(0)); end
-    end::UInt64
+        alloc = metrics_lookup_alloc(snap, sig_vec, p)
+        alloc !== nothing ? alloc : UInt64(0)
+    end
     est_occupancy::UInt32 = typemax(UInt32)
     if occupancy !== nothing
         occ = nothing
@@ -705,7 +710,6 @@ function estimate_task_costs(state, procs, task; sig=nothing)
     return sorted_procs, costs
 end
 const DEFAULT_TRANSFER_RATE = UInt64(1_000_000)
-const EMPTY_TRANSFER_RATES = Dict{Processor,UInt64}()
 @reuse_scope function estimate_task_costs!(sorted_procs, costs, state, procs, task; sig=nothing)
     if length(procs) == 1
         # Nothing to rank: the costs only exist to order the candidates, and a
@@ -725,11 +729,16 @@ const EMPTY_TRANSFER_RATES = Dict{Processor,UInt64}()
         end
     end
 
-    # Estimate the cost of executing the task itself
+    # Estimate the cost of executing the task itself. Unlike the old
+    # signature-keyed cache, MetricsTracker records a runtime per (signature,
+    # processor), so this is resolved per candidate in the cost loop below --
+    # that per-processor split is what lets the scheduler prefer a processor
+    # type that is actually faster for this signature.
     if sig === nothing
         sig = signature(task.f, task.inputs)
     end
-    est_time_util = lock(state.signature_time_cost) do stc; get(stc, sig, 1000^3); end
+    sig_vec = sig isa Dagger.Signature ? sig.sig : sig
+    snap = MT.snapshot(MT.global_metrics_cache())
 
     # Estimate network transfer cost per *parent* processor. Chunks are located
     # per worker, so this depends only on `get_parent(proc)`, and `procs` is
@@ -753,8 +762,7 @@ const EMPTY_TRANSFER_RATES = Dict{Processor,UInt64}()
     # N.B. This is inherently *per-processor*: folding it into a single sum
     # added to every candidate is a constant offset that cancels out of the
     # comparison, leaving the scheduler blind to which processors are idle.
-    # Gathered in its own pass so `worker_time_pressure` is locked once, and
-    # not nested inside the `worker_transfer_rate` hold below.
+    # Gathered in its own pass so `worker_time_pressure` is locked once.
     pressures = @reusable_vector :estimate_task_costs_pressures UInt64 UInt64(0) 32
     resize!(pressures, length(procs))
     lock(state.worker_time_pressure) do wtp
@@ -771,37 +779,35 @@ const EMPTY_TRANSFER_RATES = Dict{Processor,UInt64}()
     end
 
     # Estimate total cost for executing this task on each candidate processor.
-    # The transfer-rate table is taken once rather than once per processor.
-    # N.B. `all_equal` is returned from the locked block rather than assigned
-    # to a captured outer local, which would Core.Box it.
-    all_equal = lock(state.worker_transfer_rate) do wtr
-        local first_cost = 0.0
-        local all_equal = true
-        for (idx, proc) in enumerate(procs)
-            gproc = get_parent(proc)
-            pid = Dagger.root_worker_id(gproc)
+    first_cost = 0.0
+    all_equal = true
+    for (idx, proc) in enumerate(procs)
+        gproc = get_parent(proc)
+        pid = Dagger.root_worker_id(gproc)
 
-            # Add fixed cost for cross-worker task transfer (esimated at 1ms)
-            # TODO: Actually estimate/benchmark this
-            task_xfer_cost = pid != myid() ? 1_000_000 : 0 # 1ms
+        # Add fixed cost for cross-worker task transfer (esimated at 1ms)
+        # TODO: Actually estimate/benchmark this
+        task_xfer_cost = pid != myid() ? 1_000_000 : 0 # 1ms
 
-            # N.B. `tx_rate` is in bytes per *second* (see the `transfer_rate`
-            # metadata `do_task` reports, which divides by a nanosecond
-            # duration scaled by 10^9), so `bytes/tx_rate` comes out in
-            # seconds while every other term here is in nanoseconds. Scale it
-            # up, or transfer cost is discounted by a factor of a billion and
-            # data locality never affects the choice of processor.
-            tx_rate = get(get(wtr, pid, EMPTY_TRANSFER_RATES), proc, DEFAULT_TRANSFER_RATE)
-            tx_cost = (tx_costs[gproc]/tx_rate) * 1e9
-            cost = est_time_util + pressures[idx] + tx_cost + task_xfer_cost
-            costs[proc] = cost
-            if idx == 1
-                first_cost = cost
-            elseif cost != first_cost
-                all_equal = false
-            end
+        # Per-(signature, processor) runtime, so a processor type that has
+        # measured faster for this signature ranks ahead of one that has not.
+        runtime = metrics_lookup_runtime(snap, sig_vec, proc, pid)
+        est_time_util = runtime !== nothing ? runtime : UInt64(1000^3)
+
+        # N.B. `tx_rate` is in bytes per *second*, so `bytes/tx_rate` comes out
+        # in seconds while every other term here is in nanoseconds. Scale it
+        # up, or transfer cost is discounted by a factor of a billion and data
+        # locality never affects the choice of processor.
+        rate = metrics_lookup_transfer_rate(snap, proc, pid)
+        tx_rate = rate !== nothing ? rate : DEFAULT_TRANSFER_RATE
+        tx_cost = (tx_costs[gproc]/tx_rate) * 1e9
+        cost = est_time_util + pressures[idx] + tx_cost + task_xfer_cost
+        costs[proc] = cost
+        if idx == 1
+            first_cost = cost
+        elseif cost != first_cost
+            all_equal = false
         end
-        return all_equal
     end
     empty!(tx_costs)
     empty!(pressures)

@@ -34,6 +34,12 @@ import TimespanLogging
 import TaskLocalValues: TaskLocalValue
 import ScopedValues: ScopedValue, @with, with
 
+import ..Dagger: SignatureMetric, ProcessorMetric, WorkerMetric, TransferSizeMetric, TransferTimeMetric, TransferRateMetric
+import ..Dagger: TASK_SIGNATURE, TASK_PROCESSOR, TASK_WORKER, TASK_TRANSFER_SIZE, TASK_TRANSFER_TIME
+import ..Dagger: execute_metrics_spec, metrics_lookup_runtime, metrics_lookup_alloc, metrics_lookup_transfer_rate
+import ..Dagger: extract_collected_metrics, apply_collected_metrics!
+import ..Dagger.MetricsTracker as MT
+
 
 include("util.jl")
 include("fault-handler.jl")
@@ -68,9 +74,6 @@ Fields:
 - `worker_storage_capacity::LockedObject{Dict{Int,Dict{Union{StorageResource,Nothing},UInt64}}}` - Maps from worker ID to storage resource capacity (own lock)
 - `worker_loadavg::LockedObject{Dict{Int,NTuple{3,Float64}}}` - Worker load average (own lock)
 - `worker_chans::Dict{Int, Tuple{RemoteChannel,RemoteChannel}}` - Communication channels between the scheduler and each worker
-- `signature_time_cost::LockedObject{Dict{Signature,UInt64}}` - Cache of estimated CPU time (in nanoseconds) required to compute calls with the given signature; own lock so reads/writes are independent of `state.lock`
-- `signature_alloc_cost::LockedObject{Dict{Signature,UInt64}}` - Cache of estimated CPU RAM (in bytes); own lock
-- `worker_transfer_rate::LockedObject{Dict{Int,Dict{Processor,UInt64}}}` - Maps from worker ID to per-processor network transfer rate estimates in bytes per second; own lock
 - `running_pressure_refs::LockedObject{Dict{Int,Tuple{Threads.Atomic{UInt64},UInt64}}}` - Maps running thunk IDs to their captured pressure counter ref and reserved estimate; used for symmetric atomic release on completion; own lock for thread-safe access from concurrent `schedule_one!` calls
 - `halt::Base.Event` - Event indicating that the scheduler is halting
 - `lock::ReentrantLock` - Lock around operations which modify the state
@@ -155,9 +158,6 @@ mutable struct ComputeState
     worker_storage_capacity::LockedObject{Dict{Int,Dict{Union{StorageResource,Nothing},UInt64}}}
     worker_loadavg::LockedObject{Dict{Int,NTuple{3,Float64}}}
     worker_chans::Dict{Int, Tuple{RemoteChannel,RemoteChannel}}
-    signature_time_cost::LockedObject{Dict{Signature,UInt64}}
-    signature_alloc_cost::LockedObject{Dict{Signature,UInt64}}
-    worker_transfer_rate::LockedObject{Dict{Int,Dict{Processor,UInt64}}}
     running_pressure_refs::LockedObject{Dict{Int,Tuple{Threads.Atomic{UInt64},UInt64}}}
     halt::Base.Event
     # Set when the scheduler is being halted as a result of a cancellation
@@ -224,9 +224,6 @@ function start_state(deps::Dict, node_order, chan, ctx::Context, sch_options::Sc
                          LockedObject(Dict{Int,Dict{Union{StorageResource,Nothing},UInt64}}()),
                          LockedObject(Dict{Int,NTuple{3,Float64}}()),
                          Dict{Int, Tuple{RemoteChannel,RemoteChannel}}(),
-                         LockedObject(Dict{Signature,UInt64}()),
-                         LockedObject(Dict{Signature,UInt64}()),
-                         LockedObject(Dict{Int,Dict{Processor,UInt64}}()),
                          LockedObject(Dict{Int,Tuple{Threads.Atomic{UInt64},UInt64}}()),
                          Base.Event(),
                          Threads.Atomic{Bool}(false),
@@ -280,9 +277,6 @@ function init_proc(state, p, log_sink)
     gproc = OSProc(pid)
     lock(state.worker_time_pressure) do wtp
         wtp[pid] = Dict{Processor,Threads.Atomic{UInt64}}()
-    end
-    lock(state.worker_transfer_rate) do wtr
-        wtr[pid] = Dict{Processor,UInt64}()
     end
     lock(state.worker_storage_pressure) do wsp
         wsp[pid] = Dict{Union{StorageResource,Nothing},UInt64}()
@@ -565,20 +559,12 @@ function handle_result!(ctx, state::ComputeState, pid, proc, thunk_id, res, meta
             #state.worker_storage_pressure[pid][to_storage] = metadata.storage_pressure
             #state.worker_storage_capacity[pid][to_storage] = metadata.storage_capacity
             #state.worker_loadavg[pid] = metadata.loadavg
-            sig = signature(state, node)
-            lock(state.signature_time_cost) do stc
-                stc[sig] = (metadata.threadtime + get(stc, sig, 0)) ÷ 2
-            end
-            lock(state.signature_alloc_cost) do sac
-                sac[sig] = (metadata.gc_allocd + get(sac, sig, 0)) ÷ 2
-            end
-            if metadata.transfer_rate !== nothing
-                lock(state.worker_transfer_rate) do wtr
-                    old_rate = get(get(wtr, pid, Dict{Processor,UInt64}()), proc, UInt64(0))
-                    proc_map = get!(wtr, pid) do; Dict{Processor,UInt64}(); end
-                    proc_map[proc] = old_rate == 0 ? metadata.transfer_rate :
-                                                     (old_rate + metadata.transfer_rate) ÷ 2
-                end
+            # Fold the task's collected metrics into the global MetricsTracker
+            # cache (its own synchronization makes this safe under state.lock and
+            # from concurrent in-process finishers). The scheduler's cost model
+            # (has_capacity/estimate_task_costs!) reads these back via snapshots.
+            if metadata.metrics !== nothing
+                apply_collected_metrics!(MT.global_metrics_cache(), thunk_id, metadata.metrics)
             end
         end
         if res isa Chunk && res.handle isa DRef
@@ -1142,7 +1128,6 @@ function remove_dead_proc!(ctx, state, proc, options)
     # release via atomic_sub! on the (now-orphaned) Atomic object — harmless.
     # N.B. Key by `root_worker_id` (MPI processors have no `pid` field).
     lock(state.worker_time_pressure) do wtp; delete!(wtp, pid); end
-    lock(state.worker_transfer_rate) do wtr; delete!(wtr, pid); end
     lock(state.worker_storage_pressure) do wsp; delete!(wsp, pid); end
     lock(state.worker_storage_capacity) do wsc; delete!(wsc, pid); end
     lock(state.worker_loadavg) do wla; delete!(wla, pid); end
@@ -2393,10 +2378,14 @@ Executes a single task specified by `task` on `to_proc`.
     real_time_util[] += est_time_util
     @logstart ctx LogCompute LogComputeId(thunk_id, to_proc) f
 
-    # Start counting time and GC allocations
-    threadtime_start = cputhreadtime()
-    # FIXME
-    #gcnum_start = Base.gc_num()
+    # Metrics for this task are collected by MetricsTracker (see
+    # `execute_metrics_spec`), which records wall time, thread time,
+    # allocations, and the task's signature/processor/worker/transfer facts
+    # under one key. `local_metrics_cache` is drained into the scheduler's
+    # global cache by `handle_result!`.
+    task_sig = signature(first(data), @view data[2:end]).sig
+    local_metrics_cache = MT.MetricsCache()
+    mspec = execute_metrics_spec()
 
     @dagdebug thunk_id :execute "Executing $Tf"
 
@@ -2409,13 +2398,17 @@ Executes a single task specified by `task` on `to_proc`.
                         Dagger.current_acceleration())
 
         result = Dagger.with_options(propagated) do
-            # Execute
-            # N.B. Splatting an empty kwargs Vector still materializes a
-            # NamedTuple via merge; skip it in the common no-kwargs case
-            if isempty(fetched_kwargs)
-                execute!(to_proc, f, fetched_args...)
-            else
-                execute!(to_proc, f, fetched_args...; fetched_kwargs...)
+            @with TASK_SIGNATURE => task_sig TASK_PROCESSOR => to_proc TASK_WORKER => myid() TASK_TRANSFER_SIZE => transfer_size TASK_TRANSFER_TIME => transfer_time begin
+                MT.with_metrics(mspec, Dagger, :execute!, thunk_id, MT.SyncInto(local_metrics_cache)) do
+                    # Execute
+                    # N.B. Splatting an empty kwargs Vector still materializes a
+                    # NamedTuple via merge; skip it in the common no-kwargs case
+                    if isempty(fetched_kwargs)
+                        execute!(to_proc, f, fetched_args...)
+                    else
+                        execute!(to_proc, f, fetched_args...; fetched_kwargs...)
+                    end
+                end
             end
         end
 
@@ -2451,9 +2444,6 @@ Executes a single task specified by `task` on `to_proc`.
         empty!(fetched_kwargs)
     end
 
-    threadtime = cputhreadtime() - threadtime_start
-    # FIXME: This is not a realistic measure of max. required memory
-    #gc_allocd = min(max(UInt64(Base.gc_num().allocd) - UInt64(gcnum_start.allocd), UInt64(0)), UInt64(1024^4))
     @logfinish ctx LogCompute LogComputeId(thunk_id, to_proc) (;f, result=result_meta)
 
     lock(TASK_SYNC) do
@@ -2465,16 +2455,14 @@ Executes a single task specified by `task` on `to_proc`.
     @dagdebug thunk_id :execute "Returning $Tf with $(typeof(result_meta))"
 
     # TODO: debug_storage("Releasing $to_storage_name")
+    collected_metrics = extract_collected_metrics(local_metrics_cache, thunk_id)
+
     metadata = (
         time_pressure=real_time_util[],
         #storage_pressure=real_alloc_util,
         #storage_capacity=storage_cap,
         #loadavg=((Sys.loadavg()...,) ./ Sys.CPU_THREADS),
-        threadtime=threadtime,
-        # FIXME: Add runtime allocation tracking
-        #gc_allocd=(isa(result_meta, Chunk) ? result_meta.handle.size : 0),
-        gc_allocd=0,
-        transfer_rate=(transfer_size > 0 && transfer_time > 0) ? round(UInt64, transfer_size / (transfer_time / 10^9)) : nothing,
+        metrics=collected_metrics,
     )
     return (result_meta, metadata)
 end
