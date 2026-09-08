@@ -316,8 +316,8 @@ structure follows the *finer* of the two block sizes.
 the whole operator: each coarse operator is the distributed Galerkin product
 `Ac = P' * A * P`, and `mul!(y, M, x)` is a V-cycle. Interpolation `P` is
 built from tiled data (per-tile aggregation or classical interpolation, plus
-a lightweight matching of interface nodes) — setup does not assemble a
-global CSC of `A`. That is what PDE codes mean by AMG;
+a lightweight merge of aggregates that share an interface edge) — setup does
+not assemble a global CSC of `A`. That is what PDE codes mean by AMG;
 `AMGPreconditioner` with many tiles is not.
 
 ```julia
@@ -330,7 +330,7 @@ r = similar(b); mul!(r, DA, x); axpy!(-1, b, r)
 @assert norm(r) / norm(b) < 1e-8   # do not stop at stats.solved
 ```
 
-This is a first cut (per-tile unsmoothed or Jacobi-smoothed aggregation, 1–2
+This is a first cut (per-tile aggregation plus interface-aggregate merge, 1–2
 coarse levels, two damped-Jacobi sweeps each side, gathered LU on the coarsest
 grid). Setup of `P` and RAP are tiled; the coarsest solve still gathers.
 

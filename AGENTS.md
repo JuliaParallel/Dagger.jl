@@ -402,14 +402,19 @@ lesson.
 
 35. **GlobalAMG builds `P` from tiles, not a gathered CSC of `A`.** Per-tile
    StandardAggregation / Ruge–Stüben on the diagonal tile, plus a
-   lightweight matching of unaggregated interface nodes (off-diagonal
-   entries in the same row). Jacobi-smooth `P ← T − ω D⁻¹ A T` with
+   lightweight union-find that merges local aggregates sharing an
+   interface edge (off-diagonal entries in the same row). Matching only
+   the *unaggregated* leftovers is a no-op on 1-D Poisson: local SA
+   assigns every node, `niface=0`, and `P` stays block-diagonal — a
+   second coarse level of that `P` can make a V-cycle *worse* than
+   Jacobi (n=128, 8 tiles). Jacobi-smooth `P ← T − ω D⁻¹ A T` with
    distributed SpGEMM (`Dᵢᵢ` is the row 1-norm, matching AMG.jl's
    `JacobiProlongation`). The caller fetches only per-tile headers
-   (`nagg` + interface pairs), not `A`. Galerkin RAP stays distributed.
-   The coarsest solve is still a gathered LU (`_gather_sparse`, not
-   `_collect_sparse_dmatrix`). `COLLECT_SPARSE_DMATRIX_MAXSIZE` lets tests
-   prove setup does not gather the fine operator. Do not treat
-   `stats.solved` as `Ax≈b` (lessons 19/32). `AMGPreconditioner` is still
-   per-tile Schwarz — do not change it. Aggregates still do not come from
-   a distributed MIS; a row-coarsen task sees one row of tiles.
+   (`nagg` + interface pairs and local aggregate ids), not `A`. Galerkin
+   RAP stays distributed. The coarsest solve is still a gathered LU
+   (`_gather_sparse`, not `_collect_sparse_dmatrix`).
+   `COLLECT_SPARSE_DMATRIX_MAXSIZE` lets tests prove setup does not
+   gather the fine operator. Do not treat `stats.solved` as `Ax≈b`
+   (lessons 19/32). `AMGPreconditioner` is still per-tile Schwarz — do
+   not change it. Aggregates still do not come from a distributed MIS;
+   a row-coarsen task sees one row of tiles.
