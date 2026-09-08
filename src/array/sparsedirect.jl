@@ -316,6 +316,13 @@ function Base.:\(F::DaggerSparseLU, B::DMatrix)
     return distribute(X, B.partitioning)
 end
 
+# `(DaggerSparseLU, DVector)` is otherwise ambiguous: `_PinnedSparseFactor`
+# is more specific in `b` and the AbstractVector fallback is more specific
+# in `F`. GlobalAMG's coarse solve is `copyto!(u, M.coarse \ b)`.
+function Base.:\(F::DaggerSparseLU, b::DVector)
+    return invoke(Base.:\, Tuple{_PinnedSparseFactor,DVector}, F, b)
+end
+
 function Base.:\(F::DaggerSparseLU, b::AbstractVector)
     return F \ distribute(collect(b), F.part)
 end
