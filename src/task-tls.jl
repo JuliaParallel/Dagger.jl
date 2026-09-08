@@ -14,6 +14,14 @@ mutable struct DTaskTLS
     # `ScopedValue`/`TaskLocalValue` because `ThreadProc.execute!` runs the
     # thunk on a *sub-task*, which neither of those propagate back out of.
     metrics_cache::Union{MT.MetricsCache, Nothing}
+    # Facts about the executing thunk that its metrics record. Held here rather
+    # than in `ScopedValue`s: entering a scope for them cost ~939 allocations
+    # and 32 KB *per task* (measured on a `fetch(@spawn 1+1)` round-trip),
+    # which dominated the whole scheduler path. `set_tls!` already runs once per
+    # thunk, so carrying them costs nothing extra.
+    metrics_sig::Union{Vector{Any}, Nothing}
+    metrics_transfer_size::UInt64
+    metrics_transfer_time::UInt64
 end
 
 const DTASK_TLS = TaskLocalValue{Union{DTaskTLS,Nothing}}(()->nothing)
@@ -26,7 +34,10 @@ Base.copy(tls::DTaskTLS) =
              tls.cancel_token,
              tls.logging_enabled,
              tls.acceleration,
-             tls.metrics_cache)
+             tls.metrics_cache,
+             tls.metrics_sig,
+             tls.metrics_transfer_size,
+             tls.metrics_transfer_time)
 
 """
     get_tls() -> DTaskTLS
@@ -43,10 +54,15 @@ Sets all Dagger TLS variables from `tls`, which may be a `DTaskTLS` or a `NamedT
 set_tls!(tls) = set_tls!(tls.processor, tls.sch_uid, tls.sch_handle,
                          tls.task_spec, tls.cancel_token,
                          tls.logging_enabled, tls.acceleration,
-                         hasproperty(tls, :metrics_cache) ? tls.metrics_cache : nothing)
+                         hasproperty(tls, :metrics_cache) ? tls.metrics_cache : nothing,
+                         hasproperty(tls, :metrics_sig) ? tls.metrics_sig : nothing,
+                         hasproperty(tls, :metrics_transfer_size) ? tls.metrics_transfer_size : UInt64(0),
+                         hasproperty(tls, :metrics_transfer_time) ? tls.metrics_transfer_time : UInt64(0))
 # Positional form: hot callers (do_task) avoid building a NamedTuple per task
 function set_tls!(processor, sch_uid, sch_handle, task_spec, cancel_token,
-                  logging_enabled::Bool, acceleration, metrics_cache=nothing)
+                  logging_enabled::Bool, acceleration, metrics_cache=nothing,
+                  metrics_sig=nothing, metrics_transfer_size::UInt64=UInt64(0),
+                  metrics_transfer_time::UInt64=UInt64(0))
     # Reuse the existing DTaskTLS in place: pooled scheduler tasks call this
     # once per executed thunk, and nothing retains the old TLS across thunks
     # (`get_tls()` callers copy it if they need to keep it).
@@ -60,10 +76,14 @@ function set_tls!(processor, sch_uid, sch_handle, task_spec, cancel_token,
         dtls.logging_enabled = logging_enabled
         dtls.acceleration = acceleration
         dtls.metrics_cache = metrics_cache
+        dtls.metrics_sig = metrics_sig
+        dtls.metrics_transfer_size = metrics_transfer_size
+        dtls.metrics_transfer_time = metrics_transfer_time
     else
         DTASK_TLS[] = DTaskTLS(processor, sch_uid, sch_handle, task_spec,
                                cancel_token, logging_enabled, acceleration,
-                               metrics_cache)
+                               metrics_cache, metrics_sig,
+                               metrics_transfer_size, metrics_transfer_time)
     end
     set_task_acceleration!(acceleration)
 end
