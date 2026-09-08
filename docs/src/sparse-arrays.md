@@ -160,6 +160,8 @@ implementations, including:
 - **Sparse matrix–vector multiply** (SpMV: `A * x`, `mul!(y, A, x)`) with a
   sparse matrix and dense vectors — the workhorse of iterative solvers.
 - **Transpose/adjoint**, **`collect`**, and elementwise/`norm` operations.
+- **Stencils** (`@stencil`), including neighborhoods and boundary conditions; see
+  [Sparse Stencils](@ref).
 
 ```julia
 using SparseArrays, LinearAlgebra

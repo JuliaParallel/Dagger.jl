@@ -375,6 +375,107 @@ A = ones(Blocks(2, 2), Int, 4, 4)
 @assert all(collect(A) .== 2)
 ```
 
+## Sparse Stencils
+
+`@stencil` operates on sparse `DArray`s (see [Sparse Distributed Arrays](@ref))
+with no change to the kernel. Tiles are `SparseMatrixCSC` rather than `Matrix`;
+neighborhoods, boundary conditions, multi-array blocks, update operators, and the
+allocating syntax all behave as they do for dense arrays.
+
+```julia
+using SparseArrays
+import Dagger: @stencil, Pad
+
+A = sprand(Blocks(250, 250), Float64, (1000, 1000), 0.01)
+B = spzeros(Blocks(250, 250), Float64, 1000, 1000)
+
+@stencil B[idx] = sum(@neighbors(A[idx], 1, Pad(0)))
+```
+
+Building a sparse tile by assigning to it one element at a time is expensive:
+CSC storage keeps its entries packed and sorted, so every insertion shifts the
+tail of the arrays. Dagger does not do that. A stencil writing to a sparse output
+accumulates nonzeros as it sweeps and builds the tile's index arrays once, at the
+end. This is automatic and needs no promise about your kernel — it depends only
+on the output being sparse.
+
+### Skipping Indices with `zero_preserving`
+
+A kernel is *zero-preserving* if an all-zero neighborhood maps to zero. Most
+stencils are: a weighted sum of neighbors, a Laplacian, a Game of Life update.
+`B[idx] = A[idx] + 1` is not.
+
+Given that property, an output element can only become nonzero if some stored
+entry of an operand lies within `neigh_dist` of it, so the sweep can skip every
+other index outright. Dagger cannot work this out on its own — a kernel takes
+`idx` as an argument, so evaluating it at one point proves nothing about the
+others — so you assert it:
+
+```julia
+@stencil zero_preserving=true B[idx] = sum(@neighbors(A[idx], 1, Pad(0)))
+```
+
+The set of indices that survives is the operands' nonzero pattern *dilated* by
+`neigh_dist`: each stored entry marks the `(2*neigh_dist+1)^ndims` block around
+itself as reachable, and everything outside that union is provably zero, so it is
+never visited.
+
+The assertion is yours to make and is not checked. Applying it to a kernel that
+is not zero-preserving silently drops the nonzero background rather than raising.
+One violation *can* be detected, and is — a `Pad(v)` with `v != 0` fills the
+boundary with a nonzero value, so it is rejected:
+
+```julia
+julia> @stencil zero_preserving=true B[idx] = sum(@neighbors(A[idx], 1, Pad(1.5)))
+ERROR: ArgumentError: `@stencil zero_preserving=true` asserts that the kernel maps an
+all-zero neighborhood to zero, but `Pad(1.5)` pads with a nonzero value, so it does not.
+Use `Pad(0.0)`, or drop `zero_preserving=true`.
+```
+
+Every other boundary condition copies or extrapolates values that are already
+present, so none of them can manufacture a nonzero from an all-zero array.
+
+### When Skipping Pays
+
+Restricting the sweep helps only while the dilated pattern stays much smaller
+than the tile, which is roughly
+
+```
+density < (2 * neigh_dist + 1)^-ndims
+```
+
+— about 11% for a 3x3 two-dimensional stencil, and less for wider neighborhoods
+or more dimensions. Past that point the dilated pattern covers most of the tile
+and the bookkeeping is pure overhead. Note that a stencil dilates its own output,
+so an iterated one fills in and crosses this threshold after a few sweeps even
+from a very sparse start.
+
+Because the option states a property of your kernel rather than requesting a
+strategy, each backend decides for itself whether to act on it. Dagger falls back
+to visiting every index whenever the candidate set cannot be established — most
+commonly when a read variable is dense, since its stored entries could be
+anywhere. It is also ignored on GPUs, where a tile is evaluated dense on the
+device and compressed there: the skipped evaluations would have run in parallel
+with the rest and cost nothing, while computing the candidate set would not.
+
+Note that `zero_preserving=true` is not what makes a sparse output efficient:
+one-pass assembly is, and that happens either way. The option buys the skipped
+indices and nothing else, so whether it is worth setting depends on the density
+and the neighborhood, and is worth measuring.
+
+### GPU Sparse Tiles
+
+Sparse `DArray`s backed by GPU memory work with `@stencil` on the CUDA, ROCm,
+oneAPI, OpenCL, and Metal backends. A GPU sparse tile has no device-side
+`setindex!`, so a kernel cannot write into it directly; Dagger materializes the
+tile dense on the device, sweeps into that, and compresses it back to sparse
+there, so only the resulting nonzero count crosses to the host. A backend without
+device-side compression stages the sweep through host memory instead, which is
+correct but much slower.
+
+One-dimensional sparse tiles (`SparseVector`) are not supported on GPUs; such a
+stencil fails rather than falling back.
+
 ## Example: Game of Life
 
 The following demonstrates a more complex example: Conway's Game of Life.
