@@ -333,3 +333,78 @@ end
     mul!(DSt, DS, DT)
     @test collect(DSt) ≈ S * Tm
 end
+
+# SYMM / HEMM: `mul!` of `Symmetric`/`Hermitian` wrappers (and BLAS.symm!/hemm!)
+# must use the stored triangle, not scalar-index the generic AbstractMatrix path.
+@testset "SYMM / HEMM" begin
+    n = 16
+    k = 4
+    part = Blocks(k, k)
+    partv = Blocks(k)
+
+    @testset "Symmetric $uplo T=$T" for uplo in (:U, :L), T in (Float64, Float32)
+        Ah = rand(T, n, n)
+        Ah = (Ah + Ah') / 2
+        Bh = rand(T, n, n)
+        xh = rand(T, n)
+        DA = distribute(Ah, part)
+        DB = distribute(Bh, part)
+        Dx = distribute(xh, partv)
+        SA = Symmetric(DA, uplo)
+        SAh = Symmetric(Ah, uplo)
+
+        @test collect(SA * DB) ≈ SAh * Bh
+        @test collect(DB * SA) ≈ Bh * SAh
+        @test collect(SA * Dx) ≈ SAh * xh
+
+        DC = distribute(zeros(T, n, n), part)
+        mul!(DC, SA, DB)
+        @test collect(DC) ≈ SAh * Bh
+        mul!(DC, SA, DB, T(2), T(0))
+        @test collect(DC) ≈ T(2) * (SAh * Bh)
+        C0 = rand(T, n, n)
+        copyto!(DC, C0)
+        mul!(DC, SA, DB, T(3), T(1))
+        @test collect(DC) ≈ T(3) * (SAh * Bh) + C0
+
+        mul!(DC, DB, SA)
+        @test collect(DC) ≈ Bh * SAh
+
+        Dy = distribute(zeros(T, n), partv)
+        mul!(Dy, SA, Dx)
+        @test collect(Dy) ≈ SAh * xh
+        mul!(Dy, SA, Dx, T(2), T(0))
+        @test collect(Dy) ≈ T(2) * (SAh * xh)
+
+        BLAS.symm!('L', uplo == :U ? 'U' : 'L', T(1), DA, DB, T(0), DC)
+        @test collect(DC) ≈ SAh * Bh
+        BLAS.symm!('R', uplo == :U ? 'U' : 'L', T(1), DA, DB, T(0), DC)
+        @test collect(DC) ≈ Bh * SAh
+    end
+
+    @testset "Hermitian $uplo" for uplo in (:U, :L)
+        Ah = rand(ComplexF64, n, n)
+        Ah = (Ah + Ah') / 2
+        Ah = Ah + n * I
+        Bh = rand(ComplexF64, n, n)
+        xh = rand(ComplexF64, n)
+        DA = distribute(Ah, part)
+        DB = distribute(Bh, part)
+        Dx = distribute(xh, partv)
+        HA = Hermitian(DA, uplo)
+        HAh = Hermitian(Ah, uplo)
+
+        @test collect(HA * DB) ≈ HAh * Bh
+        @test collect(DB * HA) ≈ Bh * HAh
+        @test collect(HA * Dx) ≈ HAh * xh
+
+        DC = distribute(zeros(ComplexF64, n, n), part)
+        mul!(DC, HA, DB, 2+im, false)
+        @test collect(DC) ≈ (2+im) * (HAh * Bh)
+
+        BLAS.hemm!('L', uplo == :U ? 'U' : 'L', 1+0im, DA, DB, 0+0im, DC)
+        @test collect(DC) ≈ HAh * Bh
+        BLAS.hemm!('R', uplo == :U ? 'U' : 'L', 1+0im, DA, DB, 0+0im, DC)
+        @test collect(DC) ≈ Bh * HAh
+    end
+end

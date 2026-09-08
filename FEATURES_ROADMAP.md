@@ -21,7 +21,7 @@ welcome!
 | Broadcast | :heavy_check_mark: Great Support | | @jpsamaroo |
 | Map/Reduce | :heavy_check_mark: Great Support | | @jpsamaroo |
 | Indexing/Slicing | :warning: Moderate Support | Range `getindex`/`view`/`setindex!` match Base values and stay tiled (sparse stays sparse). `view` is a `SubArray` (intentional). `copyto!` of StepRange views still throws. | @jpsamaroo |
-| Matmul | :warning: Moderate Support | Some incorrect boundschecks (for `syrk`) | @Rabab53 |
+| Matmul | :warning: Moderate Support | Some incorrect boundschecks (for `syrk`). `mul!` of `Symmetric`/`Hermitian` `DMatrix` is tiled SYMM/HEMM. | @Rabab53 |
 | Cholesky | :warning: Moderate Support | Missing repartitioning support | @Rabab53 |
 | Sparse Arrays | :x: Poor Support | Needs more supported operations and tests | @jpsamaroo |
 
