@@ -849,6 +849,10 @@ end
         # rank 0's copy only (as elsewhere in this file).
         test_sparse_bare_args(; writeback_visible = rank == 0)
     end
+    @testset "Assembly" begin
+        test_sparse_assembly(; T=Float64)
+        test_sparse_collect(; T=Float64)
+    end
 end
 
 end # @testset "MPI"

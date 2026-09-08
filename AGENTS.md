@@ -316,3 +316,17 @@ lesson.
    solver type; hook LinearSolve's existing algorithms. And do not reach
    into `KrylovExt` from `LinearSolveExt` (lesson 17): build Krylov
    workspaces with `KrylovConstructor` yourself.
+
+29. **Sparse assembly routes by (row, col) tile, and must spawn a rank-uniform
+   extract set.** `sparse(I, J, V, m, n, Blocks(...))` / `sparse!` bucket
+   global COO onto `DomainBlocks.cumlength` and send overlap to the owning
+   tile — do not assemble on the producer or via `A[i,j] += v`. Allocate the
+   destination with `spzeros(Blocks, T, m, n)` so GPU scopes keep a sparse
+   tile backend; combine on host CSC and `_store_assembled_tile` (`move` to
+   `task_processor()`). Under MPI, spawn one extract per (COO chunk, dest
+   tile) even when the bucket is empty: a data-dependent skip changes the
+   task graph per rank. Never build a global `SparseMatrixCSC` on the caller.
+   Do not pass `SparseCOOBucket` through `spawn_datadeps`: Datadeps requires
+   `move!` and no bucket method exists (`ArgumentError` at `memory-spaces.jl`).
+   Regular `@spawn` serializes the fragment like `AllocateArray`; replace
+   dest chunks with the assemble `DTask`s rather than `InOut`-mutating.

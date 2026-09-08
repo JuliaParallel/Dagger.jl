@@ -381,6 +381,9 @@ DA = distribute(sprand(1000, 1000, 0.01), Blocks(250, 250))
 # Or allocate sparse DArrays directly
 Z = spzeros(Blocks(250, 250), Float64, 1000, 1000)
 R = sprand(Blocks(250, 250), Float64, (1000, 1000), 0.01)
+
+# Or assemble from COO without a global host CSC
+A = sparse(I, J, V, 1000, 1000, Blocks(250, 250))  # I, J, V are index/value vectors
 ```
 
 ### Multiply sparse arrays
@@ -392,7 +395,7 @@ y = DA * x        # distributed sparse matrix-vector multiply (dense result)
 C = DA * DA       # distributed sparse-sparse matmul (sparse result)
 ```
 
-`collect(DA)` returns a dense `Array`; operate on the `DArray` to stay sparse.
+`collect(DA)` returns a dense `Array`; `sparse(DA)` gathers to a `SparseMatrixCSC`. Operate on the `DArray` to stay distributed.
 
 -----
 

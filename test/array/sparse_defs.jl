@@ -210,3 +210,110 @@ function test_sparse_bare_args(; scope=nothing, T=Float64, writeback_visible=tru
     # Adoption copies, so the caller's matrix is never touched.
     @test S == Sref
 end
+
+# 1D Laplacian COO (global 1-based indices), optionally restricted to a row range
+# so multiple "owners" can each contribute their rows — including off-diagonals
+# that land on a neighboring column tile.
+function sparse_defs_laplacian_coo(T, n, rows=1:n)
+    I = Int[]; J = Int[]; V = T[]
+    for i in rows
+        if i > 1
+            push!(I, i); push!(J, i - 1); push!(V, -one(T))
+        end
+        push!(I, i); push!(J, i); push!(V, T(2))
+        if i < n
+            push!(I, i); push!(J, i + 1); push!(V, -one(T))
+        end
+    end
+    return I, J, V
+end
+
+sparse_defs_laplacian_1d(T, n) = SparseArrays.spdiagm(
+    -1 => fill(-one(T), n - 1),
+     0 => fill(T(2), n),
+     1 => fill(-one(T), n - 1),
+)
+
+# Assemble a 1D Laplacian from per-row COO on multiple owners; compare to
+# `distribute(spdiagm(...), Blocks(...))`. Also exercises duplicate (I,J)
+# combine and DArray-valued I,J,V (overlap send to the owning tile).
+function test_sparse_assembly(; scope=nothing, check_tile=nothing, T=Float64)
+    n, k = 16, 4
+    part = Blocks(k, k)
+    Aref = sparse_defs_laplacian_1d(T, n)
+    I, J, V = sparse_defs_laplacian_coo(T, n)
+
+    _sparse_defs_with_scope(scope) do
+        Dref = distribute(Aref, part)
+
+        # Host COO + Blocks (and the Blocks-first spelling, matching spzeros).
+        DA = SparseArrays.sparse(I, J, V, n, n, part)
+        @test DA.partitioning == part
+        @test collect(DA) ≈ collect(Dref)
+        @test collect(DA) ≈ Matrix(Aref)
+        DA2 = SparseArrays.sparse(part, I, J, V, n, n)
+        @test collect(DA2) ≈ Matrix(Aref)
+        for chunk in DA.chunks
+            tile = fetch(chunk; raw=true)
+            @test Dagger.chunktype(tile) <: Dagger.DSparseArray
+            check_tile === nothing || @test check_tile(tile)
+        end
+
+        # Existing `distribute(sparse(...), Blocks)` path is unchanged.
+        S = SparseArrays.sparse(I, J, V, n, n)
+        @test S isa SparseArrays.SparseMatrixCSC
+        @test collect(distribute(S, part)) ≈ S
+
+        # Per-owner incremental assembly: each owner adds only its rows.
+        Z = SparseArrays.spzeros(part, T, n, n)
+        nowners = 4
+        for o in 1:nowners
+            r1 = (o - 1) * k + 1
+            r2 = o * k
+            Io, Jo, Vo = sparse_defs_laplacian_coo(T, n, r1:r2)
+            SparseArrays.sparse!(Z, Io, Jo, Vo)
+        end
+        @test collect(Z) ≈ Matrix(Aref)
+
+        # Duplicate (I,J) combine (`+` by default; `max` as an alternate).
+        Z2 = SparseArrays.spzeros(part, T, n, n)
+        SparseArrays.sparse!(Z2, I, J, V)
+        SparseArrays.sparse!(Z2, I, J, V)
+        @test collect(Z2) ≈ 2 .* Matrix(Aref)
+        I2 = vcat(I, I); J2 = vcat(J, J); V2 = vcat(V, V)
+        @test collect(SparseArrays.sparse(I2, J2, V2, n, n, part)) ≈ 2 .* Matrix(Aref)
+        @test collect(SparseArrays.sparse(I2, J2, V2, n, n, max, part)) ≈ Matrix(Aref)
+
+        # Distributed COO whose chunking is independent of the matrix tiles, so
+        # some triplets are produced off the owning tile (overlap send).
+        ntrips = length(I)
+        coo_part = Blocks(cld(ntrips, 3))
+        DI = distribute(I, coo_part)
+        DJ = distribute(J, coo_part)
+        DV = distribute(V, coo_part)
+        DD = SparseArrays.sparse(DI, DJ, DV, n, n, part)
+        @test collect(DD) ≈ Matrix(Aref)
+        Z3 = SparseArrays.spzeros(part, T, n, n)
+        SparseArrays.sparse!(Z3, DI, DJ, DV)
+        @test collect(Z3) ≈ Matrix(Aref)
+
+        # Non-square tiles.
+        part_rect = Blocks(4, 8)
+        @test collect(SparseArrays.sparse(I, J, V, n, n, part_rect)) ≈ Matrix(Aref)
+    end
+end
+
+# `collect` densifies; `sparse(::DMatrix)` gathers tiles without a dense cat.
+function test_sparse_collect(; scope=nothing, T=Float64)
+    n, k = 16, 4
+    part = Blocks(k, k)
+    Aref = sparse_defs_laplacian_1d(T, n)
+    _sparse_defs_with_scope(scope) do
+        DA = distribute(Aref, part)
+        S = SparseArrays.sparse(DA)
+        @test S isa SparseArrays.SparseMatrixCSC
+        @test S ≈ Aref
+        DD = distribute(Matrix(Aref), part)
+        @test SparseArrays.sparse(DD) ≈ Aref
+    end
+end

@@ -248,6 +248,8 @@ end
             test_sparse_solvers(; scope, check_tile)
             test_sparse_solve_dispatch(; scope, check_tile, expect_direct=false, T=Float32)
             test_sparse_bare_args(; scope, T=Float32)
+            test_sparse_assembly(; scope, check_tile, T=Float32)
+            test_sparse_collect(; scope, T=Float32)
         end
     end
 end
@@ -433,6 +435,8 @@ end
             test_sparse_solvers(; scope, check_tile)
             test_sparse_solve_dispatch(; scope, check_tile, expect_direct=false, T=Float32)
             test_sparse_bare_args(; scope, T=Float32)
+            test_sparse_assembly(; scope, check_tile, T=Float32)
+            test_sparse_collect(; scope, T=Float32)
         end
     end
 end
@@ -618,6 +622,8 @@ end
             test_sparse_solvers(; scope, check_tile)
             test_sparse_solve_dispatch(; scope, check_tile, expect_direct=false, T=Float32)
             test_sparse_bare_args(; scope, T=Float32)
+            test_sparse_assembly(; scope, check_tile, T=Float32)
+            test_sparse_collect(; scope, T=Float32)
         end
     end
 end
@@ -777,6 +783,8 @@ end
             test_sparse_solvers(; scope, check_tile)
             test_sparse_solve_dispatch(; scope, check_tile, expect_direct=false, T=Float32)
             test_sparse_bare_args(; scope, T=Float32)
+            test_sparse_assembly(; scope, check_tile, T=Float32)
+            test_sparse_collect(; scope, T=Float32)
         end
     end
 end
@@ -897,6 +905,8 @@ end
             test_sparse_solvers(; scope, check_tile)
             test_sparse_solve_dispatch(; scope, check_tile, expect_direct=false, T=Float32)
             test_sparse_bare_args(; scope, T=Float32)
+            test_sparse_assembly(; scope, check_tile, T=Float32)
+            test_sparse_collect(; scope, T=Float32)
         end
     end
 end

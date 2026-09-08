@@ -64,12 +64,49 @@ R = sprand(Blocks(250, 250), Float64, (1000, 1000), 0.01)
 These run the per-tile allocation on the owning worker, so no large sparse array
 is ever materialized on a single process.
 
+### Assembling from triplets
+
+FEM/FVM codes produce local COO contributions `(I, J, V)` in global 1-based
+indices. Pass those to `sparse` / `sparse!` with a `Blocks` tiling — the same
+generics as `SparseArrays`, not a Dagger-specific assemble API. Triplets are
+bucketed onto the owning tile; overlap (a contribution produced off the tile
+that owns `(i,j)`) is sent there. Duplicates combine with `+` by default, as
+with `sparse(I, J, V)`.
+
+```julia
+using SparseArrays
+
+n = 1000
+part = Blocks(250, 250)
+
+# Local (or already-distributed) COO. Never builds a global SparseMatrixCSC.
+I, J, V = Int[], Int[], Float64[]
+# ... push element / face contributions ...
+A = sparse(I, J, V, n, n, part)
+
+# Incremental: allocate empty tiles, then add owner contributions (PETSc
+# MatSetValues / HYPRE IJMatrixAddToValues). Do not use A[i,j] += v.
+A = spzeros(part, Float64, n, n)
+sparse!(A, I1, J1, V1)
+sparse!(A, I2, J2, V2)   # second owner; shared (i,j) add
+
+# I, J, V may themselves be DArrays (one chunk per owner). Their partitioning
+# need not match `part` — that is the overlap-send case.
+A = sparse(DI, DJ, DV, n, n, part)
+```
+
+`distribute(sparse(I, J, V), Blocks(...))` is unchanged: it still assembles a
+host CSC and slices it. Prefer `sparse(I, J, V, m, n, Blocks(...))` when the
+global CSC would not fit on one process.
+
 ### Converting back to a dense array
 
-`collect` gathers the tiles and returns a **dense** `Array`:
+`collect` gathers the tiles and returns a **dense** `Array`. To gather without
+densifying, use `sparse` on the `DArray`:
 
 ```julia
 M = collect(DA)   # dense Matrix{Float64}
+S = sparse(DA)    # SparseMatrixCSC, assembled from tile nonzeros
 ```
 
 To keep data sparse and distributed, operate on the `DArray` directly rather
@@ -197,7 +234,7 @@ suite; prefer `SparseArrays` unless you specifically need a Finch format.
 
 ## Limitations
 
-- `collect` densifies; there is no sparse-preserving global gather.
+- `collect` densifies; use `sparse(DA)` to gather tiles into one `SparseMatrixCSC`.
 - A sparse tile is aliased as a whole — Datadeps cannot track independent writes
   to disjoint sub-regions of a single sparse tile (use finer tiling instead).
 - Not every dense `DArray` operation has a sparse counterpart yet; sparse support
