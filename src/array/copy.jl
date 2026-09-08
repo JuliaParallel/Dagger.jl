@@ -93,29 +93,69 @@ end
 to_range(x::UnitRange) = x
 to_range(x::Integer) = x:x
 to_range(x::Base.OneTo{Int}) = UnitRange(x)
-to_range(x::Base.Slice{Base.OneTo{Int}}) = UnitRange(x)
+to_range(x::Base.Slice) = Int(first(x)):Int(last(x))
 to_range(::StepRange) = throw(ArgumentError("Cannot convert StepRange to UnitRange"))
 to_range(x) = throw(ArgumentError("Cannot convert $(typeof(x)) to UnitRange"))
 
+# Normalize a `parentindices` entry for a copy. Integers become length-1
+# ranges (dropped dimensions / scalar parent indices). StepRange is left as
+# an error: `copyto!` of a non-contiguous `view` is an intentional throw
+# (`test/array/copyto.jl`). `getindex` converts StepRange to `Vector{Int}`
+# before it reaches here.
+_copy_index(x::UnitRange{<:Integer}) = UnitRange{Int}(x)
+_copy_index(x::Integer) = Int(x):Int(x)
+_copy_index(x::Base.OneTo) = UnitRange{Int}(x)
+_copy_index(x::Base.Slice) = Int(first(x)):Int(last(x))
+_copy_index(::StepRange) = throw(ArgumentError("Cannot convert StepRange to UnitRange"))
+_copy_index(x::AbstractVector{<:Integer}) = x isa Vector{Int} ? x : collect(Int, x)
+_copy_index(x::Base.LogicalIndex) = collect(Int, x)
+_copy_index(x) = throw(ArgumentError("Cannot convert $(typeof(x)) to a copy index"))
+
+_is_scattered_copy_index(x::AbstractRange) = false
+_is_scattered_copy_index(x::AbstractVector) = true
+_is_scattered_copy_index(x) = false
+
+# Linear `parentindices` of an N>1 array (`view(A, 9:12)` / `A[9:12]`).
+_is_linear_parentinds(::DArray{<:Any,N}, inds) where N = N > 1 && length(inds) == 1
+
+function _chunk_and_local(A::DArray{T,N}, dim::Int, p::Int) where {T,N}
+    dim > N && return (1, 1)
+    sd = A.subdomains
+    start = sd.start[dim]
+    cum = sd.cumlength[dim]
+    rel = p - start + 1
+    ci = searchsortedfirst(cum, rel)
+    (1 <= ci <= length(cum)) || throw(BoundsError(A, ntuple(d -> d == dim ? p : 1, N)))
+    prev = ci == 1 ? 0 : cum[ci-1]
+    tile_start = prev + start
+    return (ci, p - tile_start + 1)
+end
+
+_index_at(ind::AbstractRange, k::Int) = Int(ind[k])
+_index_at(ind::AbstractVector, k::Int) = Int(ind[k])
+
 function darray_copyto!(B::DArray{TB,NB}, A::DArray{TA,NA}, Binds=parentindices(B), Ainds=parentindices(A)) where {TB,NB,TA,NA}
-    Nmax = max(NA, NB)
+    if _is_linear_parentinds(B, Binds) || _is_linear_parentinds(A, Ainds)
+        return _darray_copyto_linear!(B, A, Binds, Ainds)
+    end
+
+    Binds_n = ntuple(i -> _copy_index(Binds[i]), length(Binds))
+    Ainds_n = ntuple(i -> _copy_index(Ainds[i]), length(Ainds))
+    if any(_is_scattered_copy_index, Binds_n) || any(_is_scattered_copy_index, Ainds_n)
+        return _darray_copyto_scattered!(B, A, Binds_n, Ainds_n)
+    end
+
+    return _darray_copyto_contiguous!(B, A, Binds_n, Ainds_n)
+end
+
+function _darray_copyto_contiguous!(B::DArray{TB,NB}, A::DArray{TA,NA}, Binds, Ainds) where {TB,NB,TA,NA}
+    Nmax = max(NA, NB, length(Binds), length(Ainds))
 
     pad1(x, i) = length(x) < i ? 1 : x[i]
     pad1range(x, i) = length(x) < i ? (1:1) : x[i]
     pad1range(x::ArrayDomain, i) = length(x.indexes) < i ? (1:1) : x.indexes[i]
     padNmax(x) = ntuple(i->pad1range(x, i), Nmax)
     padNmax(x::ArrayDomain) = padNmax(x.indexes)
-
-    if any(x->x isa Vector, Binds) || any(x->x isa Vector, Ainds)
-        # Split the copy into multiple copies
-        dims_with_vector = findall(x->x[1] isa Vector || x[2] isa Vector, collect(zip(Binds, Ainds)))
-        Binds_set = Iterators.product(ntuple(i->i in dims_with_vector ? pad1range(Binds, i) : Ref(pad1range(Binds, i)), Nmax)...)
-        Ainds_set = Iterators.product(ntuple(i->i in dims_with_vector ? pad1range(Ainds, i) : Ref(pad1range(Ainds, i)), Nmax)...)
-        for (Binds_inner, Ainds_inner) in zip(Binds_set, Ainds_set)
-            darray_copyto!(B, A, Binds_inner, Ainds_inner)
-        end
-        return
-    end
 
     if !all(ntuple(i->length(pad1range(Binds, i)) == length(pad1range(Ainds, i)), Nmax))
         throw(DimensionMismatch("Cannot copy from array of size $(size(A)) (indices $Ainds) to array of size $(size(B)) (indices $Binds)"))
@@ -192,8 +232,103 @@ function darray_copyto!(B::DArray{TB,NB}, A::DArray{TA,NA}, Binds=parentindices(
 
     return B
 end
+
+# Non-contiguous (Vector) indices: one Datadeps task per overlapping tile
+# pair, not one `spawn_datadeps` per selected element.
+function _darray_copyto_scattered!(B::DArray{TB,NB}, A::DArray{TA,NA}, Binds, Ainds) where {TB,NB,TA,NA}
+    Nmax = max(NA, NB, length(Binds), length(Ainds))
+    Binds_p = ntuple(i -> i <= length(Binds) ? Binds[i] : (1:1), Nmax)
+    Ainds_p = ntuple(i -> i <= length(Ainds) ? Ainds[i] : (1:1), Nmax)
+    nsel = ntuple(i -> length(Binds_p[i]), Nmax)
+    for i in 1:Nmax
+        length(Binds_p[i]) == length(Ainds_p[i]) || throw(DimensionMismatch(
+            "Cannot copy from array of size $(size(A)) (indices $Ainds) to array of size $(size(B)) (indices $Binds)"))
+    end
+    isempty(CartesianIndices(nsel)) && return B
+
+    buckets = Dict{Tuple{CartesianIndex{Nmax},CartesianIndex{Nmax}},
+                   Vector{Tuple{CartesianIndex{Nmax},CartesianIndex{Nmax}}}}()
+    for k in CartesianIndices(nsel)
+        Bchunk_t = ntuple(d -> _chunk_and_local(B, d, _index_at(Binds_p[d], k[d]))[1], Nmax)
+        Bloc_t = ntuple(d -> _chunk_and_local(B, d, _index_at(Binds_p[d], k[d]))[2], Nmax)
+        Achunk_t = ntuple(d -> _chunk_and_local(A, d, _index_at(Ainds_p[d], k[d]))[1], Nmax)
+        Aloc_t = ntuple(d -> _chunk_and_local(A, d, _index_at(Ainds_p[d], k[d]))[2], Nmax)
+        key = (CartesianIndex(Bchunk_t), CartesianIndex(Achunk_t))
+        pair = (CartesianIndex(Bloc_t), CartesianIndex(Aloc_t))
+        dests = get!(buckets, key) do
+            Vector{Tuple{CartesianIndex{Nmax},CartesianIndex{Nmax}}}()
+        end
+        push!(dests, pair)
+    end
+
+    Dagger.spawn_datadeps() do
+        for ((Bidx, Aidx), pairs) in buckets
+            dests = [p[1] for p in pairs]
+            srcs = [p[2] for p in pairs]
+            Dagger.@spawn copyto_scattered!(Out(B.chunks[Bidx]), dests, In(A.chunks[Aidx]), srcs)
+        end
+    end
+    return B
+end
+
+function _linear_index_vec(inds)
+    length(inds) == 1 || throw(ArgumentError("linear copy needs a single index vector, got $(inds)"))
+    return _copy_index(inds[1])
+end
+
+function _darray_copyto_linear!(B::DArray{TB,NB}, A::DArray{TA,NA}, Binds, Ainds) where {TB,NB,TA,NA}
+    Blin = _is_linear_parentinds(B, Binds) ? _linear_index_vec(Binds) :
+           (length(Binds) == 1 ? _copy_index(Binds[1]) : throw(DimensionMismatch(
+            "Cannot copy from array of size $(size(A)) (indices $Ainds) to array of size $(size(B)) (indices $Binds)")))
+    Alin = _is_linear_parentinds(A, Ainds) ? _linear_index_vec(Ainds) :
+           (length(Ainds) == 1 ? _copy_index(Ainds[1]) : throw(DimensionMismatch(
+            "Cannot copy from array of size $(size(A)) (indices $Ainds) to array of size $(size(B)) (indices $Binds)")))
+    length(Blin) == length(Alin) || throw(DimensionMismatch(
+        "Cannot copy from array of size $(size(A)) (indices $Ainds) to array of size $(size(B)) (indices $Binds)"))
+    n = length(Blin)
+    n == 0 && return B
+
+    Bcart = CartesianIndices(size(B))
+    Acart = CartesianIndices(size(A))
+    NB_ = ndims(B)
+    NA_ = ndims(A)
+    buckets = Dict{Tuple{CartesianIndex{NB_},CartesianIndex{NA_}},
+                   Vector{Tuple{CartesianIndex{NB_},CartesianIndex{NA_}}}}()
+    for k in 1:n
+        BI = Bcart[Blin[k]]
+        AI = Acart[Alin[k]]
+        Bchunk_t = ntuple(d -> _chunk_and_local(B, d, BI[d])[1], NB_)
+        Bloc_t = ntuple(d -> _chunk_and_local(B, d, BI[d])[2], NB_)
+        Achunk_t = ntuple(d -> _chunk_and_local(A, d, AI[d])[1], NA_)
+        Aloc_t = ntuple(d -> _chunk_and_local(A, d, AI[d])[2], NA_)
+        key = (CartesianIndex(Bchunk_t), CartesianIndex(Achunk_t))
+        pair = (CartesianIndex(Bloc_t), CartesianIndex(Aloc_t))
+        dests = get!(buckets, key) do
+            Vector{Tuple{CartesianIndex{NB_},CartesianIndex{NA_}}}()
+        end
+        push!(dests, pair)
+    end
+
+    Dagger.spawn_datadeps() do
+        for ((Bidx, Aidx), pairs) in buckets
+            dests = [p[1] for p in pairs]
+            srcs = [p[2] for p in pairs]
+            Dagger.@spawn copyto_scattered!(Out(B.chunks[Bidx]), dests, In(A.chunks[Aidx]), srcs)
+        end
+    end
+    return B
+end
+
 function copyto_view!(Bpart, Brange, Apart, Arange)
     copyto!(view(Bpart, Brange), view(Apart, Arange))
+    return
+end
+
+# Named so MPI ArgumentWrapper hashes stay rank-uniform (not a closure).
+function copyto_scattered!(Bpart, dests, Apart, srcs)
+    @inbounds for k in eachindex(dests)
+        Bpart[dests[k]] = Apart[srcs[k]]
+    end
     return
 end
 
@@ -203,6 +338,8 @@ Base.copyto!(B::DArray{T,N}, A::Array{T,N}) where {T,N} =
     darray_copyto!(B, view(A, B.partitioning))
 Base.copyto!(B::Array{T,N}, A::DArray{T,N}) where {T,N} =
     darray_copyto!(view(B, A.partitioning), A)
+Base.copyto!(B::DArray, A::SubArray{T,N,<:Array}) where {T,N} =
+    darray_copyto!(B, view(A, B.partitioning))
 
 StridedDArray{T,N} = Union{<:DArray{T,N}, SubArray{T,N,<:DArray{T,NP}} where NP}
 
@@ -213,8 +350,29 @@ function Base.copyto!(B::Array, A::StridedDArray)
     darray_copyto!(DB, parent(A), parentindices(DB), parentindices(A))
     return B
 end
+# `view(::DArray, I, J)` is a Base `SubArray`. Sending that parent through
+# `view(::AbstractArray, ::Blocks)` would wrap it as a DArray of SubArrays of
+# a DArray, and the copy would scalar-index (one task per element).
 function Base.copyto!(B::SubArray, A::StridedDArray)
-    DB = view(parent(B), AutoBlocks())
-    darray_copyto!(DB, parent(A), parentindices(B), parentindices(A))
+    Ap = parent(A)
+    Ainds = parentindices(A)
+    if parent(B) isa DArray
+        darray_copyto!(parent(B), Ap, parentindices(B), Ainds)
+    else
+        DB = view(parent(B), AutoBlocks())
+        darray_copyto!(DB, Ap, parentindices(B), Ainds)
+    end
     return B
 end
+
+function _copyto_darray_view_from_local!(B::SubArray{<:Any,<:Any,<:DArray}, A::AbstractArray)
+    size(B) == size(A) || throw(DimensionMismatch(
+        "Cannot copy from array of size $(size(A)) to view of size $(size(B))"))
+    DA = view(A, AutoBlocks())
+    darray_copyto!(parent(B), DA, parentindices(B), axes(DA))
+    return B
+end
+Base.copyto!(B::SubArray{T,N,<:DArray}, A::Array) where {T,N} =
+    _copyto_darray_view_from_local!(B, A)
+Base.copyto!(B::SubArray{T,N,<:DArray}, A::SubArray{S,M,<:Array}) where {T,N,S,M} =
+    _copyto_darray_view_from_local!(B, A)
