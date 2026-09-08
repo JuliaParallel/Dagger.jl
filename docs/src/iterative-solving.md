@@ -175,8 +175,10 @@ x, stats = Krylov.minres(Dagger.Projected(DA, N), b)
 `N` is a `DVector` (one column) or a `DMatrix` (columns of the basis),
 partitioned like `b`. Left and right nullspaces can be passed separately as
 `Projected(A, left, right)` when they differ; one `N` is the symmetric
-case. The stored basis (`P.left` / `P.right`) is what a later AMG
-near-nullspace hook can read.
+case. The stored basis (`P.left` / `P.right`) is also what
+[`SmoothedAggregationPreconditioner`](@ref) reads when the operator is a
+`Projected` — or pass the same columns as `nullspace=` on the constructor
+(PETSc `MatSetNearNullSpace`; not a setter).
 
 ## Nested / field-split operators
 
@@ -354,7 +356,24 @@ r = similar(b); mul!(r, DA, x); axpy!(-1, b, r)
 
 This is a first cut (unsmoothed or Jacobi-smoothed aggregation, 1–2 coarse
 levels, two damped-Jacobi sweeps each side, gathered LU on the coarsest grid).
-Setup still gathers the current level to build `P`; RAP and the V-cycle do not.
+Setup still gathers the current level (and any `nullspace`) to build `P`; RAP
+and the V-cycle do not.
+
+Elasticity and other systems whose low-energy modes are not the scalar
+constant need those modes as SA candidates — the PETSc
+`MatSetNearNullSpace` / rigid-body set. Attach them on the constructor;
+[`AMGPreconditioner`](@ref) stays per-tile and does not take this:
+
+```julia
+# N is n×k (e.g. 2 translations + 1 rotation). Default is ones (scalar SA).
+M = Dagger.SmoothedAggregationPreconditioner(DA; nullspace=N)
+# or read N off a Projected wrapper:
+M = Dagger.SmoothedAggregationPreconditioner(Dagger.Projected(DA, N))
+x, stats = Krylov.gmres(DA, b; M)
+```
+
+`B=` is the AlgebraicMultigrid.jl name for the same argument. Check
+`‖Ax−b‖`, not only `stats.solved`.
 
 ### Geometric multigrid (regular grids)
 
@@ -392,6 +411,9 @@ additive Schwarz; aggregation AMG is still `GlobalAMG`.
   lives on a regular 1-D / 2-D grid. `AMGPreconditioner` is per-tile Schwarz
   and can look solved while `‖Ax−b‖` is huge. Prefer `gmres` if `cg` rejects
   the V-cycle as non-SPD.
+- **Elasticity / systems with rigid-body modes:** same global SA, with
+  `nullspace=N`. Scalar SA (`ones`) can stall on those modes; per-tile AMG
+  is still not a coarse grid.
 - **General sparse systems:** `BlockILUPreconditioner` is a solid, cheap-setup
   general-purpose option; pair with `gmres` or `bicgstab`.
 - **Quick baseline / very well-conditioned systems:** `JacobiPreconditioner` (or

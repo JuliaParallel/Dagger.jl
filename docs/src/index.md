@@ -426,6 +426,7 @@ x, stats = Krylov.cg(DA, b)
 using AlgebraicMultigrid   # enables AMG preconditioners
 
 P = Dagger.SmoothedAggregationPreconditioner(DA)  # global AMG; build once
+# elasticity / rigid-body modes: SmoothedAggregationPreconditioner(DA; nullspace=N)
 x, stats = Krylov.gmres(DA, b; M = P)             # check ‖Ax−b‖, not just stats.solved
 ```
 

@@ -39,8 +39,9 @@ Columns are orthonormalized at construction by default, so a raw `ones(n)`
 is a valid Poisson nullspace (`‖ones‖ = √n`, not 1). Set
 `orthonormalize=false` only when the columns are already orthonormal.
 
-The stored basis is also what a later AMG near-nullspace hook can read
-(`P.left` / `P.right`).
+The stored basis is what [`GlobalAMG`](@ref) /
+[`SmoothedAggregationPreconditioner`](@ref) read when the operator is a
+`Projected` (`P.right`, unless `nullspace=` is passed explicitly).
 """
 struct Projected{TA,TL,TR}
     A::TA
