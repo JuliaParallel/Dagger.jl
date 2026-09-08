@@ -626,6 +626,20 @@ for T in (ComplexF32, ComplexF64)
         return _symm_mul!(C, A, B, α, β, side, uplo, true)
     end
 end
+# `1+0im` is Complex{Int64}. A lone `Number`+`DMatrix` method is ambiguous
+# with the stdlib `AbstractMatrix{T}` methods when α is already `T`; the
+# typed methods above win in that case, and these only fire for other
+# Numbers (then convert).
+function LinearAlgebra.BLAS.symm!(side::AbstractChar, uplo::AbstractChar,
+                                  α::Number, A::DMatrix{T}, B::DMatrix{T},
+                                  β::Number, C::DMatrix{T}) where T<:LinearAlgebra.BlasReal
+    return LinearAlgebra.BLAS.symm!(side, uplo, convert(T, α), A, B, convert(T, β), C)
+end
+function LinearAlgebra.BLAS.hemm!(side::AbstractChar, uplo::AbstractChar,
+                                  α::Number, A::DMatrix{T}, B::DMatrix{T},
+                                  β::Number, C::DMatrix{T}) where T<:LinearAlgebra.BlasComplex
+    return LinearAlgebra.BLAS.hemm!(side, uplo, convert(T, α), A, B, convert(T, β), C)
+end
 
 function LinearAlgebra.mul!(C::DMatrix, A::LinearAlgebra.Symmetric{<:Any,<:DMatrix},
                             B::DMatrix, α::Number, β::Number)
