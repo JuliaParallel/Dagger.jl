@@ -537,8 +537,8 @@ end
             time_values = MetricsTracker.values_for_metric(post_snap, Dagger, :execute!, MetricsTracker.TimeMetric())
             # The global cache is bounded to the most-recent METRICS_CACHE_MAX_TASKS
             # tasks, so the count grows by the 5 new tasks only up to that cap.
-            @test length(time_values) >= min(pre_count + 5, Dagger.METRICS_CACHE_MAX_TASKS)
-            @test length(time_values) <= Dagger.METRICS_CACHE_MAX_TASKS
+            @test length(time_values) >= min(pre_count + 5, Dagger.METRICS_CACHE_MAX_TASKS[])
+            @test length(time_values) <= Dagger.METRICS_CACHE_MAX_TASKS[]
 
             time_inferred = Base.return_types(MetricsTracker.lookup_value,
                 Tuple{MetricsTracker.MetricsSnapshot, Module, Symbol, MetricsTracker.TimeMetric, Int})[1]
@@ -550,7 +550,6 @@ end
 
             proc_values = MetricsTracker.values_for_metric(post_snap, Dagger, :execute!, Dagger.ProcessorMetric())
             @test any(v -> v isa Dagger.Processor, values(proc_values))
-        end
         end
 
         @testset "Move Metric Types" begin
@@ -652,7 +651,7 @@ end
         @testset "Runtime Reducer Variants" begin
             cache = MetricsTracker.global_metrics_cache()
             test_sig = Any[typeof(MyStruct), MyStruct, Int64]
-            test_proc = tproc1_1
+            test_proc = Dagger.ThreadProc(1, 1)
             base_key = 777_777_000
 
             keys_used = Int[]
@@ -699,7 +698,7 @@ end
         @testset "Alloc Reducer Variants" begin
             cache = MetricsTracker.global_metrics_cache()
             test_sig = Any[typeof(MyStruct), MyStruct, Float64]
-            test_proc = tproc1_1
+            test_proc = Dagger.ThreadProc(1, 1)
             base_key = 666_666_000
 
             keys_used = Int[]
