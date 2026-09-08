@@ -413,3 +413,12 @@ lesson.
    limit as distributed-`P`). Check `‖Ax−b‖`, not only `stats.solved`. A
    2-component / elasticity problem is where scalar SA stalls; Poisson with
    `ones` is not a near-nullspace test.
+
+36. **`DaggerSparseLU \ DVector` needs its own method.** `_PinnedSparseFactor`
+   (`Union{DaggerSparseLU,DaggerSparseCholesky}`) already has `\(F, b::DVector)`,
+   and `DaggerSparseLU` also has `\(F, b::AbstractVector)` for host vectors.
+   On Julia 1.12 those two are equally specific, so GlobalAMG's coarse solve
+   (`copyto!(u, M.coarse \ b)` in `_vcycle!`) throws `MethodError` ambiguous
+   instead of applying the V-cycle. Define `\(F::DaggerSparseLU, b::DVector)`
+   and keep it on the pinned path. Do not "fix" this by gathering `b` through
+   the `AbstractVector` method.

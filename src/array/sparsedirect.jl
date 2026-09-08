@@ -320,6 +320,18 @@ function Base.:\(F::DaggerSparseLU, b::AbstractVector)
     return F \ distribute(collect(b), F.part)
 end
 
+# Tie-breaker: `DaggerSparseLU <: _PinnedSparseFactor` and `DVector <: AbstractVector`
+# make `\(::DaggerSparseLU, ::AbstractVector)` and `\(::_PinnedSparseFactor, ::DVector)`
+# equally specific (Julia 1.12). Prefer the pinned DVector path — GlobalAMG's
+# coarse solve is `F \ b` with a `DVector`.
+function Base.:\(F::DaggerSparseLU, b::DVector)
+    length(b) == F.n || throw(DimensionMismatch(
+        "factorization is $(F.n)×$(F.n) but b has length $(length(b))"))
+    x = fetch(spawn(_direct_solve, Options(; compute_scope=F.scope),
+                    F.fact, b.chunks...))
+    return distribute(x, b.partitioning)
+end
+
 function Base.:\(F::DaggerSparseLU, B::AbstractMatrix)
     bs = F.part.blocksize[1]
     return F \ distribute(collect(B), Blocks(bs, bs))
