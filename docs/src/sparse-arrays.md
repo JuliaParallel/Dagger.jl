@@ -291,6 +291,10 @@ suite; prefer `SparseArrays` unless you specifically need a Finch format.
 ## Limitations
 
 - `collect` densifies; use `sparse(DA)` to gather tiles into one `SparseMatrixCSC`.
+- **Matrix I/O:** `MatrixMarket.mmread(path, Blocks(...))` / `mmwrite(path, DA)`
+  keep a sparse operator sparse (write gathers CSC, it does not `collect`).
+  Dense arrays use `DelimitedFiles.readdlm(path, Blocks(...))` /
+  `writedlm(path, DA)`. There is no Dagger-only matrix format.
 - A sparse tile is aliased as a whole — Datadeps cannot track independent writes
   to disjoint sub-regions of a single sparse tile (use finer tiling instead).
 - Not every dense `DArray` operation has a sparse counterpart yet; sparse support
