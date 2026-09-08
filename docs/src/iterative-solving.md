@@ -313,10 +313,12 @@ structure follows the *finer* of the two block sizes.
 ### Global AMG (across tiles)
 
 [`Dagger.GlobalAMG`](@ref) is a different object. It builds one hierarchy over
-the whole operator: aggregates (or a Ruge–Stüben splitting) see the full
-graph, each coarse operator is the distributed Galerkin product
-`Ac = P' * A * P`, and `mul!(y, M, x)` is a V-cycle. That is what PDE codes
-mean by AMG; `AMGPreconditioner` with many tiles is not.
+the whole operator: each coarse operator is the distributed Galerkin product
+`Ac = P' * A * P`, and `mul!(y, M, x)` is a V-cycle. Interpolation `P` is
+built from tiled data (per-tile aggregation or classical interpolation, plus
+a lightweight matching of interface nodes) — setup does not assemble a
+global CSC of `A`. That is what PDE codes mean by AMG;
+`AMGPreconditioner` with many tiles is not.
 
 ```julia
 using AlgebraicMultigrid, Krylov
@@ -328,9 +330,9 @@ r = similar(b); mul!(r, DA, x); axpy!(-1, b, r)
 @assert norm(r) / norm(b) < 1e-8   # do not stop at stats.solved
 ```
 
-This is a first cut (unsmoothed or Jacobi-smoothed aggregation, 1–2 coarse
-levels, two damped-Jacobi sweeps each side, gathered LU on the coarsest grid).
-Setup still gathers the current level to build `P`; RAP and the V-cycle do not.
+This is a first cut (per-tile unsmoothed or Jacobi-smoothed aggregation, 1–2
+coarse levels, two damped-Jacobi sweeps each side, gathered LU on the coarsest
+grid). Setup of `P` and RAP are tiled; the coarsest solve still gathers.
 
 ### Choosing a preconditioner
 

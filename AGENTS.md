@@ -399,3 +399,17 @@ lesson.
    type (`BlockOperator`) and cannot reuse `hvcat`. `BlockArrays.mortar`
    is the ecosystem name for the assembled case, but adding that dependency
    does not give you matrix-free blocks or field-split `mul!`.
+
+35. **GlobalAMG builds `P` from tiles, not a gathered CSC of `A`.** Per-tile
+   StandardAggregation / Ruge–Stüben on the diagonal tile, plus a
+   lightweight matching of unaggregated interface nodes (off-diagonal
+   entries in the same row). Jacobi-smooth `P ← T − ω D⁻¹ A T` with
+   distributed SpGEMM (`Dᵢᵢ` is the row 1-norm, matching AMG.jl's
+   `JacobiProlongation`). The caller fetches only per-tile headers
+   (`nagg` + interface pairs), not `A`. Galerkin RAP stays distributed.
+   The coarsest solve is still a gathered LU (`_gather_sparse`, not
+   `_collect_sparse_dmatrix`). `COLLECT_SPARSE_DMATRIX_MAXSIZE` lets tests
+   prove setup does not gather the fine operator. Do not treat
+   `stats.solved` as `Ax≈b` (lessons 19/32). `AMGPreconditioner` is still
+   per-tile Schwarz — do not change it. Aggregates still do not come from
+   a distributed MIS; a row-coarsen task sees one row of tiles.
