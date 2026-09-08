@@ -113,6 +113,46 @@ end
     @test collect(sol_k.u) ≈ xref rtol = 1e-6
 end
 
+@testset "sparse direct cache reuses lu! when A changes" begin
+    n = 32
+    k = 16
+    Asp = advection_diffusion_1d(Float64, n)
+    Asp2 = 2 * Asp
+    b = rand(n)
+    xref = Matrix(Asp) \ b
+    xref2 = Matrix(Asp2) \ b
+    DA = distribute(Asp, Blocks(k, k))
+    DA2 = distribute(Asp2, Blocks(k, k))
+    Db = distribute(b, Blocks(k))
+
+    function factor_objectid(F)
+        return fetch(Dagger.spawn(Dagger._pinned_factor_objectid,
+                                  Dagger.Options(; compute_scope=F.scope), F.fact))
+    end
+
+    cache = LinearSolve.init(LinearProblem(DA, Db), PureKLUFactorization())
+    sol1 = LinearSolve.solve!(cache)
+    @test collect(sol1.u) ≈ xref rtol = 1e-8
+    F = cache.cacheval.F
+    @test F isa Dagger.DaggerSparseLU
+    id0 = factor_objectid(F)
+
+    cache.A = DA2
+    @test cache.isfresh
+    sol2 = LinearSolve.solve!(cache)
+    @test collect(sol2.u) ≈ xref2 rtol = 1e-8
+    @test cache.cacheval.F === F
+    @test factor_objectid(F) == id0
+
+    # UMFPACK has no splu!; the update still solves, via a rebuild.
+    cache_u = LinearSolve.init(LinearProblem(DA, Db), PureUMFPACKFactorization())
+    sol_u1 = LinearSolve.solve!(cache_u)
+    @test collect(sol_u1.u) ≈ xref rtol = 1e-8
+    cache_u.A = DA2
+    sol_u2 = LinearSolve.solve!(cache_u)
+    @test collect(sol_u2.u) ≈ xref2 rtol = 1e-8
+end
+
 @testset "cache reuse and Dagger preconditioner as Pl" begin
     n = 32
     k = 16

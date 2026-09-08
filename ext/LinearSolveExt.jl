@@ -229,7 +229,8 @@ end
 # ---------------------------------------------------------------------------
 
 # `LinearCache.cacheval` is typed from `init_cacheval`. A wrapper keeps that
-# type stable across the empty-init / first-solve / refactor sequence.
+# type stable across the empty-init / first-solve / `lu!(F, A)` refactor
+# sequence (KLU reuses symbolic analysis; UMFPACK rebuilds).
 mutable struct DaggerDirectCache
     F::Any
 end
@@ -275,8 +276,19 @@ end
 
 function _solve_dagger_direct!(cache::LinearCache, alg, factorize)
     b = _require_dvector_rhs(alg, cache.b)
-    if cache.isfresh || cache.cacheval.F === nothing
+    F = cache.cacheval.F
+    if F === nothing
         cache.cacheval.F = factorize(cache.A)
+        cache.isfresh = false
+    elseif cache.isfresh
+        # Same sparsity, new values: `lu!(F, A)` reuses KLU's symbolic analysis.
+        # PureUMFPACK has no `splu!`, so that path rebuilds inside the pinned box.
+        try
+            LinearAlgebra.lu!(F, cache.A)
+        catch e
+            e isa DimensionMismatch || rethrow()
+            cache.cacheval.F = factorize(cache.A)
+        end
         cache.isfresh = false
     end
     x = cache.cacheval.F \ b

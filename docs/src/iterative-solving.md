@@ -397,6 +397,14 @@ x = F \ b             # returns a DVector partitioned like b
 once, solve many right-hand sides cheaply. `lu(A)` / `factorize(A)` prefer
 `splu` when both packages are loaded.
 
+When the **values** change but the sparsity pattern does not (implicit time
+stepping), refresh with `lu!(F, A)` — the LinearAlgebra factor-update API,
+not a Dagger-specific `refactor`. `Dagger.klu` then `lu!(F, A)` reuses KLU's
+symbolic analysis (`klu!`). PureUMFPACK has no `splu!`, so `lu!(F, A)` on an
+`splu` / default-`lu` factor still works but rebuilds the numerics. Prefer
+`klu` when you know the pattern is fixed. The same idea applies to sparse
+Cholesky: `cholesky!(F, A)` reuses CHOLMOD's symbolic factor.
+
 There are also **block direct preconditioners** that factor each diagonal tile
 exactly (`Dagger.BlockKLUPreconditioner`, `Dagger.BlockUMFPACKPreconditioner`),
 usable like the other block preconditioners. With a single tile they are exact
@@ -420,6 +428,21 @@ u = distribute(u0, Blocks(k))
 for step in 1:nsteps
     rhs = ...                                # depends on current state
     u, stats = Krylov.cg(A, rhs; M = P, rtol = 1e-8)
+end
+```
+
+If the implicit operator is small enough to gather and only its **values**
+change each step, reuse a direct factor instead:
+
+```julia
+using SparseArrays, PureKLU
+
+A = distribute(I - Δt * L_sparse, Blocks(k, k))   # same pattern every step
+F = Dagger.klu(A)                                 # symbolic analysis once
+for step in 1:nsteps
+    # update the stored values of A (same I, J)
+    lu!(F, A)                                     # KLU numeric refactor
+    u = F \ rhs
 end
 ```
 
@@ -452,6 +475,7 @@ Dagger.BlockUMFPACKPreconditioner
 Dagger.klu
 Dagger.splu
 Dagger.DaggerSparseLU
+Dagger.DaggerSparseCholesky
 Dagger.SparseIterativeFactorization
 Dagger.DistributedSparseLU
 Dagger.DistributedSchurLU

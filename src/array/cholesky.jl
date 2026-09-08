@@ -141,6 +141,8 @@ function LinearAlgebra._cholesky(A::DMatrix, pivot; kwargs...)
     return LinearAlgebra.cholesky!(A, pivot; kwargs...)
 end
 
+# `cholesky!(F::DaggerSparseCholesky, A)` (numeric reuse of a pinned CHOLMOD
+# factor) is in sparsedirect.jl — this method is "factor A", not "update F".
 function LinearAlgebra.cholesky!(A::DMatrix, ::LinearAlgebra.NoPivot=LinearAlgebra.NoPivot();
                                 check::Bool=true, kwargs...)
     if _sparse_backed_dmatrix(A)

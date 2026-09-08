@@ -70,6 +70,28 @@ end
         end
     end
 
+    @testset "cholesky!(F, A) reuses the symbolic factor" begin
+        DA = distribute(Asp, A_part)
+        DA2 = distribute(2 * Asp, A_part)
+        Db = distribute(b, b_part)
+        xref2 = (2 * Adense) \ b
+
+        F = cholesky(DA)
+        id0 = fetch(Dagger.spawn(Dagger._pinned_factor_objectid,
+                                 Dagger.Options(; compute_scope=F.scope), F.fact))
+        @test collect(F \ Db) ≈ xref
+
+        @test LinearAlgebra.cholesky!(F, DA2) === F
+        @test collect(F \ Db) ≈ xref2
+        @test relres(2 * Adense, collect(F \ Db), b) < 1e-10
+        id1 = fetch(Dagger.spawn(Dagger._pinned_factor_objectid,
+                                 Dagger.Options(; compute_scope=F.scope), F.fact))
+        @test id0 == id1
+
+        @test_throws DimensionMismatch LinearAlgebra.cholesky!(F, distribute(Asp[1:n÷2, 1:n÷2],
+                                                              Blocks(k, k)))
+    end
+
     @testset "dense cholesky is unchanged" begin
         DA = distribute(Adense, A_part)
         F = cholesky(DA)

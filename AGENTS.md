@@ -413,3 +413,22 @@ lesson.
    `LU`, `DeviceILU0`); host-only factors still `Adapt` a temporary inside
    the GPU-scoped task so the DArray chunk stays on-device. Do not treat
    `stats.solved` as `Ax≈b` for block AMG (lesson 19).
+
+36. **Sparse `lu!(F, A)` reuses the pinned symbolic factor; PureUMFPACK cannot.**
+    Implicit time stepping keeps sparsity and changes values. The API is
+    LinearAlgebra's `lu!(F::DaggerSparseLU, A)` / `cholesky!(F::DaggerSparseCholesky, A)`
+    — do not invent `Dagger.refactor`. A worker-local `_MutablePinnedFactor`
+    box holds the backend object so `F` and `F.fact` stay identity-stable
+    while the inner factor is re-numericized. KLU goes through `klu!` (same
+    object); CHOLMOD through `cholesky!(F, S)`. PureUMFPACK has no `splu!`,
+    so that path rebuilds `splu` into the box — correct, but not cheaper
+    than `splu(A)` again. Prefer `Dagger.klu` when the values will change.
+    `lu(A)` still prefers UMFPACK when both backends are loaded (existing
+    semantics). Distributed `splu(; distributed=true)` extracts L/U or a
+    Schur system and cannot update; `lu!` on those types errors. The gather
+    uses `findnz` (drops stored zeros), so a value that becomes exactly 0
+    can change the CSC pattern; KLU then falls back to a full `klu`.
+    `\(F::DaggerSparseLU, ::AbstractVector)` and `\(F::_PinnedSparseFactor, ::DVector)`
+    are ambiguous (`DVector <: AbstractVector`); GlobalAMG's coarse solve hits
+    that. Give `DaggerSparseLU` / `DaggerSparseCholesky` their own `DVector`
+    methods instead of a Union.
