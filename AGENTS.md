@@ -588,3 +588,31 @@ lesson.
    not invent `Dagger.BSR`. The `DaggerSparseLU \ DVector` tie-breaker this
    workstream also hit is already lesson 36 (`_solve_pinned_dvector`); do
    not add a second method.
+
+45. **Block Krylov cannot use one `SM` type for both the tall basis and the Hessenberg.**
+   Krylov's `BlockGmresWorkspace` / `BlockMinresWorkspace` allocate every
+   matrix as `SM(undef, m, n)` with `SM = typeof(B)`. A `DMatrix` type does
+   not record its block size (the same reason as the vector
+   `KrylovConstructor` hook), and the p×p / 2p×p blocks are Householder-QR'd
+   and range-indexed — a `DMatrix` there is scalar getindex. Keep tall n×p
+   blocks as a *dense* `DMatrix` with `B`'s row blocking (`similar(B)` would
+   densify a sparse-backed RHS into sparse tiles that cannot Householder)
+   and keep the Hessenberg as a host `Matrix`. Tall QR gathers the n×p
+   panel (the size of `B`); the operator apply is `mul!(W, A, P)`, not a
+   Julia loop of `A \\ b`. `A \\ B` / `SparseIterativeFactorization` must
+   call `block_gmres`. Mixed `DMatrix` × host `Matrix` GEMM wraps the host
+   side as a single-tile view — do not `collect` the tall factor.
+   `LinearSolve`'s `KrylovJL_GMRES` / `KrylovJL_MINRES` are the ecosystem
+   entry for a `DMatrix` RHS; do not invent a `Dagger.xyz` block solver.
+   Check `‖AX−B‖`, not only `stats.solved`. Pairwise wrappers
+   `copyto!(::SM, ::AbstractArray)` / `copyto!(::AbstractArray, ::SM)` (and
+   the matching `mul!` AdjOrTrans pair) are ambiguous when both sides are
+   `SM` — Krylov's `copyto!(V[1], R₀)` and `mul!(R, V', Q)` hit that.
+   `householder!` / `kunmqr!` wrappers must also match Krylov's
+   `AbstractMatrix{FC}` / `AbstractVector{FC}` parameterization *and* the
+   `FC <: FloatOrComplex` bound; specializing only `Q` or leaving `FC`
+   unconstrained is less specific on `R`/`τ`/`buffer` and is ambiguous
+   with the generic. Same for `mul!(::SM, A, B, α, β)` versus LinearAlgebra's
+   `mul!(::AbstractMatrix, ::AbstractVecOrMat, ::AbstractVecOrMat, α, β)`:
+   add the `AbstractVecOrMat` arm; keep an unconstrained `A` for matrix-free
+   operators.

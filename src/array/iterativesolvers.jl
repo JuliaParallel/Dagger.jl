@@ -47,14 +47,36 @@ function bicgstab end
 
 """
     krylov_solve(method::Symbol, A, b::DVector; kwargs...) -> (x::DVector, stats)
+    krylov_solve(method::Symbol, A, B::DMatrix; kwargs...) -> (X::DMatrix, stats)
 
 Generic entry point dispatching to the iterative `method` (`:cg`, `:minres`,
-`:gmres`, `:bicgstab`). Requires `Krylov.jl` to be loaded.
+`:gmres`, `:bicgstab`, `:block_gmres`, `:block_minres`). A `DMatrix` RHS uses
+Krylov's block methods (`:block_gmres` / `:block_minres`) rather than a Julia
+loop of independent `A \\ b` solves. Requires `Krylov.jl` to be loaded.
 """
 function krylov_solve end
 
+"""
+    block_gmres(A, B::DMatrix; M=I, N=I, restart=false, memory=5, ...) -> (X::DMatrix, stats)
+
+Solve the multi-RHS system `A X = B` with Krylov's block-GMRES. `B` is a
+`DMatrix` (one column per right-hand side); the operator apply is one
+`mul!(W, A, P)` per iteration, not a loop of `A \\ b`. Requires `Krylov.jl`.
+See [`gmres`](@ref) and [`block_minres`](@ref).
+"""
+function block_gmres end
+
+"""
+    block_minres(A, B::DMatrix; M=I, atol, rtol, itmax, ...) -> (X::DMatrix, stats)
+
+Solve the Hermitian multi-RHS system `A X = B` with Krylov's block-MINRES.
+Requires `Krylov.jl`. See [`minres`](@ref) and [`block_gmres`](@ref).
+"""
+function block_minres end
+
 # Friendly fallbacks: these generic methods are shadowed by the more specific
-# `(A, b::DVector)` methods added in `ext/KrylovExt.jl` once Krylov is loaded.
+# `(A, b::DVector)` / `(A, B::DMatrix)` methods added in `ext/KrylovExt.jl`
+# once Krylov is loaded.
 _krylov_required(name) = throw(ArgumentError(
     "Dagger.$name requires Krylov.jl. Run `using Krylov` (or `import Krylov`) \
     to enable distributed iterative solvers."))
@@ -62,6 +84,8 @@ cg(A, b; kwargs...) = _krylov_required(:cg)
 minres(A, b; kwargs...) = _krylov_required(:minres)
 gmres(A, b; kwargs...) = _krylov_required(:gmres)
 bicgstab(A, b; kwargs...) = _krylov_required(:bicgstab)
+block_gmres(A, B; kwargs...) = _krylov_required(:block_gmres)
+block_minres(A, B; kwargs...) = _krylov_required(:block_minres)
 krylov_solve(method::Symbol, A, b; kwargs...) = _krylov_required(:krylov_solve)
 
 # --- Preconditioners ------------------------------------------------------

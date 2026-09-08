@@ -99,6 +99,15 @@ function LinearSolve.defaultalg(
     return _defaultalg_dmatrix(A, b, assump)
 end
 
+# Multi-RHS: same algorithm as a vector `b`. LinearSolve's `KrylovJL_GMRES` /
+# `KrylovJL_MINRES` already construct `BlockGmresWorkspace` / `BlockMinresWorkspace`
+# for an `AbstractMatrix` RHS; KrylovExt supplies the `DMatrix` constructors.
+function LinearSolve.defaultalg(
+        A::DMatrix, b::DMatrix, assump::OperatorAssumptions{Bool}
+    )
+    return _defaultalg_dmatrix(A, b, assump)
+end
+
 # Matrix-free (or any non-`DMatrix` operator) with a `DVector` RHS: only `mul!`
 # is available, so Krylov. Returning `KrylovJL_*` directly — not
 # `DefaultLinearSolver` — keeps `needs_concrete_A = false`.
@@ -207,6 +216,30 @@ function LinearSolve.init_cacheval(
     return solver
 end
 
+# More specific than LinearSolve's `b::AbstractMatrix` arm so a `DMatrix` RHS
+# hits KrylovExt's `BlockGmresWorkspace(A, B::DMatrix)` / `BlockMinresWorkspace`
+# (tall blocks inherit `B`'s partitioning; the Hessenberg stays host).
+function LinearSolve.init_cacheval(
+        alg::KrylovJL, A, b::DMatrix, u, Pl, Pr,
+        maxiters::Int, abstol, reltol, verbose::Union{LinearVerbosity, Bool},
+        assumptions::OperatorAssumptions; zeroinit = true
+    )
+    if alg.KrylovAlg === Krylov.gmres!
+        kwargs_nt = NamedTuple(alg.kwargs)
+        memory = if haskey(kwargs_nt, :memory)
+            kwargs_nt.memory
+        elseif alg.gmres_restart == 0
+            min(20, max(1, div(size(A, 1), max(size(b, 2), 1))))
+        else
+            alg.gmres_restart
+        end
+        return Krylov.BlockGmresWorkspace(A, b; memory)
+    elseif alg.KrylovAlg === Krylov.minres!
+        return Krylov.BlockMinresWorkspace(A, b)
+    end
+    return nothing
+end
+
 # LinearSolve's KrylovJL path applies `Pl`/`Pr` with `ldiv=true`. Dagger
 # preconditioners represent `M⁻¹` and apply it with `mul!` (`ldiv=false` for
 # Krylov.jl). These methods are the LinearSolve-facing adapter; they do not
@@ -256,26 +289,32 @@ function LinearSolve.init_cacheval(
     return DaggerDirectCache(nothing)
 end
 
-function _require_dvector_rhs(alg, b)
-    b isa DVector || throw(ArgumentError(
-        "$(nameof(typeof(alg))) on a DMatrix requires a DVector right-hand side \
-        (got $(typeof(b))). Distribute `b` with the same 1-D blocking as `A`'s \
-        columns, e.g. `distribute(b, Blocks(A.partitioning.blocksize[2]))`."))
+function _require_darray_rhs(alg, b)
+    (b isa DVector || b isa DMatrix) || throw(ArgumentError(
+        "$(nameof(typeof(alg))) on a DMatrix requires a DVector or DMatrix \
+        right-hand side (got $(typeof(b))). Distribute `b` with the same \
+        blocking as `A`'s columns, e.g. \
+        `distribute(b, Blocks(A.partitioning.blocksize[2]))`."))
     return b
 end
 
-function _store_dvector!(u::DVector, x::DVector)
+function _store_solution!(u::Dagger.DArray, x::Dagger.DArray)
     u === x && return u
     copyto!(u, x)
     return u
 end
-function _store_dvector!(u::AbstractVector, x::DVector)
+function _store_solution!(u::AbstractVecOrMat, x::Dagger.DArray)
     copyto!(u, collect(x))
+    return u
+end
+function _store_solution!(u, x)
+    u === x && return u
+    copyto!(u, x)
     return u
 end
 
 function _solve_dagger_direct!(cache::LinearCache, alg, factorize)
-    b = _require_dvector_rhs(alg, cache.b)
+    b = _require_darray_rhs(alg, cache.b)
     F = cache.cacheval.F
     if F === nothing
         cache.cacheval.F = factorize(cache.A)
@@ -292,7 +331,7 @@ function _solve_dagger_direct!(cache::LinearCache, alg, factorize)
         cache.isfresh = false
     end
     x = cache.cacheval.F \ b
-    y = _store_dvector!(cache.u, x)
+    y = _store_solution!(cache.u, x)
     return SciMLBase.build_linear_solution(
         alg, y, nothing, nothing; retcode = ReturnCode.Success
     )

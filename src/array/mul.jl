@@ -133,6 +133,38 @@ function LinearAlgebra.generic_matmatmul!(
         return gemm_dagger!(C, transA, transB, A, B, alpha, beta)
     end
 end
+
+# Host `Matrix` / `SubArray` tiles in GEMM, matching the GEMV mix below.
+# Block Krylov needs `V' * Q → p×p` (host dest) and `V * Y → n×p` (host
+# `p×p` RHS) without collecting the tall `DMatrix`. Wrap the host side as a
+# single-tile `DArray` view and reuse the path above. Skip the all-`DMatrix`
+# method (already defined) and the all-host method (piracy).
+_host_as_dmatrix(A::DArray) = A
+_host_as_dmatrix(A::Matrix) = view(A, Blocks(size(A)...))
+_host_as_dmatrix(A::SubArray{<:Any,2,<:Array}) = wrap_as_darray(A)
+
+for CT in (DMatrix, Matrix, SubArray{<:Any,2,<:Array}),
+    AT in (DMatrix, Matrix, SubArray{<:Any,2,<:Array}),
+    BT in (DMatrix, Matrix, SubArray{<:Any,2,<:Array})
+    n_d = (CT === DMatrix) + (AT === DMatrix) + (BT === DMatrix)
+    (n_d == 0 || n_d == 3) && continue
+    @eval function LinearAlgebra.generic_matmatmul!(
+        C::$(CT),
+        transA::Char,
+        transB::Char,
+        A::$(AT),
+        B::$(BT),
+        _add::LinearAlgebra.MulAddMul,
+    )
+        LinearAlgebra.generic_matmatmul!(
+            _host_as_dmatrix(C), transA, transB,
+            _host_as_dmatrix(A), _host_as_dmatrix(B),
+            _add,
+        )
+        return C
+    end
+end
+
 function _repartition_matmatmul(C, A, B, transA::Char, transB::Char)
     partA = A.partitioning.blocksize
     partB = B.partitioning.blocksize

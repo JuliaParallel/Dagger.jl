@@ -75,9 +75,9 @@ include(joinpath(@__DIR__, "..", "sparse_solve_defs.jl"))
     end
 end
 
-# Krylov is loaded above; PureKLU / PureUMFPACK are not (this file runs before
-# sparsedirect.jl). This is the fallback packages hit when they write `A \ b`
-# without a sparse-direct backend.
+# Krylov is loaded above. PureKLU / PureUMFPACK are not required here; if a
+# earlier file in the same process already loaded them, dispatch still stays
+# off dense LU (`test_sparse_solve_dispatch` accepts either sparse factor).
 @testset "sparse-backed DMatrix stays off dense LU" begin
     test_sparse_solve_dispatch(; expect_direct=false)
 end
