@@ -457,7 +457,7 @@ function Base.similar(D::DArray{T,N} where T, ::Type{S}, dims::Dims{N}) where {S
     return allocate_tiled(darray_tiletype(D), S, D.partitioning, dims)
 end
 Base.similar(D::DArray{T,N1} where T, ::Type{S}, dims::Dims{N2}) where {S,N1,N2} =
-    DArray{S,N2}(undef, auto_blocks(dims), dims)
+    allocate_tiled(darray_tiletype(D), S, auto_blocks(dims), dims)
 
 Base.copy(x::DArray{T,N,B,F}) where {T,N,B,F} =
     map(identity, x)::DArray{T,N,B,F}

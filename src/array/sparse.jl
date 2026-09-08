@@ -179,6 +179,32 @@ wrap_sparse_tile(x) = DSparseArray(_sparse_copy(x))
 # to be repartitioned) and by `repartition`. Some backends (Finch) forbid
 # `setindex!`, so we route through a backend hook that returns the (possibly
 # reallocated) inner storage. `DSparseArray` hides the reallocation from Datadeps.
+function _dropdims_tile(x::DSparseArray{T,N}, drop) where {T,N}
+    idxs = ntuple(d -> (d in drop) ? 1 : Colon(), N)
+    return DSparseArray(x.mat[idxs...])
+end
+
+function copyto_scattered!(Bpart::DSparseArray, dests, Apart, srcs)
+    if _sparse_off_host(Bpart.mat) || _sparse_off_host(Apart)
+        Bh = _sparse_off_host(Bpart.mat) ? _sparse_collect(Bpart.mat) : Bpart.mat
+        Ah = _sparse_host_side(Apart)
+        @inbounds for k in eachindex(dests)
+            Bh[dests[k]] = Ah[srcs[k]]
+        end
+        to_space = value_memory_space(Bpart.mat)
+        Bpart.mat = if to_space isa CPURAMMemorySpace
+            Bh
+        else
+            move(OSProc(), first(processors(to_space)), DSparseArray(Bh)).mat
+        end
+        return
+    end
+    @inbounds for k in eachindex(dests)
+        Bpart[dests[k]] = Apart[srcs[k]]
+    end
+    return
+end
+
 function copyto_view!(Bpart::DSparseArray, Brange, Apart, Arange)
     if _sparse_off_host(Bpart.mat) || _sparse_off_host(Apart)
         return _copyto_view_hosted!(Bpart, Brange, Apart, Arange)
