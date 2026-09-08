@@ -514,3 +514,19 @@ lesson.
    module path is `Val(nameof(partitioner))` (`Val{:Metis}`), not
    `::typeof(Metis)`; `partitioner=Metis.partition` dispatches on the
    function type. Two extensions must not both add `partition_graph(::Module, …)`.
+
+41. **Mixed-eltype `mul!` needs a DArray method; FP32 PC apply converts tile-locally.**
+   LinearAlgebra's `generic_matvecmul!` / `generic_matmatmul!` for
+   `AbstractArray` scalar-indexes. Same-`T` Dagger methods left
+   `DMatrix{Float32} * DVector{Float64}` on that path. Relax the DArray
+   methods (scale `alpha`/`beta` from `eltype(C)`); keep the `Matrix{T}`
+   `BLAS.gemm!` specialization — do not widen it to `StridedMatrix` (that
+   steals GPU tiles onto host BLAS). Tile `matvecmul!` keeps `BLAS.gemv!`
+   when eltypes match (GPU backends overload it) and otherwise calls
+   LinearAlgebra's mixed generic. A Float32 preconditioner with Float64
+   Krylov vectors converts each tile to `eltype(op)` *before*
+   `_apply_inverse!` (so KLU/UMFPACK/ILU methods still see matching types)
+   and copies back. Jacobi broadcast already promotes. Do not treat
+   `stats.solved` as `Ax≈b` (lesson 19). The `DaggerSparseLU \ DVector`
+   tie-breaker this workstream also hit is already lesson 36
+   (`_solve_pinned_dvector`); do not add a second `invoke` method.

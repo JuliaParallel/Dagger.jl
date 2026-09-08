@@ -220,6 +220,46 @@ end
         @test collect(x_ragged) ≈ xref rtol = 1e-6
     end
 
+    # PETSc/HYPRE mixed precision: FP32 preconditioner, FP64 Krylov vectors.
+    # Apply converts tile-locally; the un-preconditioned residual is the check
+    # (lesson 19), not only `stats.solved`.
+    @testset "mixed-precision PC (FP32 M, FP64 Krylov)" begin
+        Asp64 = laplacian_1d(Float64, n)
+        Asp32 = laplacian_1d(Float32, n)
+        b = rand(Float64, n)
+        DA64 = distribute(Asp64, A_part)
+        DA32 = distribute(Asp32, A_part)
+        Db = distribute(b, Db_part)
+
+        Pj = Dagger.JacobiPreconditioner(DA32)
+        @test eltype(Pj.dinv) === Float32
+        yj = similar(Db)
+        mul!(yj, Pj, Db)
+        @test collect(yj) ≈ (1 / SPD_DIAG) .* b
+
+        Pbj = Dagger.BlockJacobiPreconditioner(DA32)
+        ybj = similar(Db)
+        mul!(ybj, Pbj, Db)
+        yref = similar(b)
+        A32d = Matrix(Asp32)
+        for s in 1:k:n
+            r = s:min(s + k - 1, n)
+            yref[r] = Float64.(A32d[r, r] \ Float32.(b[r]))
+        end
+        # Sparse-tile LU vs dense `\` differs at ~1e-7 (FP32 residual); the
+        # GMRES true-residual checks below are the correctness criterion.
+        @test collect(ybj) ≈ yref rtol = 1e-5 atol = 1e-6
+
+        x, stats = Dagger.gmres(DA64, Db; M = Pj, atol = 1e-12, rtol = 1e-10,
+                                itmax = 200, memory = 50)
+        @test true_relres(DA64, x, Db) < 1e-8
+
+        xb, sb = Dagger.gmres(DA64, Db; M = Pbj, atol = 1e-12, rtol = 1e-10,
+                              itmax = 200, memory = 50)
+        @test true_relres(DA64, xb, Db) < 1e-8
+        @test sb.niter <= stats.niter
+    end
+
     # `BlockPreconditioner` is the public form of the machinery every bundled
     # block preconditioner uses: hand it a per-tile factory and nothing else.
     # Both of Dagger's apply conventions are covered -- `tile_lu_factory`

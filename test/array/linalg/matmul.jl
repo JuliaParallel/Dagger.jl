@@ -260,3 +260,76 @@ parts_to_test = vcat(part_sets_to_test...)
         end
     end
 end
+
+# Mixed eltypes: LinearAlgebra's `mul!` promotes (PETSc-style FP32 operator ×
+# FP64 vectors) without the caller converting every operand first. Same-type
+# GEMM above stays on the `Matrix{T}` BLAS path.
+@testset "Mixed-precision mul!" begin
+    n = 12
+    partA = Blocks(4, 4)
+    partV = Blocks(4)
+
+    A32 = rand(Float32, n, n)
+    x64 = rand(Float64, n)
+    DA32 = distribute(A32, partA)
+    Dx64 = distribute(x64, partV)
+
+    y = DA32 * Dx64
+    @test y isa Dagger.DVector{Float64}
+    @test collect(y) ≈ A32 * x64
+
+    Dy = distribute(zeros(Float64, n), partV)
+    mul!(Dy, DA32, Dx64)
+    @test collect(Dy) ≈ A32 * x64
+
+    mul!(Dy, DA32, Dx64, 2.0, 0.0)
+    @test collect(Dy) ≈ 2 .* (A32 * x64)
+
+    @test collect(DA32' * Dx64) ≈ A32' * x64
+    mul!(Dy, DA32', Dx64)
+    @test collect(Dy) ≈ A32' * x64
+
+    B64 = rand(Float64, n, n)
+    DB64 = distribute(B64, partA)
+    C = DA32 * DB64
+    @test C isa Dagger.DMatrix{Float64}
+    @test collect(C) ≈ A32 * B64
+
+    DC = distribute(zeros(Float64, n, n), partA)
+    mul!(DC, DA32, DB64)
+    @test collect(DC) ≈ A32 * B64
+    mul!(DC, DA32, DB64, 2.0, 0.0)
+    @test collect(DC) ≈ 2 .* (A32 * B64)
+
+    # Wider destination than both operands (FP32 × FP32 → FP64).
+    A32b = rand(Float32, n, n)
+    DA32b = distribute(A32b, partA)
+    Cref = zeros(Float64, n, n)
+    mul!(Cref, A32, A32b)
+    mul!(DC, DA32, DA32b)
+    @test collect(DC) ≈ Cref
+
+    # Opposite mixed: FP64 operator × FP32 vector promotes to FP64.
+    A64 = rand(Float64, n, n)
+    x32 = rand(Float32, n)
+    DA64 = distribute(A64, partA)
+    Dx32 = distribute(x32, partV)
+    @test collect(DA64 * Dx32) ≈ A64 * x32
+
+    # Sparse tile × dense mixed vector: stay on the SpMV tile kernel.
+    SA32 = sprand(Float32, n, n, 0.4)
+    DSA32 = distribute(SA32, partA)
+    @test collect(DSA32 * Dx64) ≈ SA32 * x64
+    mul!(Dy, DSA32, Dx64)
+    @test collect(Dy) ≈ SA32 * x64
+
+    # Same-type FP32 GEMM must still agree with host BLAS (the fast path).
+    S = rand(Float32, 8, 8)
+    Tm = rand(Float32, 8, 8)
+    DS = distribute(S, Blocks(4, 4))
+    DT = distribute(Tm, Blocks(4, 4))
+    @test collect(DS * DT) ≈ S * Tm
+    DSt = distribute(zeros(Float32, 8, 8), Blocks(4, 4))
+    mul!(DSt, DS, DT)
+    @test collect(DSt) ≈ S * Tm
+end
