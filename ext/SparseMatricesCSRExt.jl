@@ -8,12 +8,12 @@ module SparseMatricesCSRExt
 # dense mortar; vendor BSR is GPU-only). Do not invent `Dagger.BSR`.
 
 import SparseMatricesCSR
-import SparseMatricesCSR: SparseMatrixCSR, sparsecsr, spzeroscsr
+import SparseMatricesCSR: SparseMatrixCSR, sparsecsr
 import SparseArrays
 import SparseArrays: SparseMatrixCSC
 import LinearAlgebra
 import Dagger
-import Dagger: Blocks, AutoBlocks, BlocksOrAuto, AssignmentType
+import Dagger: Blocks, AutoBlocks, AssignmentType
 import Dagger: DSparseArray, DSparseMatrix, DArray, DMatrix
 
 #------------------------------------------------------------------------------
@@ -69,8 +69,11 @@ Dagger.wraps_as_sparse_tile(::SparseMatrixCSR) = true
 Dagger._sparse_collect(A::SparseMatrixCSR) = _csr_to_csc(A)
 Dagger._sparse_copy(A::SparseMatrixCSR) = copy(A)
 function Dagger._sparse_similar(::SparseMatrixCSR, ::Type{T}, dims::Dims{2}) where T
-    return spzeroscsr(T, dims...)
+    return _empty_csr(T, dims)
 end
+
+# SparseMatricesCSR 0.6 has no `spzeroscsr`; build an empty Bi=1 CSR from CSC zeros.
+_empty_csr(::Type{T}, dims::Dims{2}) where T = SparseMatrixCSR(SparseArrays.spzeros(T, dims...))
 
 # CSR `setindex!` refuses structural inserts, so the default in-place view copy
 # cannot grow a tile during repartition. Rebuild through CSC.
@@ -139,7 +142,7 @@ function Dagger.transpose_tile(B::SparseMatrixCSR, uplo::Char)
 end
 
 #------------------------------------------------------------------------------
-# convert / sparsecsr / spzeroscsr on DMatrix
+# convert / sparsecsr / empty CSR on DMatrix
 #------------------------------------------------------------------------------
 
 # SparseMatricesCSR's `convert(SparseMatrixCSR, ::AbstractMatrix)` transposes
@@ -215,30 +218,27 @@ SparseMatricesCSR.sparsecsr(I::_COOIndexVec, J::_COOIndexVec, V::AbstractVector,
     sparsecsr(I, J, V, m, n, combine, Dagger.auto_blocks((Int(m), Int(n))); assignment)
 
 # Named allocator so MPI hashes the same function on every rank.
-_csr_zeros_tile(::Type{T}, dims::Dims) where T = DSparseArray(spzeroscsr(T, dims...))
+_csr_zeros_tile(::Type{T}, dims::Dims) where T = DSparseArray(_empty_csr(T, dims))
 
-function SparseMatricesCSR.spzeroscsr(p::Blocks, T::Type, dims::Dims{2}; assignment::AssignmentType=:arbitrary)
+function _spzeros_csr(p::Blocks, T::Type, dims::Dims{2}; assignment::AssignmentType=:arbitrary)
     d = Dagger.ArrayDomain(map(x -> 1:x, dims))
     a = Dagger.AllocateArray(T, _csr_zeros_tile, false, d, Dagger.partition(p, d), p, assignment;
                              return_type=DSparseArray{T,2})
     return Dagger._to_darray(a)
 end
-SparseMatricesCSR.spzeroscsr(p::BlocksOrAuto, T::Type, m::Integer, n::Integer; assignment::AssignmentType=:arbitrary) =
-    spzeroscsr(p, T, (Int(m), Int(n)); assignment)
-SparseMatricesCSR.spzeroscsr(p::BlocksOrAuto, m::Integer, n::Integer; assignment::AssignmentType=:arbitrary) =
-    spzeroscsr(p, Float64, (Int(m), Int(n)); assignment)
-SparseMatricesCSR.spzeroscsr(::AutoBlocks, T::Type, dims::Dims{2}; assignment::AssignmentType=:arbitrary) =
-    spzeroscsr(Dagger.auto_blocks(dims), T, dims; assignment)
 
 function SparseArrays.spzeros(::Type{<:SparseMatrixCSR}, p::Blocks{2}, T::Type, dims::Dims{2};
                               assignment::AssignmentType=:arbitrary)
-    return spzeroscsr(p, T, dims; assignment)
+    return _spzeros_csr(p, T, dims; assignment)
 end
 SparseArrays.spzeros(::Type{<:SparseMatrixCSR}, p::Blocks{2}, T::Type, m::Integer, n::Integer;
                      assignment::AssignmentType=:arbitrary) =
-    spzeroscsr(p, T, (Int(m), Int(n)); assignment)
+    _spzeros_csr(p, T, (Int(m), Int(n)); assignment)
 SparseArrays.spzeros(::Type{<:SparseMatrixCSR}, p::Blocks{2}, m::Integer, n::Integer;
                      assignment::AssignmentType=:arbitrary) =
-    spzeroscsr(p, Float64, (Int(m), Int(n)); assignment)
+    _spzeros_csr(p, Float64, (Int(m), Int(n)); assignment)
+SparseArrays.spzeros(::Type{<:SparseMatrixCSR}, ::AutoBlocks, T::Type, dims::Dims{2};
+                     assignment::AssignmentType=:arbitrary) =
+    _spzeros_csr(Dagger.auto_blocks(dims), T, dims; assignment)
 
 end # module SparseMatricesCSRExt

@@ -68,11 +68,9 @@ else
         DA2 = sparsecsr(I, J, V, 8, 8, part)
         @test _csr_inner(DA2) isa SparseMatricesCSR.SparseMatrixCSR
         @test collect(DA2) ≈ SA
-        Z = SparseMatricesCSR.spzeroscsr(part, Float64, 8, 8)
+        Z = SparseArrays.spzeros(SparseMatricesCSR.SparseMatrixCSR, part, Float64, 8, 8)
         @test _csr_inner(Z) isa SparseMatricesCSR.SparseMatrixCSR
         @test iszero(sum(abs, collect(Z)))
-        Z2 = SparseArrays.spzeros(SparseMatricesCSR.SparseMatrixCSR, part, Float64, 8, 8)
-        @test _csr_inner(Z2) isa SparseMatricesCSR.SparseMatrixCSR
 
         # Re-tiling stays a sparse wrapper (inner format may become CSC;
         # `sparsecsr(A, newpart)` converts back).

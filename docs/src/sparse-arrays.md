@@ -63,9 +63,10 @@ S  = sparsecsr(DA)                            # gather to one SparseMatrixCSR
 
 `sparsecsr(A::DMatrix)` gathers, like `sparse(A)` → `SparseMatrixCSC`.
 `sparsecsr(A, Blocks(...))` is the tile-preserving convert. COO assembly
-`sparsecsr(I, J, V, m, n, Blocks(...))` and `spzeroscsr(Blocks(...), T, m, n)`
-match the SparseArrays `sparse` / `spzeros` spellings. There is no
-`Dagger.to_csr`.
+`sparsecsr(I, J, V, m, n, Blocks(...))` and
+`spzeros(SparseMatrixCSR, Blocks(...), T, m, n)` match the SparseArrays
+`sparse` / `spzeros` spellings. There is no `Dagger.to_csr`. SparseMatricesCSR
+0.6 has no `spzeroscsr`; empty CSR tiles go through `SparseMatrixCSR(spzeros(...))`.
 
 ### Allocating directly
 
@@ -254,7 +255,8 @@ the package's row-wise `mul!`; SpGEMM and transposed SpMV convert the *tile* to
 CSC (not a dense `Matrix`) and write the result back in the destination tile's
 format. `similar` / `repartition` still allocate empty CSC tiles (the
 `DArray` type does not record the inner format); `copyto!` of a whole CSR tile
-restores CSR, and `sparsecsr(A, part)` converts after a re-tile.
+restores CSR, and `sparsecsr(A, part)` converts after a re-tile. Empty CSR
+`DMatrix`s are `spzeros(SparseMatrixCSR, Blocks(...), T, m, n)`.
 
 Block-sparse (BSR) is not implemented here: there is no host ecosystem BSR type
 to dispatch on.

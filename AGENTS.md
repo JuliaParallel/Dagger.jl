@@ -410,7 +410,10 @@ lesson.
    via `copyto!(view(csr, …))` cannot insert nonzeros — rebuild through
    CSC. `sparsecsr(::DMatrix)` must gather via `sparse(A)`:
    SparseMatricesCSR's `convert(SparseMatrixCSR, ::AbstractMatrix)`
-   transposes the `DMatrix` and densifies. GPU vendor tiles may stay CSC;
-   host CSR is the SpMV win. BSR has no host ecosystem type (`BlockArrays`
-   is dense mortar; `CuSparseMatrixBSR` is device-only) — do not invent
-   `Dagger.BSR`.
+   transposes the `DMatrix` and densifies. Empty CSR tiles are
+   `SparseMatrixCSR(spzeros(T, dims...))` — `spzeroscsr` is not in
+   SparseMatricesCSR 0.6 (only later master), and importing it unloads the
+   whole extension so `distribute(csr)` densifies. GPU vendor tiles may stay
+   CSC; host CSR is the SpMV win. BSR has no host ecosystem type
+   (`BlockArrays` is dense mortar; `CuSparseMatrixBSR` is device-only) — do
+   not invent `Dagger.BSR`.
