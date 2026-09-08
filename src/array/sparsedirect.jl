@@ -316,6 +316,14 @@ function Base.:\(F::DaggerSparseLU, B::DMatrix)
     return distribute(X, B.partitioning)
 end
 
+# DVector <: AbstractVector, so without this `\(::_PinnedSparseFactor, ::DVector)`
+# and `\(::DaggerSparseLU, ::AbstractVector)` are equally specific (Union vs
+# concrete F, DVector vs AbstractVector). GlobalAMG's coarse solve and
+# `klu(A) \ b` both hit that pair.
+function Base.:\(F::DaggerSparseLU, b::DVector)
+    return invoke(Base.:\, Tuple{_PinnedSparseFactor,DVector}, F, b)
+end
+
 function Base.:\(F::DaggerSparseLU, b::AbstractVector)
     return F \ distribute(collect(b), F.part)
 end

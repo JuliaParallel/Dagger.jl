@@ -362,6 +362,10 @@ lesson.
    Qualify `cholesky!` / `mul!` as `LinearAlgebra.cholesky!` /
    `LinearAlgebra.mul!` on the dense fallback: a bare `cholesky!` would
    resolve in Dagger and recurse into `_cholesky` instead of tiled potrf.
+   After the chol merge, `\(::_PinnedSparseFactor, ::DVector)` plus
+   `\(::DaggerSparseLU, ::AbstractVector)` is ambiguous — define the
+   concrete `\(::DaggerSparseLU, ::DVector)` (GlobalAMG's coarse solve
+   and `klu(A) \ b` both hit that pair).
 
 32. **One damped-Jacobi sweep each side of a GlobalAMG V-cycle can be worse
    than Jacobi-only.** On 1-D Poisson the distributed apply matched a host
