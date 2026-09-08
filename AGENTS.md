@@ -399,3 +399,17 @@ lesson.
    type (`BlockOperator`) and cannot reuse `hvcat`. `BlockArrays.mortar`
    is the ecosystem name for the assembled case, but adding that dependency
    does not give you matrix-free blocks or field-split `mul!`.
+
+35. **Near-nullspace belongs on the GlobalAMG constructor, not a setter.**
+   `SmoothedAggregationPreconditioner(A; nullspace=N)` (or `B=N`) injects the
+   columns of `N` as smoothed-aggregation candidates (`fit_candidates`).
+   Default is still the scalar `ones`. Coarse levels must use the `R` from
+   `fit_candidates`, not the fine `N` — otherwise the next tentative `P`
+   cannot represent the rigid-body set. `GlobalAMG(Projected(A, N))` reads
+   `N` from the wrapper; there is no `Dagger.set_nearnullspace`.
+   [`AMGPreconditioner`](@ref) stays per-tile (lesson 19) and does not take
+   this keyword. Ruge–Stüben has no candidate injection — reject `nullspace`
+   there. Setup still gathers `N` with `A` to build `P` (same first-cut
+   limit as distributed-`P`). Check `‖Ax−b‖`, not only `stats.solved`. A
+   2-component / elasticity problem is where scalar SA stalls; Poisson with
+   `ones` is not a near-nullspace test.
