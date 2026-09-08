@@ -1651,6 +1651,124 @@ end
     end
 end
 
+@testset "OptimizingScheduler (adaptive selection)" begin
+    OptimizingScheduler = Dagger.OptimizingScheduler
+    opt_uses_milp = Dagger.opt_uses_milp
+
+    @testset "Constructor and validation" begin
+        s = OptimizingScheduler()
+        @test s isa DataDepsScheduler
+        @test s.optimizer === nothing
+        @test s.milp_threshold == Dagger.OPT_DEFAULT_MILP_THRESHOLD
+        @test s.milp_time_limit_sec == 60.0
+        @test s.milp_Z == 10.0
+        @test s.ig_n_iters == Dagger.IG_DEFAULT_N_ITERS
+        @test s.ig_destroy_frac == Dagger.IG_DEFAULT_DESTROY_FRAC
+        @test s.sa_q == Dagger.SA_DEFAULT_Q
+        @test s.sa_k == Dagger.SA_DEFAULT_K
+        @test s.sa_n_restarts == Dagger.SA_DEFAULT_N_RESTARTS
+
+        s2 = OptimizingScheduler(; milp_threshold=25, milp_time_limit_sec=15.0,
+                                    ig_n_iters=8, sa_q=0.9,
+                                    rng=MersenneTwister(123))
+        @test s2.milp_threshold == 25
+        @test s2.milp_time_limit_sec == 15.0
+        @test s2.ig_n_iters == 8
+        @test s2.sa_q == 0.9
+        @test s2.rng isa MersenneTwister
+
+        @test_throws ArgumentError OptimizingScheduler(; milp_threshold=-1)
+        @test_throws ArgumentError OptimizingScheduler(; milp_time_limit_sec=0)
+        @test_throws ArgumentError OptimizingScheduler(; milp_time_limit_sec=-2.0)
+        @test_throws ArgumentError OptimizingScheduler(; ig_n_iters=-3)
+        @test_throws ArgumentError OptimizingScheduler(; ig_destroy_frac=0.0)
+        @test_throws ArgumentError OptimizingScheduler(; ig_destroy_frac=1.5)
+        @test_throws ArgumentError OptimizingScheduler(; sa_q=0.0)
+        @test_throws ArgumentError OptimizingScheduler(; sa_q=1.0)
+        @test_throws ArgumentError OptimizingScheduler(; sa_k=0.0)
+        @test_throws ArgumentError OptimizingScheduler(; sa_n_restarts=0)
+    end
+
+    @testset "Cache partition: OptimizingScheduler has its own cache" begin
+        cache_opt = datadeps_schedule_cache(OptimizingScheduler())
+        cache_gr  = datadeps_schedule_cache(GreedyScheduler())
+        cache_sa  = datadeps_schedule_cache(SimulatedAnnealingScheduler())
+        @test cache_opt !== cache_gr
+        @test cache_opt !== cache_sa
+    end
+
+    @testset "Empty DAG: AOT hook is a no-op" begin
+        empty_dag = DAGSpec()
+        all_procs = collect(Dagger.all_processors())
+        schedule = Dict{Dagger.DTask, Dagger.Processor}()
+        sched = OptimizingScheduler()
+        Dagger.datadeps_schedule_dag_aot!(sched, schedule, empty_dag, all_procs,
+                                          Dagger.UnionScope(map(Dagger.ExactScope, all_procs)))
+        @test isempty(schedule)
+    end
+
+    @testset "Selection: no optimizer → heuristic path regardless of K or threshold" begin
+        s = OptimizingScheduler(; milp_threshold=1_000_000)
+        @test opt_uses_milp(s, 1) == false
+        @test opt_uses_milp(s, 10) == false
+        @test opt_uses_milp(s, 100) == false
+    end
+
+    @testset "Reproducibility: same RNG seed → identical heuristic-path result" begin
+        # OptimizingScheduler on the heuristic branch composes IG and SA, both
+        # of which are deterministic given an RNG. The composition must
+        # preserve that determinism: two schedulers seeded identically must
+        # produce bit-identical assignments on the same DAG.
+        dag_spec, all_procs, _ = _capture_cholesky_dag(3, 16)
+        all_scope = Dagger.UnionScope(map(Dagger.ExactScope, all_procs))
+
+        s1 = OptimizingScheduler(; milp_threshold=0, rng=MersenneTwister(2027))
+        s2 = OptimizingScheduler(; milp_threshold=0, rng=MersenneTwister(2027))
+        r1 = Dict{Dagger.DTask, Dagger.Processor}()
+        r2 = Dict{Dagger.DTask, Dagger.Processor}()
+        Dagger.datadeps_schedule_dag_aot!(s1, r1, dag_spec, all_procs, all_scope)
+        Dagger.datadeps_schedule_dag_aot!(s2, r2, dag_spec, all_procs, all_scope)
+
+        for idx in 1:Dagger.nv(dag_spec.g)
+            task = dag_spec.id_to_task[idx]
+            @test r1[task] === r2[task]
+        end
+    end
+
+    @testset "End-to-end (heuristic path, no optimizer): matmul correctness" begin
+        # Even without a solver, OptimizingScheduler must produce a valid schedule through the SA(IG(Greedy)) pipeline for any K.
+        nb = 16
+        nt = 2
+        A = [rand(nb, nb) for _ in 1:nt, _ in 1:nt]
+        B = [rand(nb, nb) for _ in 1:nt, _ in 1:nt]
+        C = [zeros(nb, nb) for _ in 1:nt, _ in 1:nt]
+
+        sched = OptimizingScheduler(; rng=MersenneTwister(0))
+        cache = datadeps_schedule_cache(sched); empty!(cache)
+
+        Base.ScopedValues.with(DATADEPS_SCHEDULER => sched) do
+            Dagger.spawn_datadeps() do
+                for i in 1:nt, j in 1:nt, k in 1:nt
+                    Dagger.@spawn LinearAlgebra.BLAS.gemm!('N', 'N', 1.0,
+                                                           In(A[i, k]),
+                                                           In(B[k, j]), 1.0,
+                                                           InOut(C[i, j]))
+                end
+            end
+        end
+
+        sz = nt * nb
+        dense_A = zeros(sz, sz); dense_B = zeros(sz, sz); dense_C = zeros(sz, sz)
+        for i in 1:nt, j in 1:nt
+            dense_A[(i-1)*nb+1:i*nb, (j-1)*nb+1:j*nb] .= A[i, j]
+            dense_B[(i-1)*nb+1:i*nb, (j-1)*nb+1:j*nb] .= B[i, j]
+            dense_C[(i-1)*nb+1:i*nb, (j-1)*nb+1:j*nb] .= C[i, j]
+        end
+        @test dense_C ≈ dense_A * dense_B
+        @test !isempty(cache)
+    end
+end
+
 @static if Base.find_package("JuMP") !== nothing &&
             Base.find_package("HiGHS") !== nothing
     using JuMP
@@ -1932,6 +2050,173 @@ end
                 @test haskey(schedule, dag_spec.id_to_task[idx])
                 @test schedule[dag_spec.id_to_task[idx]] in all_procs
             end
+        end
+    end
+
+    @testset "OptimizingScheduler (MILP path with JuMP loaded)" begin
+        OptimizingScheduler = Dagger.OptimizingScheduler
+        opt_uses_milp = Dagger.opt_uses_milp
+
+        @testset "Selection: MILP path enabled when K ≤ threshold and optimizer given" begin
+            s = OptimizingScheduler(; optimizer=HiGHS.Optimizer, milp_threshold=12)
+            @test opt_uses_milp(s, 1)  == true
+            @test opt_uses_milp(s, 12) == true    # inclusive boundary
+            @test opt_uses_milp(s, 13) == false   # over threshold
+            @test opt_uses_milp(s, 64) == false
+
+            # Even with optimizer set, threshold=0 forces heuristic path.
+            s0 = OptimizingScheduler(; optimizer=HiGHS.Optimizer, milp_threshold=0)
+            @test opt_uses_milp(s0, 1) == false
+
+            # `nothing` optimizer disables MILP regardless of threshold.
+            snone = OptimizingScheduler(; optimizer=nothing, milp_threshold=100)
+            @test opt_uses_milp(snone, 5) == false
+        end
+
+        @testset "Selection: threshold boundary is inclusive (K == threshold uses MILP)" begin
+            # Direct verification against the AOT hook path: when K == threshold,
+            # the MILP schedule must equal the schedule that a stand-alone
+            # JuMPScheduler with matching parameters produces.
+            dag_spec, all_procs, _ = _capture_cholesky_dag(3, 16)   # K = 10
+            @test Dagger.nv(dag_spec.g) == 10
+            all_scope = Dagger.UnionScope(map(Dagger.ExactScope, all_procs))
+
+            opt = OptimizingScheduler(; optimizer=HiGHS.Optimizer,
+                                        milp_threshold=10,
+                                        milp_time_limit_sec=60.0,
+                                        milp_Z=10.0)
+            sched_opt = Dict{Dagger.DTask, Dagger.Processor}()
+            Dagger.datadeps_schedule_dag_aot!(opt, sched_opt, dag_spec, all_procs, all_scope)
+
+            jump = Dagger.JuMPScheduler(HiGHS.Optimizer; Z=10.0, time_limit_sec=60.0)
+            sched_jump = Dict{Dagger.DTask, Dagger.Processor}()
+            Dagger.datadeps_schedule_dag_aot!(jump, sched_jump, dag_spec, all_procs, all_scope)
+
+            for k in 1:Dagger.nv(dag_spec.g)
+                task = dag_spec.id_to_task[k]
+                @test sched_opt[task] === sched_jump[task]
+            end
+        end
+
+        @testset "Selection: K > threshold falls back to heuristic even with optimizer" begin
+            # Force the heuristic path on a small DAG by shrinking the threshold.
+            # The result should be a valid schedule under SA(IG(Greedy)), NOT
+            # the MILP output.
+            dag_spec, all_procs, _ = _capture_cholesky_dag(2, 16)   # K = 4
+            all_scope = Dagger.UnionScope(map(Dagger.ExactScope, all_procs))
+
+            opt = OptimizingScheduler(; optimizer=HiGHS.Optimizer,
+                                        milp_threshold=0,
+                                        rng=MersenneTwister(42))
+            sched_opt = Dict{Dagger.DTask, Dagger.Processor}()
+            Dagger.datadeps_schedule_dag_aot!(opt, sched_opt, dag_spec, all_procs, all_scope)
+
+            @test length(sched_opt) == Dagger.nv(dag_spec.g)
+            for k in 1:Dagger.nv(dag_spec.g)
+                @test sched_opt[dag_spec.id_to_task[k]] in all_procs
+            end
+        end
+
+        @testset "End-to-end (MILP path): matmul correctness at machine precision" begin
+            nb = 16
+            nt = 2
+            A = [rand(nb, nb) for _ in 1:nt, _ in 1:nt]
+            B = [rand(nb, nb) for _ in 1:nt, _ in 1:nt]
+            C = [zeros(nb, nb) for _ in 1:nt, _ in 1:nt]
+
+            sched = OptimizingScheduler(; optimizer=HiGHS.Optimizer,
+                                          milp_threshold=64,
+                                          milp_time_limit_sec=60.0)
+            cache = datadeps_schedule_cache(sched); empty!(cache)
+
+            Base.ScopedValues.with(DATADEPS_SCHEDULER => sched) do
+                Dagger.spawn_datadeps() do
+                    for i in 1:nt, j in 1:nt, k in 1:nt
+                        Dagger.@spawn LinearAlgebra.BLAS.gemm!('N', 'N', 1.0,
+                                                               In(A[i, k]),
+                                                               In(B[k, j]), 1.0,
+                                                               InOut(C[i, j]))
+                    end
+                end
+            end
+
+            sz = nt * nb
+            dense_A = zeros(sz, sz); dense_B = zeros(sz, sz); dense_C = zeros(sz, sz)
+            for i in 1:nt, j in 1:nt
+                dense_A[(i-1)*nb+1:i*nb, (j-1)*nb+1:j*nb] .= A[i, j]
+                dense_B[(i-1)*nb+1:i*nb, (j-1)*nb+1:j*nb] .= B[i, j]
+                dense_C[(i-1)*nb+1:i*nb, (j-1)*nb+1:j*nb] .= C[i, j]
+            end
+            @test dense_C ≈ dense_A * dense_B
+            @test !isempty(cache)
+        end
+
+        @testset "End-to-end (adaptive): mock Cholesky produces L*L' ≈ A" begin
+            # Cholesky (K=4 tasks) exercises a triangular-factorisation DAG
+            # topology distinct from matmul. K=4 ≤ default threshold=12, so
+            # the MILP path is taken. Verifies adaptive selection produces a
+            # numerically correct schedule on a factorisation workload.
+            nb = 16
+            nt = 2
+            M = make_spd_blocks(nt * nb, nb)
+            A_ref = vcat([hcat([M[i, j] for j in 1:nt]...) for i in 1:nt]...)
+
+            sched = OptimizingScheduler(; optimizer=HiGHS.Optimizer,
+                                          milp_time_limit_sec=60.0)
+            cache = datadeps_schedule_cache(sched); empty!(cache)
+
+            Base.ScopedValues.with(DATADEPS_SCHEDULER => sched) do
+                Dagger.spawn_datadeps() do
+                    mock_cholesky!(M)
+                end
+            end
+
+            L = zeros(nt * nb, nt * nb)
+            for i in 1:nt, j in 1:nt
+                L[(i-1)*nb+1:i*nb, (j-1)*nb+1:j*nb] .= M[i, j]
+            end
+            rows, cols = axes(L)
+            for i in rows, j in cols
+                j > i && (L[i, j] = 0.0)
+            end
+            @test isapprox(L * L', A_ref; rtol=1e-8)
+            @test !isempty(cache)
+        end
+
+        @testset "End-to-end (heuristic path via threshold=0): matmul correctness" begin
+            # Same workload as above but forced onto the SA(IG(Greedy)) pipeline
+            # via `milp_threshold=0`. Numeric result must still be identical.
+            nb = 16
+            nt = 2
+            A = [rand(nb, nb) for _ in 1:nt, _ in 1:nt]
+            B = [rand(nb, nb) for _ in 1:nt, _ in 1:nt]
+            C = [zeros(nb, nb) for _ in 1:nt, _ in 1:nt]
+
+            sched = OptimizingScheduler(; optimizer=HiGHS.Optimizer,
+                                          milp_threshold=0,
+                                          rng=MersenneTwister(7))
+            cache = datadeps_schedule_cache(sched); empty!(cache)
+
+            Base.ScopedValues.with(DATADEPS_SCHEDULER => sched) do
+                Dagger.spawn_datadeps() do
+                    for i in 1:nt, j in 1:nt, k in 1:nt
+                        Dagger.@spawn LinearAlgebra.BLAS.gemm!('N', 'N', 1.0,
+                                                               In(A[i, k]),
+                                                               In(B[k, j]), 1.0,
+                                                               InOut(C[i, j]))
+                    end
+                end
+            end
+
+            sz = nt * nb
+            dense_A = zeros(sz, sz); dense_B = zeros(sz, sz); dense_C = zeros(sz, sz)
+            for i in 1:nt, j in 1:nt
+                dense_A[(i-1)*nb+1:i*nb, (j-1)*nb+1:j*nb] .= A[i, j]
+                dense_B[(i-1)*nb+1:i*nb, (j-1)*nb+1:j*nb] .= B[i, j]
+                dense_C[(i-1)*nb+1:i*nb, (j-1)*nb+1:j*nb] .= C[i, j]
+            end
+            @test dense_C ≈ dense_A * dense_B
+            @test !isempty(cache)
         end
     end
 end
