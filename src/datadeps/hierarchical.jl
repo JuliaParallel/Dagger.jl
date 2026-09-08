@@ -1308,6 +1308,7 @@ function _schedule_vertex!(v::Int, partition_id::Int,
                            dag::SimpleDiGraph,
                            seen_tasks::Vector{DTaskPair},
                            vertex_to_partition::Vector{Int},
+                           schedule::Dict{DTask,Processor},
                            proc_to_scope_lfu,
                            write_num::Int,
                            registry::Union{SharedChunkRegistry,Nothing})
@@ -1325,9 +1326,17 @@ function _schedule_vertex!(v::Int, partition_id::Int,
         end
     end
 
+    # Use the AOT-assigned processor, unless it is not one of this partition's
+    # own `local_procs` (possible when `all_procs` changed since the schedule
+    # was cached), in which case fall back to JIT placement.
+    proc = get(schedule, task, nothing)
+    if proc !== nothing && !(proc in local_procs)
+        proc = nothing
+    end
+
     return distribute_task!(temp_queue, state, local_procs, local_scope,
                             spec, task, spec.fargs,
-                            proc_to_scope_lfu, write_num; ownership=registry)
+                            proc_to_scope_lfu, write_num; proc, ownership=registry)
 end
 
 """
@@ -1356,9 +1365,11 @@ function schedule_partition_full!(queue::DataDepsTaskQueue,
                                   vertex_to_partition::Vector{Int},
                                   task_submitted::Vector{Base.Event},
                                   value_dep_verts::Set{Int},
-                                  registry::Union{SharedChunkRegistry,Nothing})
+                                  region_uids::Set{UInt},
+                                  registry::Union{SharedChunkRegistry,Nothing};
+                                  precomputed_schedule::Union{Dict{DTask,Processor},Nothing}=nothing)
     if isempty(partition_verts) || isempty(local_procs)
-        return DataDepsState()
+        return DataDepsState(), Dict{DTask,Processor}()
     end
 
     local_scope = UnionScope(map(ExactScope, local_procs))
@@ -1393,6 +1404,25 @@ function schedule_partition_full!(queue::DataDepsTaskQueue,
     #     scheduling. Giving each partition its own scheduler instance,
     #     scoped to its own `local_procs`, fixes both issues at once.
     temp_queue = DataDepsTaskQueue(batch_queue; scheduler=similar(queue.scheduler))
+
+    # Plan this partition ahead of time over its own `local_procs`, or, on a
+    # whole-region cache hit, just take our own tasks out of the recovered
+    # schedule. `region_uids` stops the partial DAG build before it reaches a
+    # task fed by a producer in another partition, which has not been submitted
+    # yet and so cannot be fetched.
+    partition_pairs = DTaskPair[seen_tasks[v] for v in partition_verts]
+    schedule = if precomputed_schedule === nothing
+        _pdag, sched = datadeps_build_schedule!(temp_queue.scheduler, partition_pairs,
+                                                local_procs, local_scope; region_uids)
+        sched
+    else
+        filtered = Dict{DTask,Processor}()
+        for pair in partition_pairs
+            proc = get(precomputed_schedule, pair.task, nothing)
+            proc === nothing || (filtered[pair.task] = proc)
+        end
+        filtered
+    end
 
     # N.B. If this partition throws partway through (e.g. from
     # `distribute_task!`), any of our vertices that haven't yet been
@@ -1447,7 +1477,7 @@ function schedule_partition_full!(queue::DataDepsTaskQueue,
             # `ThunkSyncdep`s recorded for `v` are valid.
             write_num = _schedule_vertex!(
                 v, partition_id, temp_queue, state, local_procs, local_scope,
-                dag, seen_tasks, vertex_to_partition,
+                dag, seen_tasks, vertex_to_partition, schedule,
                 proc_to_scope_lfu, write_num, registry)
 
             v in has_external_successor && flush_batch!(batch_queue)
@@ -1461,7 +1491,7 @@ function schedule_partition_full!(queue::DataDepsTaskQueue,
         end
     end
 
-    return state
+    return state, schedule
 end
 
 """
@@ -1486,7 +1516,8 @@ function schedule_partitions_sequential!(queue::DataDepsTaskQueue,
                                          vertex_to_partition::Vector{Int},
                                          registry::Union{SharedChunkRegistry,Nothing},
                                          wait_all_queue,
-                                         value_dep_verts::Set{Int})
+                                         value_dep_verts::Set{Int},
+                                         schedule::Dict{DTask,Processor})
     n_partitions = length(partitions)
     temp_queues = Vector{DataDepsTaskQueue}(undef, n_partitions)
     local_scopes = Vector{AbstractScope}(undef, n_partitions)
@@ -1564,7 +1595,7 @@ function schedule_partitions_sequential!(queue::DataDepsTaskQueue,
                 v in value_dep_verts && maybe_flush_batch!(submit_queue)
                 write_num = _schedule_vertex!(
                     v, pid, temp_queues[pid], shared_state, local_procs,
-                    local_scopes[pid], dag, seen_tasks, vertex_to_partition,
+                    local_scopes[pid], dag, seen_tasks, vertex_to_partition, schedule,
                     proc_to_scope_lfus[pid], write_num, ownership)
             end
         finally
@@ -1600,6 +1631,68 @@ function _unwrap_partition_exception(e)
             return e
         end
     end
+end
+
+"""
+    _hierarchical_schedule_cache_lookup(scheduler, seen_tasks)
+        -> (dag_spec::DAGSpec, schedule::Union{Dict{DTask,Processor},Nothing})
+
+Build the whole-region `DAGSpec` and look for a cached schedule matching it.
+Returns the spec (needed later to key the cache on a miss) and the recovered
+task-to-processor mapping, or `nothing` if nothing matched.
+
+This deliberately does *not* compute a schedule on a miss: under hierarchical
+partitioning, planning happens per partition, over that partition's own
+processors. The whole-region spec exists only as the cache key that ties those
+per-partition results back together.
+"""
+function _hierarchical_schedule_cache_lookup(scheduler::DataDepsScheduler,
+                                             seen_tasks::Vector{DTaskPair})
+    dag_spec = DAGSpec()
+    for (spec, task) in seen_tasks
+        dag_add_task!(dag_spec, spec, task) || break
+    end
+    isempty(dag_spec) && return dag_spec, nothing
+
+    for (other_spec, spec_schedule) in datadeps_schedule_cache(scheduler)
+        if datadeps_dag_equivalent(scheduler, dag_spec, other_spec)
+            @dagdebug nothing :spawn_datadeps "Found matching hierarchical DAG spec!"
+            schedule = Dict{DTask,Processor}()
+            for (id, proc) in spec_schedule.id_to_proc
+                uid = dag_spec.id_to_uid[id]
+                idx = findfirst(pair -> pair.task.uid == uid, seen_tasks)
+                idx === nothing && continue
+                schedule[seen_tasks[idx].task] = proc
+            end
+            return dag_spec, schedule
+        end
+    end
+    return dag_spec, nothing
+end
+
+"""
+    _hierarchical_persist_schedule!(scheduler, dag_spec, partition_schedules)
+
+Merge every partition's task-to-processor assignments and cache them under the
+whole-region `dag_spec`, so a later equivalent region can recover the full
+schedule in one lookup instead of replanning each partition.
+"""
+function _hierarchical_persist_schedule!(scheduler::DataDepsScheduler,
+                                         dag_spec::DAGSpec,
+                                         partition_schedules::Vector{Dict{DTask,Processor}})
+    isempty(dag_spec) && return
+    spec_schedule = DAGSpecSchedule()
+    for idx in eachindex(partition_schedules)
+        isassigned(partition_schedules, idx) || continue
+        for (task, proc) in partition_schedules[idx]
+            id = get(dag_spec.uid_to_id, task.uid, nothing)
+            id === nothing && continue
+            spec_schedule.id_to_proc[id] = proc
+        end
+    end
+    isempty(spec_schedule.id_to_proc) && return
+    push!(datadeps_schedule_cache(scheduler), dag_spec => spec_schedule)
+    return
 end
 
 """
@@ -1749,12 +1842,27 @@ function _distribute_tasks_hierarchical!(queue::DataDepsTaskQueue,
     # See PERF(hier-2)/(hier-3).
     exec_spaces = unique(Iterators.flatten(memory_spaces(proc) for proc in all_procs))
     use_shared_state = uniform_execution(accel) || length(exec_spaces) > 1
+    # Look for a cached AOT schedule for the region as a whole before doing any
+    # per-partition planning; on a hit each partition just filters it, and no
+    # partition-local AOT runs at all.
+    region_uids = Set{UInt}(pair.task.uid for pair in seen_tasks)
+    region_dag_spec, precomputed_schedule =
+        _hierarchical_schedule_cache_lookup(queue.scheduler, seen_tasks)
+
+    partition_schedules = Vector{Dict{DTask,Processor}}(undef, n_partitions)
     partition_states = @hier_phase schedule try
         if use_shared_state
+            # The sequential path shares one state across partitions, so it also
+            # shares one schedule: the whole-region one when cached, else empty
+            # (each vertex falls back to JIT).
+            shared_schedule = something(precomputed_schedule, Dict{DTask,Processor}())
+            for pid in 1:n_partitions
+                partition_schedules[pid] = Dict{DTask,Processor}()
+            end
             schedule_partitions_sequential!(
                 queue, queue_lock, partitions, dag, seen_tasks,
                 partition_procs, vertex_to_partition, registry,
-                wait_all_queue, value_dep_verts)
+                wait_all_queue, value_dep_verts, shared_schedule)
         else
             states = Vector{DataDepsState}(undef, n_partitions)
             @sync for pid in 1:n_partitions
@@ -1764,12 +1872,13 @@ function _distribute_tasks_hierarchical!(queue::DataDepsTaskQueue,
                     # queue up from options, so they batch alongside their task.
                     with_options(; task_queue=batch_queue) do
                         try
-                            states[pid] = schedule_partition_full!(
+                            states[pid], partition_schedules[pid] = schedule_partition_full!(
                                 queue, batch_queue, pid, partitions[pid],
                                 dag, seen_tasks,
                                 partition_procs[pid], vertex_to_partition,
                                 task_submitted, value_dep_verts,
-                                registry
+                                region_uids, registry;
+                                precomputed_schedule
                             )
                         finally
                             flush_batch!(batch_queue)
@@ -1781,6 +1890,13 @@ function _distribute_tasks_hierarchical!(queue::DataDepsTaskQueue,
         end
     catch e
         rethrow(_unwrap_partition_exception(e))
+    end
+
+    # Merge the per-partition assignments and cache them under the whole-region
+    # DAG, so an equivalent region next time skips partition-local planning.
+    if precomputed_schedule === nothing
+        _hierarchical_persist_schedule!(queue.scheduler, region_dag_spec,
+                                        partition_schedules)
     end
 
     # The shared-state path returns a one-element state vector and does not

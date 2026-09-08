@@ -122,6 +122,100 @@ const DATADEPS_THUNK_ID = ScopedValue{Int64}(0)
 # `uniform_execution()` holds (i.e. under MPIExt), which provides the method.
 function to_tag end
 
+"""
+    _spec_has_region_dtask_arg(spec::DTaskSpec, region_uids::Set{UInt}) -> Bool
+
+Whether `spec` takes an argument produced by another task in the same Datadeps
+region. Used to stop a *partial* DAG build before it reaches such a task.
+"""
+function _spec_has_region_dtask_arg(spec::DTaskSpec, region_uids::Set{UInt})
+    for _arg in spec.fargs
+        arg, _ = unwrap_inout(value(_arg))
+        if arg isa DTask && arg.uid in region_uids
+            return true
+        end
+    end
+    return false
+end
+
+"""
+    datadeps_build_schedule!(scheduler, pairs, all_procs, all_scope;
+                             region_uids=nothing) -> (dag_spec, schedule)
+
+Build a `DAGSpec` from `pairs` (in submission order) and compute an AOT
+processor assignment over `all_procs`/`all_scope`, reusing a cached schedule
+when an equivalent DAG has been seen before and caching a freshly-computed one
+otherwise. Schedulers with no `datadeps_schedule_dag_aot!` method leave the
+schedule empty, and those tasks fall back to JIT placement in
+`distribute_task!`.
+
+`region_uids`, when given, is the set of *all* in-region task uids, and makes
+this bail out before `dag_add_task!` reaches a task whose argument is produced
+by another in-region task. That matters only when `pairs` is a *subset* of the
+region, as it is for one partition of the hierarchical path: a producer sitting
+in another partition is not in `pairs`, so `dag_add_task!` would treat it as an
+ordinary external value and `fetch` it — blocking forever, since that partition
+has not been submitted yet. For the flat path `pairs` is the whole region and
+`dag_add_task!`'s own in-DAG check suffices, so `region_uids` can be omitted.
+
+Used by both `distribute_tasks!` (whole region) and
+`distribute_tasks_hierarchical!` (per partition).
+"""
+function datadeps_build_schedule!(scheduler::DataDepsScheduler,
+                                  pairs::Vector{DTaskPair},
+                                  all_procs, all_scope;
+                                  region_uids::Union{Set{UInt},Nothing}=nothing)
+    dag_spec = DAGSpec()
+    for (spec, task) in pairs
+        if region_uids !== nothing && _spec_has_region_dtask_arg(spec, region_uids)
+            # Produced by an in-region task that may live outside `pairs`;
+            # defer the rest to JIT scheduling.
+            break
+        end
+        if !dag_add_task!(dag_spec, spec, task)
+            # This task depends on an in-region task's result; defer the rest
+            # to JIT scheduling (they won't appear in `schedule`).
+            break
+        end
+    end
+
+    # Attempt to find any matching DAG specs and reuse their schedule
+    schedule = Dict{DTask, Processor}()
+    schedule_cache = datadeps_schedule_cache(scheduler)
+    cache_hit = false
+    for (other_spec, spec_schedule) in schedule_cache
+        if datadeps_dag_equivalent(scheduler, dag_spec, other_spec)
+            @dagdebug nothing :spawn_datadeps "Found matching DAG spec!"
+            for (id, proc) in spec_schedule.id_to_proc
+                uid = dag_spec.id_to_uid[id]
+                task_idx = findfirst(spec_task -> spec_task.task.uid == uid, pairs)
+                task = pairs[task_idx].task
+                schedule[task] = proc
+            end
+            cache_hit = true
+            break
+        end
+    end
+
+    if !cache_hit && !isempty(dag_spec)
+        # Compute a fresh AOT schedule (no-op for schedulers that fall back
+        # to JIT in distribute_task!)
+        datadeps_schedule_dag_aot!(scheduler, schedule, dag_spec, all_procs, all_scope)
+
+        # Persist the schedule for reuse by future equivalent DAGs
+        if !isempty(schedule)
+            spec_schedule = DAGSpecSchedule()
+            for (task, proc) in schedule
+                id = dag_spec.uid_to_id[task.uid]
+                spec_schedule.id_to_proc[id] = proc
+            end
+            push!(schedule_cache, dag_spec => spec_schedule)
+        end
+    end
+
+    return dag_spec, schedule
+end
+
 function distribute_tasks!(queue::DataDepsTaskQueue)
     #= TODO: Improvements to be made:
     # - Support for copying non-AbstractArray arguments
@@ -155,47 +249,8 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
     # Plan the whole region ahead of time, if the scheduler supports it.
     # Schedulers that don't define `datadeps_schedule_dag_aot!` leave `schedule`
     # empty and every task falls through to JIT placement below.
-    dag_spec = DAGSpec()
-    for (spec, task) in queue.seen_tasks
-        if !dag_add_task!(dag_spec, spec, task)
-            # This task needs to be deferred
-            break
-        end
-    end
-
-    # Attempt to find any matching DAG specs and reuse their schedule
-    schedule = Dict{DTask, Processor}()
-    schedule_cache = datadeps_schedule_cache(queue.scheduler)
-    cache_hit = false
-    for (other_spec, spec_schedule) in schedule_cache
-        if datadeps_dag_equivalent(queue.scheduler, dag_spec, other_spec)
-            @dagdebug nothing :spawn_datadeps "Found matching DAG spec!"
-            for (id, proc) in spec_schedule.id_to_proc
-                uid = dag_spec.id_to_uid[id]
-                task_idx = findfirst(spec_task -> spec_task.task.uid == uid, queue.seen_tasks)
-                task = queue.seen_tasks[task_idx].task
-                schedule[task] = proc
-            end
-            cache_hit = true
-            break
-        end
-    end
-
-    if !cache_hit && !isempty(dag_spec)
-        # Compute a fresh AOT schedule (no-op for schedulers that fall back
-        # to JIT in distribute_task!)
-        datadeps_schedule_dag_aot!(queue.scheduler, schedule, dag_spec, all_procs, all_scope)
-
-        # Persist the schedule for reuse by future equivalent DAGs
-        if !isempty(schedule)
-            spec_schedule = DAGSpecSchedule()
-            for (task, proc) in schedule
-                id = dag_spec.uid_to_id[task.uid]
-                spec_schedule.id_to_proc[id] = proc
-            end
-            push!(schedule_cache, dag_spec => spec_schedule)
-        end
-    end
+    _dag_spec, schedule = datadeps_build_schedule!(queue.scheduler, queue.seen_tasks,
+                                                   all_procs, all_scope)
 
     # Start launching tasks and necessary copies
     state = DataDepsState()
