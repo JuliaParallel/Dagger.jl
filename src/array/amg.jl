@@ -7,10 +7,12 @@
 #
 # First-cut limitations (honest): aggregation / classical interpolation still
 # gather the current level to build `P` (those algorithms are sequential in
-# AlgebraicMultigrid.jl). The Galerkin product and the V-cycle apply are
-# distributed `DMatrix` / `DVector` operations. The coarsest solve is a
-# gathered LU, same as `Dagger.klu` / `Dagger.splu`. Do not treat Krylov
-# `stats.solved` as `Ax ≈ b`; check the un-preconditioned residual.
+# AlgebraicMultigrid.jl). Near-nullspace candidates (`nullspace=N`) are
+# gathered with `A` for that same setup step; coarse levels then use the `R`
+# from `fit_candidates`, not the fine `N`. The Galerkin product and the
+# V-cycle apply are distributed `DMatrix` / `DVector` operations. The coarsest
+# solve is a gathered LU, same as `Dagger.klu` / `Dagger.splu`. Do not treat
+# Krylov `stats.solved` as `Ax ≈ b`; check the un-preconditioned residual.
 
 """
     GlobalAMGLevel
@@ -28,7 +30,7 @@ struct GlobalAMGLevel{TA,TP,V}
 end
 
 """
-    GlobalAMG(A::DMatrix; method=:smoothed_aggregation, kwargs...)
+    GlobalAMG(A::DMatrix; method=:smoothed_aggregation, nullspace=N, kwargs...)
 
 A **global** algebraic-multigrid preconditioner over the whole sparse
 `DMatrix` `A`. Unlike [`AMGPreconditioner`](@ref) (one hierarchy per diagonal
@@ -42,6 +44,14 @@ interpolation). The expensive RAP and the apply are Dagger-distributed.
 
 Keyword arguments:
 
+- `nullspace` — near-nullspace / rigid-body modes (PETSc `MatSetNearNullSpace`).
+  A `DMatrix` whose columns are the modes, a `DVector` (one mode), or a host
+  `AbstractVecOrMat`. Smoothed aggregation injects them as `fit_candidates`
+  (default is the scalar constant `ones`). `B` is an alias (AlgebraicMultigrid.jl
+  name). Not a setter: there is no `Dagger.set_nearnullspace`. Ruge–Stüben
+  rejects this keyword. [`AMGPreconditioner`](@ref) is unchanged (per-tile).
+  `GlobalAMG(Projected(A, N))` reads `N` from the wrapper when `nullspace` is
+  omitted.
 - `max_levels=3`, `max_coarse=32` — stop after this many levels, or when the
   operator is this small (then a gathered LU is the coarse solver).
 - `smooth=true` — Jacobi-smooth the tentative aggregation `P` (SA only).
@@ -50,7 +60,8 @@ Keyword arguments:
   Jacobi-only on 1-D Poisson; two is the smallest count that does.
 
 Requires `AlgebraicMultigrid.jl`. A first cut: 1–2 coarse levels is enough
-for a real coarse grid; this is not HYPRE BoomerAMG.
+for a real coarse grid; this is not HYPRE BoomerAMG. Setup still gathers
+the current level (and `nullspace`) to build `P`.
 
 See also [`SmoothedAggregationPreconditioner`](@ref),
 [`RugeStubenPreconditioner`](@ref).
@@ -65,6 +76,7 @@ struct GlobalAMG{L,C,A} <: AbstractDaggerPreconditioner
     n::Int
     part::Blocks{1}
     method::Symbol
+    nmodes::Int           # columns of `nullspace` (1 = default scalar ones)
 end
 
 # Friendly fallback (shadowed by the `::DMatrix` method in AlgebraicMultigridExt).
@@ -73,10 +85,12 @@ GlobalAMG(A; kwargs...) = throw(ArgumentError(
     to enable distributed (global) algebraic-multigrid preconditioning."))
 
 """
-    SmoothedAggregationPreconditioner(A::DMatrix; kwargs...)
+    SmoothedAggregationPreconditioner(A::DMatrix; nullspace=N, kwargs...)
 
 [`GlobalAMG`](@ref) with `method=:smoothed_aggregation`. Named so Krylov usage
 reads like AlgebraicMultigrid.jl: `M = SmoothedAggregationPreconditioner(A)`.
+Pass rigid-body / near-nullspace modes as `nullspace` (a `DMatrix` of columns);
+see [`GlobalAMG`](@ref).
 """
 SmoothedAggregationPreconditioner(A; kwargs...) =
     GlobalAMG(A; method=:smoothed_aggregation, kwargs...)
@@ -93,7 +107,8 @@ RugeStubenPreconditioner(A; kwargs...) =
 function Base.show(io::IO, M::GlobalAMG)
     print(io, "GlobalAMG(method=", M.method,
           ", levels=", length(M.levels) + 1,
-          ", n=", M.n, ")")
+          ", n=", M.n,
+          ", nullspace=", M.nmodes, ")")
 end
 
 # Per-tile kernels (named, so workers resolve them without closure capture).
