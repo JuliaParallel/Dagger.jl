@@ -238,7 +238,9 @@ end
             r = s:min(s + k - 1, n)
             yref[r] = Float64.(A32d[r, r] \ Float32.(b[r]))
         end
-        @test collect(ybj) ≈ yref
+        # Sparse-tile LU vs dense `\` differs at ~1e-7 (FP32 residual); the
+        # GMRES true-residual checks below are the correctness criterion.
+        @test collect(ybj) ≈ yref rtol = 1e-5 atol = 1e-6
 
         x, stats = Dagger.gmres(DA64, Db; M = Pj, atol = 1e-12, rtol = 1e-10,
                                 itmax = 200, memory = 50)
