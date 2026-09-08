@@ -515,3 +515,42 @@ lesson.
    evictions fell from 10,000 allocations / 320,000 bytes to zero; cache-hit
    behavior is unchanged. Together with lesson 46, cold default population
    is 25 allocations / 1,024 bytes rather than 217 / 9,088.
+
+48. **Hierarchical Datadeps has two dispatch branches, and `-p 0` only
+   exercises one.** `distribute_tasks_hierarchical!` takes the shared-state
+   (sequential) branch whenever `all_procs` spans more than one memory space,
+   and the parallel per-partition branch otherwise. With no workers there is
+   one memory space, so a suite run at `-p 0` never enters the shared-state
+   path at all. A change to the hierarchical scheduler that passes cleanly at
+   `-p 0` can be completely broken with a worker present — AOT planning was
+   silently disabled on that branch, degrading every AOT scheduler to JIT
+   round-robin, and the scheduling suite went from 516 pass / 0 error to 38
+   errors the moment `-p 1` was used. Test hierarchical changes with `-p >= 1`.
+
+49. **A snapshot-per-operation metrics read is a deep copy per operation.**
+   `MetricsTracker.snapshot` rebuilds whenever the cache's generation has
+   moved, and the rebuild copies every context and every per-metric storage
+   (measured: 273 allocations / 67 KB against 488 stored values). The
+   generation advances on *every* recorded value, so with tasks completing
+   continuously a per-task consumer rebuilds every time. A cost model does not
+   need an exact view — it reduces many samples to an estimate — so it should
+   use `snapshot_stale` and bound rebuilds by time rather than by the rate at
+   which values arrive.
+
+50. **Memoize metrics lookup *misses*, not just hits.** `MT.find_keys` scans
+   every storage and every key of a snapshot, building `Set{Any}`s, and it
+   costs the same whether or not it matches anything. `metrics_lookup_alloc`
+   and `metrics_lookup_transfer_rate` run once per candidate processor per
+   task; caching only their hits leaves the common no-samples case paying full
+   price forever, which is exactly the situation for transfer rate (its inputs
+   have been dead since "Sch: Drop dead per-task transfer-stat Atomics"). Key
+   such memos on the snapshot's `objectid` so a rebuild invalidates them
+   wholesale, and keep them task-local so the concurrent per-partition
+   scheduling tasks neither share nor lock them.
+
+51. **A micro-benchmark of a metrics lookup lies if the cache is empty.**
+   `metrics_lookup_transfer_rate` measures 0 allocations when no transfer-rate
+   values exist, because it returns before using the scan's result — but the
+   scan already ran. Benchmark these against a *populated* cache, or profile
+   the real path with `--track-allocation`; several rounds of plausible
+   hypotheses here were all wrong, and the profiler answered it immediately.
