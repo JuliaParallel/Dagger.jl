@@ -176,6 +176,42 @@ end
         end
     end
 
+    @testset "setup does not collect A to build P" begin
+        # `_collect_sparse_dmatrix` is the old "gather A, run AMG.jl, distribute P"
+        # path. Coarse LU uses `_gather_sparse` directly and is not this hook.
+        n, k = 64, 16
+        A = poisson_1d(n)
+        b = rand(n)
+        DA = distribute(A, Blocks(k, k))
+        Db = distribute(b, Blocks(k))
+        old = Dagger.COLLECT_SPARSE_DMATRIX_MAXSIZE[]
+        Dagger.COLLECT_SPARSE_DMATRIX_MAXSIZE[] = 0
+        try
+            M = Dagger.SmoothedAggregationPreconditioner(DA; max_levels=3, max_coarse=16)
+            @test M isa Dagger.GlobalAMG
+            @test !isempty(M.levels)
+            @test M.levels[1].P isa Dagger.DMatrix
+            @test size(M.levels[1].P, 1) == n
+            @test size(M.levels[1].P, 2) < n
+            @test Dagger.is_sparse_backed(M.levels[1].P)
+            y = similar(Db)
+            mul!(y, M, Db)
+            @test all(isfinite, collect(y))
+            vrel = true_relres(DA, y, Db)
+            jrel = jacobi_only_relres(A, b, M.relax, M.presweeps + M.postsweeps)
+            @test vrel < 0.95 * jrel
+            _, _, rel = solve_gmres(DA, Db, M)
+            @test rel < 1e-6
+
+            Mrs = Dagger.RugeStubenPreconditioner(DA; max_levels=3, max_coarse=16)
+            @test !isempty(Mrs.levels)
+            _, _, rel_rs = solve_gmres(DA, Db, Mrs)
+            @test rel_rs < 1e-6
+        finally
+            Dagger.COLLECT_SPARSE_DMATRIX_MAXSIZE[] = old
+        end
+    end
+
     @testset "AMGPreconditioner semantics are unchanged (per-tile)" begin
         n, k = 64, 16
         DA = distribute(poisson_1d(n), Blocks(k, k))
