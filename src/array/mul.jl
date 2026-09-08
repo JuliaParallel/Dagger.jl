@@ -127,8 +127,6 @@ function LinearAlgebra.generic_matmatmul!(
         end
     end
 
-    # FIXME Add symm and hemm implementation (please note hemm will be inside symm as the case for syrk)
-
     return maybe_copy_buffered(C=>partC, A=>partA, B=>partB) do C, A, B
         return gemm_dagger!(C, transA, transB, A, B, alpha, beta)
     end
@@ -437,6 +435,239 @@ function syrk_dagger!(
     return C
 end
 
+# Tile-local product with the stored triangle of a diagonal block. Host
+# `Symmetric` / `Hermitian` `mul!` uses BLAS.symm!/hemm! on `Matrix` tiles.
+function _symm_diag_mul!(C, uplo::AbstractChar, herm::Bool, side::AbstractChar, A, B, α, β)
+    up = (uplo == 'U' || uplo == 'u') ? :U : :L
+    AW = herm ? LinearAlgebra.Hermitian(A, up) : LinearAlgebra.Symmetric(A, up)
+    if side == 'L' || side == 'l'
+        LinearAlgebra.mul!(C, AW, B, α, β)
+    else
+        LinearAlgebra.mul!(C, B, AW, α, β)
+    end
+    return C
+end
+
+function _symm_diag_mv!(y, uplo::AbstractChar, herm::Bool, A, x, α, β)
+    up = (uplo == 'U' || uplo == 'u') ? :U : :L
+    AW = herm ? LinearAlgebra.Hermitian(A, up) : LinearAlgebra.Symmetric(A, up)
+    LinearAlgebra.mul!(y, AW, x, α, β)
+    return y
+end
+
+function _uplo_char(uplo)
+    uplo isa AbstractChar && return Char(uppercase(uplo))
+    uplo === :U && return 'U'
+    uplo === :L && return 'L'
+    throw(ArgumentError("uplo must be 'U'/'L' or :U/:L, got $uplo"))
+end
+
+function _side_char(side)
+    side isa AbstractChar && return Char(uppercase(side))
+    side === :L && return 'L'
+    side === :R && return 'R'
+    throw(ArgumentError("side must be 'L'/'R' or :L/:R, got $side"))
+end
+
+"""
+Tiled SYMM / HEMM: `C = α * A_sym * B + β * C` (`side='L'`) or
+`C = α * B * A_sym + β * C` (`side='R'`). Only the stored triangle of `A`
+is read (`uplo`). Off-diagonal tiles use `matmatmul!`; the diagonal uses
+`Symmetric`/`Hermitian` tile `mul!`.
+"""
+function _symm_dagger!(C::DMatrix, A::DMatrix, B::DMatrix, _alpha, _beta,
+                       side::Char, uplo::Char, herm::Bool)
+    T = eltype(C)
+    Ac = A.chunks
+    Bc = B.chunks
+    Cc = C.chunks
+    Amt, Ant = size(Ac)
+    Bmt, Bnt = size(Bc)
+    Cmt, Cnt = size(Cc)
+    alpha = T(_alpha)
+    beta = T(_beta)
+    trans = herm ? 'C' : 'T'
+
+    Amt == Ant || throw(DimensionMismatch(
+        "Symmetric/Hermitian DMatrix must have a square tile grid, got ($Amt,$Ant)"))
+
+    if side == 'L'
+        Ant == Bmt || throw(DimensionMismatch(
+            "A has $(Ant) column tiles but B has $(Bmt) row tiles"))
+        Amt == Cmt || throw(DimensionMismatch(
+            "A has $(Amt) row tiles but C has $(Cmt) row tiles"))
+        Bnt == Cnt || throw(DimensionMismatch(
+            "B has $(Bnt) column tiles but C has $(Cnt) column tiles"))
+        Dagger.spawn_datadeps() do
+            for i in 1:Cmt, j in 1:Cnt
+                for k in 1:Ant
+                    βk = k == 1 ? beta : one(T)
+                    if k == i
+                        Dagger.@spawn _symm_diag_mul!(InOut(Cc[i, j]), uplo, herm, 'L',
+                                                      In(Ac[i, i]), In(Bc[i, j]), alpha, βk)
+                    elseif (uplo == 'U' && k > i) || (uplo == 'L' && k < i)
+                        Dagger.@spawn matmatmul!(InOut(Cc[i, j]), 'N', 'N',
+                                                 In(Ac[i, k]), In(Bc[k, j]), alpha, βk)
+                    else
+                        Dagger.@spawn matmatmul!(InOut(Cc[i, j]), trans, 'N',
+                                                 In(Ac[k, i]), In(Bc[k, j]), alpha, βk)
+                    end
+                end
+            end
+        end
+    else
+        Bnt == Amt || throw(DimensionMismatch(
+            "B has $(Bnt) column tiles but A has $(Amt) row tiles"))
+        Bmt == Cmt || throw(DimensionMismatch(
+            "B has $(Bmt) row tiles but C has $(Cmt) row tiles"))
+        Ant == Cnt || throw(DimensionMismatch(
+            "A has $(Ant) column tiles but C has $(Cnt) column tiles"))
+        Dagger.spawn_datadeps() do
+            for i in 1:Cmt, j in 1:Cnt
+                for k in 1:Amt
+                    βk = k == 1 ? beta : one(T)
+                    if k == j
+                        Dagger.@spawn _symm_diag_mul!(InOut(Cc[i, j]), uplo, herm, 'R',
+                                                      In(Ac[j, j]), In(Bc[i, j]), alpha, βk)
+                    elseif (uplo == 'U' && k < j) || (uplo == 'L' && k > j)
+                        Dagger.@spawn matmatmul!(InOut(Cc[i, j]), 'N', 'N',
+                                                 In(Bc[i, k]), In(Ac[k, j]), alpha, βk)
+                    else
+                        Dagger.@spawn matmatmul!(InOut(Cc[i, j]), 'N', trans,
+                                                 In(Bc[i, k]), In(Ac[j, k]), alpha, βk)
+                    end
+                end
+            end
+        end
+    end
+    return C
+end
+
+function _symv_dagger!(y::DVector, A::DMatrix, x::DVector, _alpha, _beta,
+                       uplo::Char, herm::Bool)
+    T = eltype(y)
+    Ac = A.chunks
+    xc = x.chunks
+    yc = y.chunks
+    Amt, Ant = size(Ac)
+    alpha = T(_alpha)
+    beta = T(_beta)
+    trans = herm ? 'C' : 'T'
+
+    Amt == Ant || throw(DimensionMismatch(
+        "Symmetric/Hermitian DMatrix must have a square tile grid, got ($Amt,$Ant)"))
+    Ant == length(xc) || throw(DimensionMismatch(
+        "A has $(Ant) column tiles but x has $(length(xc)) tiles"))
+    Amt == length(yc) || throw(DimensionMismatch(
+        "A has $(Amt) row tiles but y has $(length(yc)) tiles"))
+
+    Dagger.spawn_datadeps() do
+        for i in 1:Amt
+            for k in 1:Ant
+                βk = k == 1 ? beta : one(T)
+                if k == i
+                    Dagger.@spawn _symm_diag_mv!(InOut(yc[i]), uplo, herm,
+                                                 In(Ac[i, i]), In(xc[i]), alpha, βk)
+                elseif (uplo == 'U' && k > i) || (uplo == 'L' && k < i)
+                    Dagger.@spawn matvecmul!(InOut(yc[i]), 'N',
+                                             In(Ac[i, k]), In(xc[k]), alpha, βk)
+                else
+                    Dagger.@spawn matvecmul!(InOut(yc[i]), trans,
+                                             In(Ac[k, i]), In(xc[k]), alpha, βk)
+                end
+            end
+        end
+    end
+    return y
+end
+
+function _symm_mul!(C::DMatrix, A::DMatrix, B::DMatrix, α, β,
+                    side::AbstractChar, uplo::AbstractChar, herm::Bool)
+    sideC = _side_char(side)
+    uploC = _uplo_char(uplo)
+    if sideC == 'L'
+        partC, partA, partB = _repartition_matmatmul(C, A, B, 'N', 'N')
+        return maybe_copy_buffered(C=>partC, A=>partA, B=>partB) do C, A, B
+            return _symm_dagger!(C, A, B, α, β, 'L', uploC, herm)
+        end
+    else
+        partC, partB, partA = _repartition_matmatmul(C, B, A, 'N', 'N')
+        return maybe_copy_buffered(C=>partC, B=>partB, A=>partA) do C, B, A
+            return _symm_dagger!(C, A, B, α, β, 'R', uploC, herm)
+        end
+    end
+end
+
+function _symv_mul!(y::DVector, A::DMatrix, x::DVector, α, β,
+                    uplo::AbstractChar, herm::Bool)
+    uploC = _uplo_char(uplo)
+    partC, partA, partB = _repartition_matvecmul(y, A, x, 'N')
+    return maybe_copy_buffered(y=>partC, A=>partA, x=>partB) do y, A, x
+        return _symv_dagger!(y, A, x, α, β, uploC, herm)
+    end
+end
+
+# BLAS.symm! already has `AbstractMatrix{Float64}` / `Float32` methods. A
+# `Number` + `DMatrix` method is ambiguous with those (more specific on the
+# arrays, less specific on α/β). Match the stdlib α/β union.
+for T in (Float32, Float64)
+    @eval function LinearAlgebra.BLAS.symm!(side::AbstractChar, uplo::AbstractChar,
+                                            α::Union{Bool,$T}, A::DMatrix{$T},
+                                            B::DMatrix{$T}, β::Union{Bool,$T},
+                                            C::DMatrix{$T})
+        return _symm_mul!(C, A, B, α, β, side, uplo, false)
+    end
+end
+for T in (ComplexF32, ComplexF64)
+    @eval function LinearAlgebra.BLAS.hemm!(side::AbstractChar, uplo::AbstractChar,
+                                            α::Union{Bool,$T}, A::DMatrix{$T},
+                                            B::DMatrix{$T}, β::Union{Bool,$T},
+                                            C::DMatrix{$T})
+        return _symm_mul!(C, A, B, α, β, side, uplo, true)
+    end
+end
+# `1+0im` is Complex{Int64}. A lone `Number`+`DMatrix` method is ambiguous
+# with the stdlib `AbstractMatrix{T}` methods when α is already `T`; the
+# typed methods above win in that case, and these only fire for other
+# Numbers (then convert).
+function LinearAlgebra.BLAS.symm!(side::AbstractChar, uplo::AbstractChar,
+                                  α::Number, A::DMatrix{T}, B::DMatrix{T},
+                                  β::Number, C::DMatrix{T}) where T<:LinearAlgebra.BlasReal
+    return LinearAlgebra.BLAS.symm!(side, uplo, convert(T, α), A, B, convert(T, β), C)
+end
+function LinearAlgebra.BLAS.hemm!(side::AbstractChar, uplo::AbstractChar,
+                                  α::Number, A::DMatrix{T}, B::DMatrix{T},
+                                  β::Number, C::DMatrix{T}) where T<:LinearAlgebra.BlasComplex
+    return LinearAlgebra.BLAS.hemm!(side, uplo, convert(T, α), A, B, convert(T, β), C)
+end
+
+function LinearAlgebra.mul!(C::DMatrix, A::LinearAlgebra.Symmetric{<:Any,<:DMatrix},
+                            B::DMatrix, α::Number, β::Number)
+    return _symm_mul!(C, A.data, B, α, β, 'L', A.uplo, false)
+end
+function LinearAlgebra.mul!(C::DMatrix, A::DMatrix,
+                            B::LinearAlgebra.Symmetric{<:Any,<:DMatrix},
+                            α::Number, β::Number)
+    return _symm_mul!(C, B.data, A, α, β, 'R', B.uplo, false)
+end
+function LinearAlgebra.mul!(C::DMatrix, A::LinearAlgebra.Hermitian{<:Any,<:DMatrix},
+                            B::DMatrix, α::Number, β::Number)
+    return _symm_mul!(C, A.data, B, α, β, 'L', A.uplo, true)
+end
+function LinearAlgebra.mul!(C::DMatrix, A::DMatrix,
+                            B::LinearAlgebra.Hermitian{<:Any,<:DMatrix},
+                            α::Number, β::Number)
+    return _symm_mul!(C, B.data, A, α, β, 'R', B.uplo, true)
+end
+
+function LinearAlgebra.mul!(y::DVector, A::LinearAlgebra.Symmetric{<:Any,<:DMatrix},
+                            x::DVector, α::Number, β::Number)
+    return _symv_mul!(y, A.data, x, α, β, A.uplo, false)
+end
+function LinearAlgebra.mul!(y::DVector, A::LinearAlgebra.Hermitian{<:Any,<:DMatrix},
+                            x::DVector, α::Number, β::Number)
+    return _symv_mul!(y, A.data, x, α, β, A.uplo, true)
+end
 
 # copy transposed(adjoint) of upper(lower) side-diagonals.
 @inline function copytri!(A::DArray{T,2}, uplo::AbstractChar) where {T}
