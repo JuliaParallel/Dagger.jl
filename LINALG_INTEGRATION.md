@@ -309,6 +309,59 @@ Unassigned leftover from `csr-bsr`:
 
 ---
 
+## Performance
+
+Reusable harness: `benchmark/suites/linalg_integration.jl` (driver
+`benchmark/suites/run_linalg_integration.sh`). Deep warmup, then **min** of
+timed runs (AGENTS.md lesson 4). Dagger uses `BLAS.set_num_threads(1)` (task
+parallelism); host dense uses OpenBLAS at `nthreads`. Iterative methods share
+`atol=1e-10`, `rtol=1e-8`, `itmax=500`, GMRES `memory=50`; tables report
+iterations and the un-preconditioned `‖Ax−b‖/‖b‖`. Speedup is
+baseline/Dagger (`>1` means Dagger is faster). Empty cells are omitted, not
+invented.
+
+**Hardware / software (multi-threaded):** AWS `c6i.4xlarge` (16 vCPU, 32 GiB,
+`us-east-1`), Julia 1.12.7, 16 Julia threads, 2026-09-07 (PDT) /
+2026-09-08 UTC. Dagger code SHA **`292cd672`** (`Dagger-linalg-ultra` as of
+that clone). Dense GEMM / QR / SpMV / SpGEMM: warmup 8, samples 5. Remaining
+rows: warmup 5, samples 3. Krylov used 4×4 tiles (`Blocks(1024,1024)` on
+`n=4096`); a 16×16 (`tile=256`) CG probe was ~5× slower (15.8 s) at the same
+iteration count — scheduling-bound, not a different residual.
+
+**MPI:** not yet measured (next `batchctl --count ≥ 2` pass). No empty MPI table.
+
+### Multi-threaded
+
+| Feature | Problem | Dagger | Baseline (name) | Time D / Time B | Speedup | Notes |
+|---|---|---|---|---|---|---|
+| Dense GEMM / `mul!` | n=4096, tile=512×512, Float64, `C←A*A` | 292 ms | 233 ms (`mul!(::Matrix)` OpenBLAS) | 292 ms / 233 ms | 0.80× | Dagger BLAS=1; host BLAS=16 |
+| Dense LU + `\` | n=2048, tile=256×256, factor + `\` | 137 ms | 50.6 ms (`lu(::Matrix)` LAPACK getrf) | 137 ms / 50.6 ms | 0.37× | |
+| Dense QR + `\` | n=2048, tile=256×256, factor + `\` | 546 ms | 111 ms (`qr(::Matrix)` LAPACK geqrf) | 546 ms / 111 ms | 0.20× | |
+| Dense Cholesky + `\` | n=2048, tile=256×256, SPD `G*G'` | 201 ms | 54.9 ms (`cholesky(::Matrix)` LAPACK potrf) | 201 ms / 54.9 ms | 0.27× | |
+| Dense SVD | n=256, tile=128×128, `svd` only | 406 ms | 13.7 ms (`svd(::Matrix)` LAPACK gesdd) | 406 ms / 13.7 ms | 0.034× | tiled Jacobi vs LAPACK; modest size |
+| Sparse SpMV | 1-D Laplacian n=160000, nnz=479998, tile=20000 | 8.92 ms | 592 µs (`*(::CSC, ::Vector)`) | 8.92 ms / 592 µs | 0.066× | host CSC SpMV is single-threaded |
+| Sparse SpGEMM | `sprand` n=2500, p=0.008, nnz=49889, tile=625×625 | 16.0 ms | 14.3 ms (`*(::CSC, ::CSC)`) | 16.0 ms / 14.3 ms | 0.90× | host CSC×CSC is single-threaded |
+| Krylov CG (no PC) | 2-D Laplacian 64×64 (n=4096, nnz=20224), tile=1024×1024 | 3.37 s | 5.45 ms (`Krylov.cg(::CSC)`) | 3.37 s / 5.45 ms | 0.0016× | iters 196/196; `‖r‖/‖b‖` 8.82e-9 / 8.82e-9 |
+| Krylov GMRES (no PC) | same 2-D Laplacian | 77.4 s | 45.4 ms (`Krylov.gmres(::CSC)`) | 77.4 s / 45.4 ms | 0.00059× | iters 192/192; `‖r‖/‖b‖` 9.6e-9 / 9.6e-9; memory=50 |
+| Krylov CG + Jacobi | same 2-D Laplacian | 3.79 s | 65.0 ms (`Krylov.cg` + `Diagonal`) | 3.79 s / 65.0 ms | 0.017× | iters 196/196; PC setup D=733 ms, B=69 µs |
+| Krylov CG + BlockJacobi | same 2-D Laplacian | 846 ms | 56.8 ms (hand-rolled per-block LU) | 846 ms / 56.8 ms | 0.067× | iters 43/43; `‖r‖/‖b‖` 4.65e-8 / 4.65e-8; no ecosystem BlockJacobi |
+| Krylov GMRES + BlockILU | same 2-D Laplacian | 3.86 s | 1.87 ms (`IncompleteLU.ilu` of whole CSC) | 3.86 s / 1.87 ms | 0.00049× | iters 40/8; host ILU is global (stronger); `‖r‖/‖b‖` 2.73e-7 / 4.56e-9 |
+| Krylov GMRES + per-tile AMG | same 2-D Laplacian | 3.76 s | 3.04 ms (AlgebraicMultigrid RS, global) | 3.76 s / 3.04 ms | 0.00081× | iters 39/5; Dagger is block-diagonal (lesson 19); `‖r‖/‖b‖` 2.87e-7 / 4.74e-7 |
+| Additive Schwarz (RAS) | same 2-D Laplacian, overlap=1 | 3.80 s | 8.97 ms (serial pre-factored RAS) | 3.80 s / 8.97 ms | 0.0024× | iters 39/39; `‖r‖/‖b‖` 3.12e-7 / 3.12e-7; no distributed RAS in Julia |
+| Sparse `cholesky` + `\` | 2-D Laplacian 80×80 (n=6400, nnz=31680), tile=1280×1280 | 2.42 s | 6.22 ms (CHOLMOD `cholesky(::CSC)`) | 2.42 s / 6.22 ms | 0.0026× | Dagger gathers then CHOLMOD; both fit in RAM |
+| Incremental `sparse(I,J,V, Blocks)` | 2-D Laplacian COO 200×200 (n=40000, nnz=199200), tile=2500×2500 | 111 ms | 59.0 ms (`sparse` then `distribute`) | 111 ms / 59.0 ms | 0.53× | baseline includes host CSC + distribute |
+| LinearSolve `KrylovJL_GMRES` | 2-D Laplacian 64×64, tile=1024×1024 | 78.0 s | 42.6 ms (`KrylovJL_GMRES(::CSC)`) | 78.0 s / 42.6 ms | 0.00055× | same LinearSolve algorithm on both sides |
+| `Projected` `mul!` | 1-D Laplacian n=2048, tile=256, constant nullspace | 28.0 ms | 19.0 µs (serial `PAP`) | 28.0 ms / 19.0 µs | 0.00068× | correctness-adjacent; constructor orthonormalizes |
+| `BlockOperator` `mul!` | 2-field nest n=2048 (2×1024), tile=256 | 44.6 ms | 242 µs (assembled `*(::Matrix)`) | 44.6 ms / 242 µs | 0.0054× | correctness-adjacent; `hvcat` would assemble |
+
+### Skipped on this pass (no invented numbers)
+
+- **GlobalAMG, `Dagger.klu` / `splu`, LinearSolve `PureUMFPACKFactorization`:** at SHA `292cd672`, `DaggerSparseLU \ DVector` is ambiguous (`sparsedirect.jl`). Later integration commits (`775d4d4a` and follow-ups) add `_solve_pinned_dvector`. Re-bench on current HEAD.
+- **P1 now on `origin/Dagger-linalg-ultra` (after this SHA):** numeric refactor, tiled-`P` GlobalAMG, RAS `type=:basic`, GMG, CSR SpMV, graph `partitioner=`, `eigen`, mixed-precision, multi-RHS. Not present on the measured clone.
+- **`jps/datadeps-region-async`:** not rebased; no second column.
+
+---
+
 ## Integration-branch git facts (coordinator)
 
 - Workspace: `/home/jpsamaroo/.julia/dev/Dagger-linalg-ultra`
