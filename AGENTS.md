@@ -554,3 +554,24 @@ lesson.
    scan already ran. Benchmark these against a *populated* cache, or profile
    the real path with `--track-allocation`; several rounds of plausible
    hypotheses here were all wrong, and the profiler answered it immediately.
+
+52. **`Meta.parseall` does not throw on a syntax error.** It returns a
+   `:toplevel` expression containing an `Expr(:error, ...)` node, so
+   `Meta.parseall(read(f, String))` completing without an exception says
+   nothing about whether the file is valid. A `test/scheduler.jl` with an
+   unbalanced `end` passed that check repeatedly while the suite was silently
+   running 132 of its 305 tests — the stray `end` closed an enclosing
+   `@testset` early, so the rest of the file was reparented and the parse error
+   only surfaced when the runner actually included it. To check a file, count
+   the error nodes:
+
+       ex = Meta.parseall(read(path, String))
+       any(a -> a isa Expr && a.head === :error, ex.args)
+
+   The general trap: a verification step that cannot observe the failure it is
+   meant to catch will report success forever. The same shape produced two
+   other false "verified"s in the same session — a suite run at `-p 0` that
+   never enters the branch under test (lesson 48), and a lookup benchmarked
+   against an empty cache that measures the early return rather than the scan
+   behind it (lesson 51). When a check passes, ask what it would have done had
+   the thing been broken.
