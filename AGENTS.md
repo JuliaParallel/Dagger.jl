@@ -373,3 +373,29 @@ lesson.
    `GlobalAMG` is the across-tiles coarse grid; per-tile `AMGPreconditioner`
    is still the block-diagonal operator of lesson 19 — do not treat
    `stats.solved` as `Ax≈b` for either until you check `‖Ax−b‖`.
+
+33. **`Adjoint` is an `AbstractMatrix` even when its parent is not.** A
+   matrix-free wrapper (`Projected`, a stencil, a nested operator) should
+   *not* subtype `AbstractMatrix` — LinearAlgebra's generic `mul!` would
+   scalar-index it. But `A'` is `Adjoint{T,typeof(A)} <: AbstractMatrix{T}`
+   regardless of `typeof(A)`, and two-sided Krylov (`bilq`, `qmr`, least
+   squares) does `Aᴴ = A'` then `mul!(y, Aᴴ, x)`. Without a more-specific
+   `mul!(y::DVector, ::Adjoint{<:Any,<:YourOp}, x::DVector)`, that product
+   falls into the generic AbstractMatrix path and dies on scalar indexing
+   (or silently gathers). Define the adjoint/transpose `mul!` next to the
+   forward one, and qualify as `LinearAlgebra.mul!`. The same trap applies
+   to `Transpose`. `Projected(A, N)` orthonormalizes columns of `N` at
+   construction (`ones(n)` is a valid Poisson mode; `‖ones‖ = √n`). The
+   apply formula `x ← x - N(N'x)` is wrong if you skip that. Tall-skinny
+   MGS must gather: column `getindex` of a `DMatrix` is an n×1 `DArray`
+   whose tiles are themselves `DArray`s, and `rmul!` then asks Datadeps to
+   alias a `DArray` (`ConcurrencyViolationError`).
+
+34. **`[A B; C D]` of `DMatrix`s concatenates tiles, it does not nest.**
+   `Base.cat` / `hvcat` on `ArrayOp` already means "glue these arrays into
+   one bigger `DArray`" (`src/array/matrix.jl`). That is an assembled nest,
+   not PETSc `MatNest`. A block operator whose blocks stay independent
+   (matrix-free, or just not materialized as one `DMatrix`) needs its own
+   type (`BlockOperator`) and cannot reuse `hvcat`. `BlockArrays.mortar`
+   is the ecosystem name for the assembled case, but adding that dependency
+   does not give you matrix-free blocks or field-split `mul!`.

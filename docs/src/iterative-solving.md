@@ -152,6 +152,56 @@ mismatched partitionings automatically.
     some earlier operation still solves correctly, with nothing to special-case
     at the call site.
 
+## Known nullspaces
+
+Neumann Poisson, Stokes, and Maxwell operators have a small, known kernel
+(the constant mode, or a handful of rigid-body modes) that must be kept out
+of the Krylov residual. Julia's `LinearAlgebra.nullspace` *computes* a
+basis; it does not attach one. Wrap the operator in
+[`Dagger.Projected`](@ref) and pass that to Krylov — each `mul!` drops
+`N(N'x)` for orthonormal columns of `N`, so there is no `project!` call at
+the solve site:
+
+```julia
+# 1-D Neumann Laplacian: constant nullspace. `ones(n)` is fine; the
+# constructor orthonormalizes (‖ones‖ = √n).
+n, k = size(DA, 1), DA.partitioning.blocksize[1]
+N = distribute(ones(n), Blocks(k))
+b .-= sum(b) / n                          # compatible RHS (1ᵀb = 0)
+
+x, stats = Krylov.minres(Dagger.Projected(DA, N), b)
+```
+
+`N` is a `DVector` (one column) or a `DMatrix` (columns of the basis),
+partitioned like `b`. Left and right nullspaces can be passed separately as
+`Projected(A, left, right)` when they differ; one `N` is the symmetric
+case. The stored basis (`P.left` / `P.right`) is what a later AMG
+near-nullspace hook can read.
+
+## Nested / field-split operators
+
+Multiphysics problems are block systems `A = [A₁₁ A₁₂; A₂₁ A₂₂]`.
+`[A11 A12; A21 A22]` of `DMatrix`s already *concatenates* the tiles into
+one bigger `DMatrix` (see `cat`), so a nested operator is
+[`Dagger.BlockOperator`](@ref): `mul!` applies the blocks without
+assembling them. Zero blocks are `nothing`; `I` / `λ*I` scales a field.
+
+The matching preconditioner is [`Dagger.BlockDiagonalPC`](@ref) — PETSc
+`PCFIELDSPLIT` with the additive / Jacobi composition (each field gets its
+own PC). A Schur complement is a follow-up.
+
+```julia
+A = Dagger.BlockOperator(A11, A12, A21, A22)
+P = Dagger.BlockDiagonalPC((
+    Dagger.JacobiPreconditioner(A11),
+    Dagger.JacobiPreconditioner(A22),
+))
+x, stats = Krylov.gmres(A, b; M = P)
+```
+
+This is *field*-split, not tile-split: [`Dagger.BlockJacobiPreconditioner`](@ref)
+still means one operator per diagonal *tile* of a single `DMatrix`.
+
 ## Preconditioners
 
 A preconditioner accelerates convergence by approximating `A⁻¹`. Dagger's
@@ -371,6 +421,10 @@ Dagger.minres
 Dagger.gmres
 Dagger.bicgstab
 Dagger.krylov_solve
+Dagger.Projected
+Dagger.project!
+Dagger.BlockOperator
+Dagger.BlockDiagonalPC
 Dagger.AbstractDaggerPreconditioner
 Dagger.JacobiPreconditioner
 Dagger.AbstractBlockPreconditioner
