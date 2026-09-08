@@ -417,3 +417,11 @@ lesson.
    CSC; host CSR is the SpMV win. BSR has no host ecosystem type
    (`BlockArrays` is dense mortar; `CuSparseMatrixBSR` is device-only) — do
    not invent `Dagger.BSR`.
+
+36. **A Union `\` plus a more-specific-F / less-specific-b `\` is ambiguous.**
+   `_PinnedSparseFactor` is `Union{DaggerSparseLU, DaggerSparseCholesky}`,
+   and `\(F::_PinnedSparseFactor, b::DVector)` shares a `DaggerSparseLU` /
+   `DVector` call with `\(F::DaggerSparseLU, b::AbstractVector)`. Neither
+   wins (F is more specific on one, b on the other), so GlobalAMG, `klu` /
+   `splu`, and LinearSolve's sparse path all throw. Define
+   `\(::DaggerSparseLU, ::DVector)` explicitly.

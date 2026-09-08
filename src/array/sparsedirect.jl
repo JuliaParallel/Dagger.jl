@@ -316,6 +316,17 @@ function Base.:\(F::DaggerSparseLU, B::DMatrix)
     return distribute(X, B.partitioning)
 end
 
+# More specific than both `\(::DaggerSparseLU, ::AbstractVector)` and
+# `\(::_PinnedSparseFactor, ::DVector)`. Without this, GlobalAMG / klu / splu
+# `F \ b` on a `DVector` is ambiguous.
+function Base.:\(F::DaggerSparseLU, b::DVector)
+    length(b) == F.n || throw(DimensionMismatch(
+        "factorization is $(F.n)×$(F.n) but b has length $(length(b))"))
+    x = fetch(spawn(_direct_solve, Options(; compute_scope=F.scope),
+                    F.fact, b.chunks...))
+    return distribute(x, b.partitioning)
+end
+
 function Base.:\(F::DaggerSparseLU, b::AbstractVector)
     return F \ distribute(collect(b), F.part)
 end
