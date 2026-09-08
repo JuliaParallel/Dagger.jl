@@ -32,12 +32,17 @@ stay off the dense `LU{<:DMatrix}` path.
 
 - `expect_direct=true` when PureUMFPACK / PureKLU is loaded (`lu` → `DaggerSparseLU`)
 - `expect_direct=false` when only Krylov is loaded (`lu` → `SparseIterativeFactorization`)
+  If a direct extension is already loaded in this process (e.g. `sparsedirect.jl`
+  ran earlier in `--test array/linalg`), the direct factor is still accepted.
 """
 function test_sparse_solve_dispatch(; scope=nothing, check_tile=nothing,
                                     expect_direct::Bool=false, T=Float64)
     n, k = 32, 8
+    direct_loaded = expect_direct ||
+        Base.get_extension(Dagger, :PureUMFPACKExt) !== nothing ||
+        Base.get_extension(Dagger, :PureKLUExt) !== nothing
     cmp_rtol = T <: AbstractFloat && sizeof(T) == 4 ? 1e-3 :
-               (expect_direct ? 1e-10 : 1e-6)
+               (direct_loaded ? 1e-10 : 1e-6)
 
     Random.seed!(1234)
     Asp = sparse_solve_nonsym(T, n)
@@ -65,7 +70,7 @@ function test_sparse_solve_dispatch(; scope=nothing, check_tile=nothing,
         @test !(Flu isa LinearAlgebra.LU)
         Ff = factorize(DA)
         @test !(Ff isa LinearAlgebra.LU)
-        if expect_direct
+        if direct_loaded
             @test Flu isa Dagger.DaggerSparseLU
             @test Ff isa Dagger.DaggerSparseLU
         else
