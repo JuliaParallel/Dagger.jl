@@ -6,7 +6,7 @@ branches; they do **not** merge into this workspace branch, and they do **not**
 edit other agents' rows here. Report status in your final message so the
 coordinator can update the table.
 
-Last coordinator pass: 2026-09-07 (seven P0 workstreams merged; P0 leftovers and P1 workstreams assigned to sibling agents).
+Last coordinator pass: 2026-09-07 (`linalg/gpu-pc` merged; remaining P1 workstreams still in progress on siblings).
 
 ---
 
@@ -254,7 +254,7 @@ Priority: **P0 done** = merged onto `Dagger-linalg-ultra`. **P0 leftover** = fol
 | P1 | graph-partition | in progress | `linalg/graph-partition` | Graph / mesh partitioners as a `Blocks` alternative (or input to it) for sparse operators. | 2026-09-07 |
 | P1 | sparse-eigen | in progress | `linalg/sparse-eigen` | Sparse / matrix-free eigensolvers on `DArray` via ecosystem generics (no novel `Dagger.xyz` unless unavoidable). | 2026-09-07 |
 | P1 | mixed-precision | in progress | `linalg/mixed-precision` | Mixed-precision Krylov / apply / residual paths that stay sparse and do not densify. | 2026-09-07 |
-| P1 | gpu-pc | in progress | `linalg/gpu-pc` | Device-side preconditioner apply (block Jacobi / ILU / AMG / RAS) without host gather on the apply path. | 2026-09-07 |
+| P1 | gpu-pc | done | `linalg/gpu-pc` @ `430aa1b2` | Device-side block-PC apply (Jacobi / ILU / AMG / RAS) keeps GPU Krylov vectors in VRAM (`memory_space_scope`, vendor LU / `DeviceILU0`). CPU `array/linalg/iterativesolvers` 404 passed; ROCm RX 6800 XT `gpu_pc_defs` 14/14. CUDA / MPI×GPU / Metal / OpenCL / oneAPI not device-validated. | 2026-09-07 |
 | P1 | near-nullspace | in progress | `linalg/near-nullspace` | Near-nullspace / rigid-body modes into GlobalAMG / smoothed aggregation (builds on `Projected`). | 2026-09-07 |
 | P1 | block-krylov | in progress | `linalg/block-krylov` | Block / multi-RHS Krylov on `DArray` (ecosystem hooks, not a new solver type). | 2026-09-07 |
 | P1 | slicing | in progress | `linalg/slicing` | Distributed `getindex` / views / subarray slicing that preserves tile backend (no silent densify). | 2026-09-07 |
@@ -274,6 +274,7 @@ Priority: **P0 done** = merged onto `Dagger-linalg-ultra`. **P0 leftover** = fol
 | 2026-09-07 | `79fa35f5` `linalg/global-amg` @ `c7779f81` | Conflicts: `AGENTS.md` (lesson 32), `docs/src/iterative-solving.md` (kept ASM prose + GlobalAMG warning). |
 | 2026-09-07 | `e5e7eaaa` `linalg/operator-types` @ `9158cb47` | Conflict: `AGENTS.md` (lessons 33–34; Projected orthonormalize folded into 33). |
 | 2026-09-07 | tracking doc only | Assigned P0 leftovers (`numeric-refactor`, `global-amg-distributed-P`, `ras-symmetric`) and nine P1 workstreams to sibling agents. No feature-branch merges. |
+| 2026-09-07 | `eefca27c` `linalg/gpu-pc` @ `430aa1b2` | No conflicts (branch was based on integration HEAD). CPU iterativesolvers 404; ROCm `gpu_pc_defs` 14/14; CUDA unvalidated. |
 
 ## Remaining follow-ups
 
@@ -287,7 +288,7 @@ Unassigned leftover from P0:
 
 - **`inv` on a sparse-backed `DMatrix`** uses the sparse factor (`factorize` + `ldiv!` into `I`) rather than a dedicated sparse inverse. The result is still a dense `I` solve.
 
-`AGENTS.md` lessons 27–34 are the union of the per-workstream lesson 27s (LinearSolve `DefaultLinearSolver`; ASM Restricted / GMRES; GlobalAMG vs per-tile residual; qualify `cholesky!`/`mul!`; `SparseCOOBucket` not in datadeps; Projected orthonormalize / `Adjoint` `mul!`; `hvcat` is not `MatNest`). Lesson 20 remains unused (pre-existing gap).
+`AGENTS.md` lessons 27–35 are the union of the per-workstream lesson 27s (LinearSolve `DefaultLinearSolver`; ASM Restricted / GMRES; GlobalAMG vs per-tile residual; qualify `cholesky!`/`mul!`; `SparseCOOBucket` not in datadeps; Projected orthonormalize / `Adjoint` `mul!`; `hvcat` is not `MatNest`; GPU block-PC `ProcessScope` gather). Lesson 20 remains unused (pre-existing gap).
 
 ---
 
