@@ -399,3 +399,22 @@ lesson.
    type (`BlockOperator`) and cannot reuse `hvcat`. `BlockArrays.mortar`
    is the ecosystem name for the assembled case, but adding that dependency
    does not give you matrix-free blocks or field-split `mul!`.
+
+35. **Graph partitioning is a permutation plus geometric `Blocks`, not a new
+   tiling type.** `Blocks(k,k)` stays index-range tiles; unstructured meshes
+   need a vertex permutation so those tiles have few off-diagonal nonzeros.
+   Do not add `Dagger.metis` or `MetisBlocks`. The API is
+   `repartition(A, Blocks(k,k); partitioner=Metis)` /
+   `distribute(A, Blocks(k,k); partitioner=Metis)`, with `partition_graph`
+   as the extension hook (and the way to get a `perm` for the RHS). The
+   partitioner currently gathers the adjacency (`A+Aᵀ`); METIS is serial.
+   Schur LU still uses `_nested_dissection_partition` (separator), which
+   shares the k-way helper but is a different API — do not route Schur
+   through `repartition`. A callable `partitioner(A, nparts) -> Vector{Int}`
+   is the KaHIP/custom hook. After permuting `A` you must permute `b` with
+   the same `perm` (`repartition(b, Blocks(k); perm)`); otherwise you are
+   solving a different system. METIS is not a promise of bit-stability
+   across calls — compute `perm` once. `typeof(Metis)` is `Module`, so the
+   module path is `Val(nameof(partitioner))` (`Val{:Metis}`), not
+   `::typeof(Metis)`; `partitioner=Metis.partition` dispatches on the
+   function type. Two extensions must not both add `partition_graph(::Module, …)`.

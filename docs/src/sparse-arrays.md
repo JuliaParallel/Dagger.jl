@@ -217,6 +217,26 @@ C = A * A            # distributed sparse-sparse matmul -> sparse DArray
   copy) where needed, so nothing errors; matching partitionings avoid the
   overhead. The buffer keeps sparse tiles sparse, so aligning a sparse operand
   never densifies it.
+- **`Blocks` is geometric** (contiguous index ranges). On an unstructured mesh
+  that numbering is arbitrary, so geometric tiles cut many edges. Pass a graph
+  partitioner to [`repartition`](@ref) / `distribute` — METIS after
+  `using Metis`, or any `f(A, nparts) -> Vector{Int}`:
+
+```julia
+using Metis
+# nparts = cld(n, k). Result is still `Blocks(k, k)`, of `A[p, p]`.
+A2 = Dagger.repartition(A, Blocks(k, k); partitioner=Metis)
+
+# Same permutation on the RHS (compute `perm` once; do not ask METIS twice):
+perm = Dagger.partition_perm(Dagger.partition_graph(Metis, A, cld(n, k)))
+A2 = Dagger.repartition(A, Blocks(k, k); perm)
+b2 = Dagger.repartition(b, Blocks(k); perm)
+# solve A2 * x2 = b2, then x = x2[invperm(perm)]
+```
+
+  The partitioner gathers the adjacency (`A + Aᵀ`); METIS is serial. The
+  Schur-complement `splu` path still builds its own separator via the same
+  k-way helper — do not route that through `repartition`.
 
 ## Backends
 
@@ -245,4 +265,6 @@ suite; prefer `SparseArrays` unless you specifically need a Finch format.
 ```@docs
 Dagger.DSparseArray
 Dagger.repartition
+Dagger.partition_graph
+Dagger.partition_perm
 ```
