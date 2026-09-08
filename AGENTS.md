@@ -455,3 +455,27 @@ lesson.
    Jacobi sweeps each side of the V-cycle (lesson 32). This does not change
    [`AMGPreconditioner`](@ref) or [`GlobalAMG`](@ref). Coarse-grid `\`
    dispatch is lesson 36.
+
+38. **`view(::DArray, I...)` is a Base `SubArray`, on purpose.** `de64cb1b`
+   removed the DArray-valued `view` that used `lookup_parts`. Restoring it
+   is a breaking return-type change. `A[I, J]` is the copy that stays a
+   tiled `DArray` (same `Blocks` when ndims match). `copyto!` of those
+   views must go through `darray_copyto!` on `parent` / `parentindices` —
+   the catch-all `copyto!(::SubArray, ::StridedDArray)` used to wrap a
+   DArray parent as `view(parent, AutoBlocks())`, whose tiles are
+   SubArrays of a DArray, and the copy then scalar-indexed (one task per
+   element). Do not send a DArray parent through
+   `view(::AbstractArray, ::Blocks)`. `copyto!` of a StepRange view
+   throwing is intentional (`test/array/copyto.jl`); convert StepRange to
+   `Vector` only on the `getindex` path. Check index *lengths* before
+   `_copy_index`: a StepRange view into a differently-sized dest is
+   `DimensionMismatch`, and only same-length StepRange is the ArgumentError. Integer indices drop dimensions
+   like Base (`A[:, 5]` is a `DVector`); `A[:, 5:5]` stays n×1. Range
+   `getindex` must not call `length` on an integer (`to_indices` leaves
+   integers as integers). Allocate the same-ndims slice with `i:i`, copy,
+   then dropdims. `DArray{T}(undef, ...)` densifies; use `allocate_tiled`.
+   Linear `A[I]` on an N>1 array is a `SubArray` of a `ReshapedArray` of
+   the `DArray`, not a `SubArray` of the `DArray` — Base `copyto!` then
+   scalar-indexes; unwrap with `parent(parent(view))` and the linear
+   `parentindices`. `[]` is `Vector{Any}`, so copy-index helpers must
+   accept `AbstractVector`, not only `AbstractVector{<:Integer}`.
