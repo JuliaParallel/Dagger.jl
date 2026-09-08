@@ -434,7 +434,7 @@ On a regular 1-D / 2-D grid, `Dagger.GeometricMultigrid(DA)` is the geometric
 (PFMG-like) V-cycle; it does not change `GlobalAMG`.
 Other preconditioners: `Dagger.JacobiPreconditioner`,
 `Dagger.BlockJacobiPreconditioner`, `Dagger.AdditiveSchwarzPreconditioner`
-(core; overlapping restricted ASM), `Dagger.BlockILUPreconditioner`
+(core; overlapping ASM, `:restrict` or `:basic`), `Dagger.BlockILUPreconditioner`
 (load `IncompleteLU` on CPU, or CUDA/ROCm sparse for on-device ILU0), and `Dagger.BlockPreconditioner(A, build)` to plug in any
 third-party per-tile factory. Any object implementing `mul!(y, A, x)` over
 `DVector`s can be used as a matrix-free operator `A`.

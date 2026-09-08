@@ -220,7 +220,7 @@ The built-in preconditioners, from cheapest to strongest:
 |--------------------------------------|------------------------|--------------------------------------------|
 | [`Dagger.JacobiPreconditioner`](@ref)      | (core)            | scale by `1 ./ diag(A)`                    |
 | [`Dagger.BlockJacobiPreconditioner`](@ref) | (core)            | exact `lu` solve per diagonal tile         |
-| [`Dagger.AdditiveSchwarzPreconditioner`](@ref) | (core)        | overlapping ASM (`PC_ASM_RESTRICT`; default overlap 1) |
+| [`Dagger.AdditiveSchwarzPreconditioner`](@ref) | (core)        | overlapping ASM (`:restrict` default, or `:basic` for CG) |
 | [`Dagger.BlockILUPreconditioner`](@ref)    | `IncompleteLU` or CUDA/ROCm sparse | incomplete-LU per tile (`τ` on host; vendor ILU0 on GPU) |
 | [`Dagger.AMGPreconditioner`](@ref)         | `AlgebraicMultigrid` | AMG V-cycle **per diagonal tile** (additive Schwarz) |
 | [`Dagger.GlobalAMG`](@ref)                 | `AlgebraicMultigrid` | true coarse grid over the whole `DMatrix` |
@@ -231,17 +231,29 @@ using AlgebraicMultigrid, IncompleteLU
 
 x, _ = Krylov.cg(DA, b; M = Dagger.BlockJacobiPreconditioner(DA))
 x, _ = Krylov.gmres(DA, b; M = Dagger.AdditiveSchwarzPreconditioner(DA; overlap = 1))
+x, _ = Krylov.cg(DA, b; M = Dagger.AdditiveSchwarzPreconditioner(DA; type = :basic))
 x, _ = Krylov.cg(DA, b; M = Dagger.BlockILUPreconditioner(DA; τ = 0.01))
 x, _ = Krylov.gmres(DA, b; M = Dagger.AMGPreconditioner(DA; method = :ruge_stuben))
 x, _ = Krylov.gmres(DA, b; M = Dagger.SmoothedAggregationPreconditioner(DA))
 x, _ = Krylov.gmres(DA, b; M = Dagger.GeometricMultigrid(DA))  # 1-D; pass grid=(nx,ny) for 2-D
 ```
 
-`AdditiveSchwarzPreconditioner` is overlapping restricted additive Schwarz
-(PETSc `PCASM` / `PC_ASM_RESTRICT`): each tile solves a halo-expanded diagonal
-block and writes back only its interior. `overlap = 0` is
-`BlockJacobiPreconditioner`; the default `overlap = 1` is PETSc's default
-multiprocess PC. Overlap rows gather neighbor tiles onto the tile's worker.
+`AdditiveSchwarzPreconditioner` is overlapping additive Schwarz (PETSc
+`PCASM`). Each tile solves a halo-expanded diagonal block. The `type`
+keyword chooses the interpolation:
+
+- `:restrict` (default, `PC_ASM_RESTRICT`): write back only the owned
+  interior. Typically the stronger GMRES / BiCGStab option. It is
+  **nonsymmetric**, so `cg` can take *more* iterations with overlap than
+  without (seen 15 → 171 on a 64×64 Laplacian). That pairing is a documented
+  leftover, not a supported SPD path.
+- `:basic` (`PC_ASM_BASIC`): scatter-add the whole subdomain solve onto the
+  overlapping indices. Restriction and interpolation are adjoints, so `P`
+  is SPD when `A` is — this is the option to pass as `M` to `cg` / `minres`.
+
+`overlap = 0` is `BlockJacobiPreconditioner` for either type; the default
+`overlap = 1` is PETSc's default. Overlap rows gather neighbor tiles onto
+the tile's worker.
 
 !!! warning "`stats.solved` is not `Ax ≈ b` for per-tile AMG"
     `AMGPreconditioner` is block-diagonal. Left-preconditioned Krylov can
@@ -387,7 +399,8 @@ additive Schwarz; aggregation AMG is still `GlobalAMG`.
 - **Strong per-subdomain coupling:** `BlockJacobiPreconditioner` (exact tile
   solves) is stronger than diagonal Jacobi. For unstructured problems that
   need neighbor coupling, `AdditiveSchwarzPreconditioner` (overlap 1–2) is
-  the PETSc-default next step.
+  the PETSc-default next step. Use `type = :restrict` (default) with
+  `gmres`; use `type = :basic` with `cg`.
 
 ## Sparse direct solvers
 
