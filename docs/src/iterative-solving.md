@@ -501,6 +501,11 @@ The same path works for matrix-free operators that already have `mul!` over
 nullspace basis; [`BlockOperator`](@ref) needs `v0::DVector`. This is not
 ScaLAPACK dense geev and does not return the full spectrum.
 
+`schur(::DMatrix)` is the dense-tile reduction: it `collect`s and runs
+LAPACK `gees`. That is **not** a replacement for `eigen` and it **throws**
+on a sparse-backed `DMatrix` (it would densify). There is no tiled
+ScaLAPACK Schur.
+
 ## Sparse direct solvers
 
 A sparse-backed `DMatrix` used as `A \ b` (or `ldiv!` / `lu` / `factorize`)

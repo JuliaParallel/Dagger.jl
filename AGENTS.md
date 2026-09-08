@@ -630,3 +630,10 @@ lesson.
    writes column solutions of length `n` into an `m×p` dest. Use
    `_direct_solve` (`fact \\ B`). Dense `ib` / `p` keywords throw on
    sparse tiles. Check `‖Ax−b‖` against host `qr(A)\\b`.
+
+47. **`schur(::DMatrix)` must `collect`, and must refuse sparse tiles.**
+   LinearAlgebra's generic `schur` is `schur!(Matrix(A))`. `Matrix(::DArray)`
+   scalar-indexes. Hook `schur` / `schur!` and gather dense tiles only.
+   A sparse-backed `DMatrix` hitting that path is the same densify footgun
+   as generic `eigen` (lesson 43) — throw, and leave LOBPCG `eigen` as the
+   few-pair entry. This is not ScaLAPACK; `schur!` is not in-place on tiles.

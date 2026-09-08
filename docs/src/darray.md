@@ -740,6 +740,7 @@ From `LinearAlgebra`:
 - `inv` (Out-of-place matrix inversion, including via SVD)
 - `svd`/`svd!`/`svdvals!` (In-place/Out-of-place Singular Value Decomposition)
 - `eigen`/`eigvals` (iterative LOBPCG; a few extreme eigenpairs, not dense geev)
+- `schur`/`schur!` (dense tiles: gather then LAPACK; sparse-backed throws — would densify)
 
 From `AbstractFFTs`:
 - `fft`/`fft!`
