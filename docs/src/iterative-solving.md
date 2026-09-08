@@ -62,9 +62,10 @@ x = Krylov.solution(workspace)
 
 as does every method Krylov exposes — `cg`, `cr`, `car`, `minres`, `minares`,
 `minres_qlp`, `symmlq`, `cg_lanczos`, `gmres`, `fgmres`, `fom`, `diom`,
-`dqgmres`, `bicgstab`, `cgs`, `bilq`, `qmr`, and the rectangular least-squares
-family (`lsqr`, `lsmr`, `lslq`, `cgls`, `crls`). Preconditioners are passed the
-usual way, as `M`:
+`dqgmres`, `bicgstab`, `cgs`, `bilq`, `qmr`, the rectangular least-squares
+family (`lsqr`, `lsmr`, `lslq`, `cgls`, `crls`), and the **block** methods
+`block_gmres` / `block_minres` for a `DMatrix` right-hand side. Preconditioners
+are passed the usual way, as `M`:
 
 ```julia
 x, stats = Krylov.cg(DA, b; M = Dagger.BlockJacobiPreconditioner(DA))
@@ -100,14 +101,41 @@ implementation, so there is no reason to prefer them in new code.
 | [`Dagger.cg`](@ref)        | symmetric positive-definite | cheapest; the PDE workhorse        |
 | [`Dagger.minres`](@ref)    | symmetric (indefinite ok)   | saddle-point / indefinite systems  |
 | [`Dagger.gmres`](@ref)     | general nonsymmetric        | robust; `restart`/`memory` to bound memory |
-| [`Dagger.bicgstab`](@ref)  | general nonsymmetric        | short recurrence, low memory       |
+| [`Dagger.bicgstab`](@ref)     | general nonsymmetric        | short recurrence, low memory       |
+| [`Dagger.block_gmres`](@ref)  | general, many RHS (`DMatrix`) | one `mul!(W, A, P)` per iteration |
+| [`Dagger.block_minres`](@ref) | Hermitian, many RHS         | same, for SPD / symmetric `A`      |
 
 [`Dagger.krylov_solve`](@ref) is a generic entry point taking the method as a
-symbol (`:cg`, `:minres`, `:gmres`, `:bicgstab`):
+symbol (`:cg`, `:minres`, `:gmres`, `:bicgstab`, `:block_gmres`, `:block_minres`):
 
 ```julia
 x, stats = Dagger.krylov_solve(:gmres, DA, b; memory=50)
+X, stats = Dagger.krylov_solve(:block_gmres, DA, DB)
 ```
+
+## Multiple right-hand sides
+
+`A \\ B` / `ldiv!(X, A, B)` with `B::DMatrix` follows Base: the dense LU/QR/Cholesky
+paths already accept a matrix RHS. A sparse-backed `A` does **not** gather
+columns and run `p` independent Krylov solves. When only `Krylov` is loaded,
+`lu(A) \\ B` / `A \\ B` calls [`block_gmres`](@ref). `LinearSolve.solve` with a
+`DMatrix` `b` is the SciML entry: `KrylovJL_GMRES` / `KrylovJL_MINRES` use
+Krylov's block workspaces; a small sparse `A` still defaults to the pinned
+direct factor, which already accepts `F \\ B`.
+
+```julia
+using SparseArrays, Krylov
+
+A  = distribute(sprand(2000, 2000, 0.005) + 10I, Blocks(500, 500))
+B  = distribute(rand(2000, 8), Blocks(500, 500))
+
+X, stats = Krylov.block_gmres(A, B)   # or A \\ B when no sparse-direct backend
+```
+
+The tall n×p Krylov basis stays a `DMatrix` (same row blocking as `B`). The
+p×p Hessenberg that block-GMRES Householder-QRs stays a host `Matrix` — `p` is
+the number of right-hand sides, not the operator size. Check `‖A*X - B‖`, not
+only `stats.solved` (the same residual caveat as the other Krylov paths).
 
 ## Matrix-free operators
 
@@ -420,6 +448,8 @@ Dagger.cg
 Dagger.minres
 Dagger.gmres
 Dagger.bicgstab
+Dagger.block_gmres
+Dagger.block_minres
 Dagger.krylov_solve
 Dagger.Projected
 Dagger.project!

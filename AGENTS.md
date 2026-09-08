@@ -399,3 +399,20 @@ lesson.
    type (`BlockOperator`) and cannot reuse `hvcat`. `BlockArrays.mortar`
    is the ecosystem name for the assembled case, but adding that dependency
    does not give you matrix-free blocks or field-split `mul!`.
+
+35. **Block Krylov cannot use one `SM` type for both the tall basis and the Hessenberg.**
+   Krylov's `BlockGmresWorkspace` / `BlockMinresWorkspace` allocate every
+   matrix as `SM(undef, m, n)` with `SM = typeof(B)`. A `DMatrix` type does
+   not record its block size (the same reason as the vector
+   `KrylovConstructor` hook), and the p×p / 2p×p blocks are Householder-QR'd
+   and range-indexed — a `DMatrix` there is scalar getindex. Keep tall n×p
+   blocks as a *dense* `DMatrix` with `B`'s row blocking (`similar(B)` would
+   densify a sparse-backed RHS into sparse tiles that cannot Householder)
+   and keep the Hessenberg as a host `Matrix`. Tall QR gathers the n×p
+   panel (the size of `B`); the operator apply is `mul!(W, A, P)`, not a
+   Julia loop of `A \\ b`. `A \\ B` / `SparseIterativeFactorization` must
+   call `block_gmres`. Mixed `DMatrix` × host `Matrix` GEMM wraps the host
+   side as a single-tile view — do not `collect` the tall factor.
+   `LinearSolve`'s `KrylovJL_GMRES` / `KrylovJL_MINRES` are the ecosystem
+   entry for a `DMatrix` RHS; do not invent a `Dagger.xyz` block solver.
+   Check `‖AX−B‖`, not only `stats.solved`.
