@@ -1649,6 +1649,7 @@ per-partition results back together.
 function _hierarchical_schedule_cache_lookup(scheduler::DataDepsScheduler,
                                              seen_tasks::Vector{DTaskPair})
     dag_spec = DAGSpec()
+    datadeps_uses_aot(scheduler) || return dag_spec, nothing
     for (spec, task) in seen_tasks
         dag_add_task!(dag_spec, spec, task) || break
     end

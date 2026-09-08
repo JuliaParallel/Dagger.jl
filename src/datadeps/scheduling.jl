@@ -246,6 +246,31 @@ end
 
 ### JIT Schedulers ###
 
+"""
+    datadeps_schedule_task(scheduler, state, all_procs, all_scope, task_scope, spec, task)
+
+Choose a processor for one task, at launch time.
+
+The default exists for schedulers that implement only
+`datadeps_schedule_dag_aot!`: an AOT pass is allowed to leave tasks unplanned,
+and does so routinely — `dag_add_task!` stops at the first task consuming
+another in-region task's result, and a per-partition build additionally stops
+at a producer living in another partition. Those tasks still need a processor,
+so they round-robin rather than raising a `MethodError`.
+"""
+# N.B. Every argument after `sched` is left untyped deliberately. A user
+# scheduler's own method is conventionally written with untyped trailing
+# arguments (see the `DataDepsScheduler` docs), so narrowing `spec`/`task` here
+# would make this method *more* specific in those positions while being *less*
+# specific in the first -- neither would dominate, and every such call would be
+# an ambiguity error rather than dispatching to the user's method.
+function datadeps_schedule_task(sched::DataDepsScheduler, state, all_procs, all_scope,
+                                task_scope, spec, task)
+    return datadeps_schedule_task(AOT_JIT_FALLBACK[], state, all_procs, all_scope,
+                                  task_scope, spec, task)
+end
+
+
 # Default for user-defined schedulers with a zero-arg constructor. Schedulers
 # that carry mutable state should specialize `similar` to return a fresh shard
 # (used when hierarchical scheduling clones a scheduler per partition).
@@ -288,6 +313,11 @@ function datadeps_schedule_task(sched::RoundRobinScheduler, state::Union{DataDep
     sched.proc_idx = proc_idx
     return our_proc
 end
+
+# Fallback round-robin state for schedulers that only plan ahead. Task-local so
+# the rotation is preserved across the tasks of one region without racing
+# between the hierarchical path's concurrent per-partition scheduling tasks.
+const AOT_JIT_FALLBACK = TaskLocalValue{RoundRobinScheduler}(()->RoundRobinScheduler())
 
 struct NaiveScheduler <: DataDepsScheduler end
 Base.similar(::NaiveScheduler) = NaiveScheduler()
@@ -396,6 +426,25 @@ end
 ### AOT Schedulers ###
 
 """
+    datadeps_uses_aot(scheduler) -> Bool
+
+Whether `scheduler` plans placements for a whole region ahead of time (i.e. it
+has a `datadeps_schedule_dag_aot!` method). Defaults to `false`.
+
+This gates the AOT machinery, and it is not merely an optimization: building a
+`DAGSpec` is not free and not side-effect-free. `dag_add_task!` `fetch`es every
+`DTask` argument and computes `aliasing` for each argument of each task, on the
+submitting process. For a JIT scheduler that never reads the result, that is
+`O(tasks x args)` of pure overhead per region, and it forces aliasing to be
+resolved locally for data that may live on another worker.
+
+So a scheduler must opt in, and `RoundRobinScheduler`/`NaiveScheduler`/
+`UltraScheduler` take exactly the path they did before AOT existed.
+"""
+datadeps_uses_aot(::DataDepsScheduler) = false
+
+
+"""
     datadeps_schedule_dag_aot!(scheduler, schedule, dag_spec, all_procs, all_scope)
 
 Plan placements for a whole Datadeps region ahead of time, filling `schedule`
@@ -488,6 +537,7 @@ the primitives `greedy_assign_task!`, `greedy_schedule!`, `cost_of_schedule`,
 and `ScheduleState` are exposed for that reuse.
 """
 struct GreedyScheduler <: DataDepsScheduler end
+datadeps_uses_aot(::GreedyScheduler) = true
 
 mutable struct ScheduleState
     task_finish_ns::Dict{Int, Float64}
@@ -766,6 +816,7 @@ IteratedGreedyScheduler(; kwargs...) = IteratedGreedyScheduler(GreedyScheduler()
 # recursively call `similar` on the inner scheduler so its own mutable state is
 # refreshed too. Static configuration (n_iters, destroy_frac) carries through
 # unchanged so the shard's behaviour matches the original's.
+datadeps_uses_aot(::IteratedGreedyScheduler) = true
 Base.similar(s::IteratedGreedyScheduler) =
     IteratedGreedyScheduler(similar(s.inner);
                             n_iters=s.n_iters,
@@ -1071,6 +1122,7 @@ SimulatedAnnealingScheduler(; kwargs...) =
 # hands each partition its own scheduler shard, so we deep-copy the RNG and
 # recursively refresh the inner scheduler, while preserving the parameterisation
 # (q, k, n_restarts).
+datadeps_uses_aot(::SimulatedAnnealingScheduler) = true
 Base.similar(s::SimulatedAnnealingScheduler) =
     SimulatedAnnealingScheduler(similar(s.inner);
                                  q=s.q, k=s.k, n_restarts=s.n_restarts,
@@ -1427,6 +1479,7 @@ end
 # mutable state and only immutable config fields; return a fresh instance with
 # the same configuration so hierarchical partition shards behave identically
 # to the original.
+datadeps_uses_aot(::JuMPScheduler) = true
 Base.similar(s::JuMPScheduler) =
     JuMPScheduler(s.optimizer; Z=s.Z, time_limit_sec=s.time_limit_sec)
 
@@ -1527,6 +1580,7 @@ end
 # JuMP/SA/IG/Greedy pipeline fresh per invocation), so only the RNG needs a
 # deep copy; every other field is immutable configuration and is forwarded
 # verbatim.
+datadeps_uses_aot(::OptimizingScheduler) = true
 Base.similar(s::OptimizingScheduler) =
     OptimizingScheduler(; optimizer=s.optimizer,
                           milp_threshold=s.milp_threshold,
@@ -1589,6 +1643,7 @@ function datadeps_schedule_dag_aot!(sched::OptimizingScheduler, schedule, dag_sp
 end
 
 struct LayeredScheduler <: DataDepsScheduler end
+datadeps_uses_aot(::LayeredScheduler) = true
 function datadeps_schedule_dag_aot!(scheduler::LayeredScheduler, schedule, dag_spec, all_procs, all_scope)
     layer = 1
     layer_data = Vector{Any}()

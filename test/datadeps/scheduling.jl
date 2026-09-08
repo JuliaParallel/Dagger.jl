@@ -516,6 +516,7 @@ end
 # A scheduler that opts out of all caching by always returning false.
 struct NoCacheScheduler <: DataDepsScheduler end
 Dagger.datadeps_dag_equivalent(::NoCacheScheduler, ::DAGSpec, ::DAGSpec) = false
+Dagger.datadeps_uses_aot(::NoCacheScheduler) = true
 function Dagger.datadeps_schedule_dag_aot!(::NoCacheScheduler, schedule, dag_spec, all_procs, all_scope)
     for idx in 1:Dagger.nv(dag_spec.g)
         task = dag_spec.id_to_task[idx]
@@ -549,6 +550,7 @@ Dagger.datadeps_ainfo_equivalent(::PtrStrictScheduler,
                                  a1::Dagger.AbstractAliasing,
                                  a2::Dagger.AbstractAliasing) =
     hash(a1) == hash(a2)
+Dagger.datadeps_uses_aot(::PtrStrictScheduler) = true
 function Dagger.datadeps_schedule_dag_aot!(::PtrStrictScheduler, schedule, dag_spec, all_procs, all_scope)
     for idx in 1:Dagger.nv(dag_spec.g)
         task = dag_spec.id_to_task[idx]

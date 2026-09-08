@@ -165,7 +165,10 @@ function datadeps_build_schedule!(scheduler::DataDepsScheduler,
                                   pairs::Vector{DTaskPair},
                                   all_procs, all_scope;
                                   region_uids::Union{Set{UInt},Nothing}=nothing)
+    # A JIT scheduler never reads the result, and building the spec is neither
+    # free nor side-effect-free (see `datadeps_uses_aot`), so don't build one.
     dag_spec = DAGSpec()
+    datadeps_uses_aot(scheduler) || return dag_spec, Dict{DTask, Processor}()
     for (spec, task) in pairs
         if region_uids !== nothing && _spec_has_region_dtask_arg(spec, region_uids)
             # Produced by an in-region task that may live outside `pairs`;
