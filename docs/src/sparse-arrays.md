@@ -12,6 +12,9 @@ sparse backend:
 
 - **`SparseArrays`** (the standard library) — tiles are `SparseMatrixCSC` /
   `SparseVector` on the CPU. This is the default, well-supported backend.
+- **`SparseMatricesCSR`** — tiles are `SparseMatrixCSR`. CSC is a poor host
+  SpMV / GPU format; CSR keeps the same `mul!` / SpMV / SpGEMM paths without
+  densifying. GPU backends may still store vendor CSC.
 - **GPU + `SparseArrays`** — under a GPU compute scope (`cuda_gpu`, `rocm_gpu`,
   `cl_device`, `metal_gpu`, `intel_gpu`), tiles use the vendor sparse type when
   available (CUDA cuSPARSE / AMDGPU rocSPARSE) or else
@@ -45,6 +48,24 @@ DA = distribute(A, Blocks(250, 250)) # a 4×4 grid of sparse tiles
 ```
 
 Each tile is a sparse matrix in its own right, stored on one of the workers.
+
+`distribute` also accepts a `SparseMatrixCSR` (from SparseMatricesCSR.jl) and
+keeps the tiles in CSR — do not go through a dense `Matrix` slice:
+
+```julia
+using SparseMatricesCSR
+A = sparsecsr(sprand(1000, 1000, 0.01))
+DA = distribute(A, Blocks(250, 250))          # CSR tiles
+DR = sparsecsr(distribute(sprand(1000, 1000, 0.01), Blocks(250, 250)),
+               Blocks(250, 250))              # convert existing CSC tiles
+S  = sparsecsr(DA)                            # gather to one SparseMatrixCSR
+```
+
+`sparsecsr(A::DMatrix)` gathers, like `sparse(A)` → `SparseMatrixCSC`.
+`sparsecsr(A, Blocks(...))` is the tile-preserving convert. COO assembly
+`sparsecsr(I, J, V, m, n, Blocks(...))` and `spzeroscsr(Blocks(...), T, m, n)`
+match the SparseArrays `sparse` / `spzeros` spellings. There is no
+`Dagger.to_csr`.
 
 ### Allocating directly
 
@@ -121,7 +142,7 @@ small mutable container holding the actual sparse storage (`mat`):
 
 ```julia
 mutable struct DSparseArray{T,N} <: AbstractArray{T,N}
-    mat   # e.g. a SparseMatrixCSC, SparseVector, or Finch.Tensor
+    mat   # e.g. a SparseMatrixCSC, SparseMatrixCSR, SparseVector, or Finch.Tensor
 end
 ```
 
@@ -159,8 +180,8 @@ tracked correctly.
 
 ### Bare sparse arguments
 
-You can also hand a plain `SparseMatrixCSC` (or `SparseVector`, Finch tensor, or
-GPU CSC) straight to a Datadeps task. Since such a container has no identity
+You can also hand a plain `SparseMatrixCSC` (or `SparseMatrixCSR`,
+`SparseVector`, Finch tensor, or GPU CSC) straight to a Datadeps task. Since such a container has no identity
 Datadeps can track, it is **adopted into a `DSparseArray`** — holding a private
 copy — for the duration of the region, and the task receives that wrapper:
 
@@ -225,6 +246,18 @@ C = A * A            # distributed sparse-sparse matmul -> sparse DArray
 Tiles are `SparseMatrixCSC` (matrices) or `SparseVector` (vectors). This backend
 provides efficient SpMV (including transposed/adjoint operands) and uses
 `SparseArrays`' own `*` for sparse–sparse products.
+
+### `SparseMatricesCSR` (host CSR)
+
+Loading `SparseMatricesCSR` lets tiles be `SparseMatrixCSR`. Forward SpMV uses
+the package's row-wise `mul!`; SpGEMM and transposed SpMV convert the *tile* to
+CSC (not a dense `Matrix`) and write the result back in the destination tile's
+format. `similar` / `repartition` still allocate empty CSC tiles (the
+`DArray` type does not record the inner format); `copyto!` of a whole CSR tile
+restores CSR, and `sparsecsr(A, part)` converts after a re-tile.
+
+Block-sparse (BSR) is not implemented here: there is no host ecosystem BSR type
+to dispatch on.
 
 ### `Finch` (experimental)
 

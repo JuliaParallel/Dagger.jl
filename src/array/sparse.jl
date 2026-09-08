@@ -142,13 +142,14 @@ end
 Whether `x` is a bare sparse container that Datadeps must see through a
 [`DSparseArray`](@ref) wrapper rather than directly.
 
-Such containers reallocate their storage on write and (for `SparseMatrixCSC` and
-Finch tensors) are *immutable* structs, so they have no stable object identity to
-hang whole-object aliasing off of, and no meaningful data pointer for the span
-machinery. `DSparseArray` supplies both.
+Such containers reallocate their storage on write and (for `SparseMatrixCSC`,
+`SparseMatrixCSR`, and Finch tensors) are *immutable* structs, so they have no
+stable object identity to hang whole-object aliasing off of, and no meaningful
+data pointer for the span machinery. `DSparseArray` supplies both.
 
 Sparse backends opt their storage types in (see `ext/SparseArraysExt.jl`,
-`ext/FinchExt.jl`, and the GPU sparse extensions); this single trait drives both
+`ext/SparseMatricesCSRExt.jl`, `ext/FinchExt.jl`, and the GPU sparse
+extensions); this single trait drives both
 [`maybe_wrap_tile`](@ref) and Datadeps' automatic wrapping of user-provided
 sparse arguments.
 """
@@ -172,7 +173,7 @@ maybe_wrap_tile(x) = wraps_as_sparse_tile(x) ? wrap_sparse_tile(x) : copy(x)
 
 # Wrap sparse storage, taking ownership of a private copy of it (see
 # `maybe_wrap_tile`). `_sparse_copy` is the backend-overridable deep copy, so
-# this works for host CSC, device CSC, and Finch tensors alike.
+# this works for host CSC/CSR, device CSC, and Finch tensors alike.
 wrap_sparse_tile(x) = DSparseArray(_sparse_copy(x))
 
 # Partial-range tile copy used by copy-buffering (e.g. when matmul operands need

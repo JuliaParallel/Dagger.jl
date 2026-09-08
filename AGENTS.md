@@ -399,3 +399,18 @@ lesson.
    type (`BlockOperator`) and cannot reuse `hvcat`. `BlockArrays.mortar`
    is the ecosystem name for the assembled case, but adding that dependency
    does not give you matrix-free blocks or field-split `mul!`.
+
+35. **Host CSR tiles need range `getindex` and a rebuild `copyto_view`.**
+   `SparseMatrixCSR` only implements scalar `getindex` / in-pattern
+   `setindex!`. `distribute(csr, Blocks)` slices with `A[I, J]`
+   (`ArrayDomain` UnitRanges); the generic `AbstractArray` path `similar`s a
+   dense `Matrix` and then `setindex!`s structural zeros, which throws (or
+   densifies if `similar` is dense). Provide a range `getindex` that goes
+   CSC→slice→CSR. The same trap hits repartition: `_sparse_copyto_view!`
+   via `copyto!(view(csr, …))` cannot insert nonzeros — rebuild through
+   CSC. `sparsecsr(::DMatrix)` must gather via `sparse(A)`:
+   SparseMatricesCSR's `convert(SparseMatrixCSR, ::AbstractMatrix)`
+   transposes the `DMatrix` and densifies. GPU vendor tiles may stay CSC;
+   host CSR is the SpMV win. BSR has no host ecosystem type (`BlockArrays`
+   is dense mortar; `CuSparseMatrixBSR` is device-only) — do not invent
+   `Dagger.BSR`.
