@@ -568,3 +568,23 @@ lesson.
    The `DaggerSparseLU \ DVector` tie-breaker this workstream also hit is
    already lesson 36 (`_solve_pinned_dvector`); do not add a second `invoke`
    method. Dense tiled SVD (`src/array/svd.jl`) is unchanged.
+
+44. **Host CSR tiles need range `getindex` and a rebuild `copyto_view`.**
+   `SparseMatrixCSR` only implements scalar `getindex` / in-pattern
+   `setindex!`. `distribute(csr, Blocks)` slices with `A[I, J]`
+   (`ArrayDomain` UnitRanges); the generic `AbstractArray` path `similar`s a
+   dense `Matrix` and then `setindex!`s structural zeros, which throws (or
+   densifies if `similar` is dense). Provide a range `getindex` that goes
+   CSC→slice→CSR. The same trap hits repartition: `_sparse_copyto_view!`
+   via `copyto!(view(csr, …))` cannot insert nonzeros — rebuild through
+   CSC. `sparsecsr(::DMatrix)` must gather via `sparse(A)`:
+   SparseMatricesCSR's `convert(SparseMatrixCSR, ::AbstractMatrix)`
+   transposes the `DMatrix` and densifies. Empty CSR tiles are
+   `SparseMatrixCSR(spzeros(T, dims...))` — `spzeroscsr` is not in
+   SparseMatricesCSR 0.6 (only later master), and importing it unloads the
+   whole extension so `distribute(csr)` densifies. GPU vendor tiles may stay
+   CSC; host CSR is the SpMV win. BSR has no host ecosystem type
+   (`BlockArrays` is dense mortar; `CuSparseMatrixBSR` is device-only) — do
+   not invent `Dagger.BSR`. The `DaggerSparseLU \ DVector` tie-breaker this
+   workstream also hit is already lesson 36 (`_solve_pinned_dvector`); do
+   not add a second method.

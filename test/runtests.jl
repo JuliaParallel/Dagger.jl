@@ -43,6 +43,7 @@ tests = [
     ("Array - LinearAlgebra - Arithmetic", "array/linalg/arithmetic.jl"),
     ("Array - LinearAlgebra - Matmul", "array/linalg/matmul.jl"),
     ("Array - LinearAlgebra - Matmul (Sparse, quick)", "array/linalg/matmul_sparse.jl"),
+    ("Array - LinearAlgebra - Matmul (CSR, quick)", "array/linalg/matmul_csr.jl"),
     ("Array - LinearAlgebra - Matmul (Finch, quick)", "array/linalg/matmul_finch.jl"),
     ("Array - LinearAlgebra - Cholesky", "array/linalg/cholesky.jl"),
     ("Array - LinearAlgebra - Sparse Cholesky / IC", "array/linalg/sparsechol.jl"),

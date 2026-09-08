@@ -366,7 +366,9 @@ collect(DA) # returns a `Matrix{Float64}`
 ## Quickstart: Sparse Arrays
 
 A `DArray` can hold sparse tiles, giving a distributed, tiled sparse matrix.
-Load a sparse backend (`SparseArrays`) to enable it.
+Load a sparse backend (`SparseArrays`) to enable it. Load
+`SparseMatricesCSR` as well if you want CSR tiles (better host SpMV) instead
+of the default CSC.
 
 For more details: [Sparse Distributed Arrays](@ref)
 
