@@ -287,6 +287,7 @@ Priority: **P0 done** = merged onto `Dagger-linalg-ultra`. **P0 leftover** = fol
 | 2026-09-07 | `167f047d` `linalg/sparse-eigen` @ `10594d72` | Conflicts: `AGENTS.md` (kept 35–42; incoming eigen lesson 35 is 43; incoming lesson 36 already lesson 36), `src/array/sparsedirect.jl` (kept ultra `_solve_pinned_dvector`; dropped incoming `_pinned_solve` / Union `\\` / duplicate `DaggerSparseLU \\ DVector`). `FEATURES_ROADMAP.md` unchanged (Performance-table / Indexing-Slicing row kept). Docs/`Dagger.jl`/`runtests` auto-merged; new `eigen.jl` + tests. Dense `svd.jl` untouched. AWS: Eigen 34, SVD 419. |
 | 2026-09-07 | `d266fe02` `linalg/csr-bsr` @ `775d4d4a` | Conflicts: `AGENTS.md` (kept 35–43 after sparse-eigen; incoming CSR lesson 35 is 44; incoming lesson 36 already lesson 36). Auto-merge also duplicated `DaggerSparseLU \ DVector`; kept ultra `_solve_pinned_dvector` (incoming method dropped; `sparsedirect.jl` therefore unchanged vs HEAD). `FEATURES_ROADMAP.md` unchanged (Performance-table / Indexing-Slicing row kept). Docs/`sparse.jl`/`Project.toml`/`runtests` auto-merged; new `SparseMatricesCSRExt` + `matmul_csr.jl`. CSC path in `SparseArraysExt` unchanged. **BSR deferred** (no host ecosystem type). AWS CSR 83, full array/linalg green. |
 | 2026-09-07 | `c835b8ab` `linalg/block-krylov` @ `22cc9ae0` | Conflicts: `AGENTS.md` (kept 35–44; incoming block-krylov lesson 35 is 45), `ext/LinearSolveExt.jl` (union: incoming `_require_darray_rhs` / `DMatrix` RHS plus HEAD `lu!` reuse), `src/array/mul.jl` (kept HEAD mixed-eltype GEMM; took incoming host×`DMatrix` GEMM), `test/array/linalg/linearsolve.jl` (kept both `lu!` reuse and multi-RHS testsets). Auto-merge also duplicated `DaggerSparseLU \\ DVector`; kept ultra `_solve_pinned_dvector` and dropped the incoming `invoke`. `FEATURES_ROADMAP.md` / Performance tables unchanged. AWS: iterativesolvers 421, LinearSolve 34. |
+| 2026-09-08 | tracking doc + profile harness | `linalg_profile.jl` (`LINALG_BENCH_PROFILE=…`) and a Bottlenecks section from AWS MT profiles at `862841e5`. No Dagger API changes. |
 
 ## Remaining follow-ups
 
@@ -385,6 +386,58 @@ rows are omitted, not invented. `jps/datadeps-region-async` was not rebased.
 - **MPI hangs** (300 s deadlock detector, rank 0 ↔ rank 3 `recv`/`send`/`bcast_meta`): dense Cholesky, dense QR (also hung at 900 s and was aborted), sparse SpMV, sparse `cholesky`/`klu`/`splu`, incremental `sparse(I,J,V, Blocks)`, numeric `lu!(F,A)`, mixed-eltype SpMV. No times published.
 - **MPI not launched** (too likely to hang given the above, or no GPU): Krylov CG/GMRES and all PCs (Jacobi, BlockJacobi, BlockILU, per-tile AMG, GlobalAMG, RAS `:restrict`/`:basic`, GMG), LinearSolve, `eigen`, CSR SpMV, graph Metis, multi-RHS, GPU-PC. No distributed non-Dagger baseline.
 - **`jps/datadeps-region-async`:** not rebased; no second column.
+
+### Bottlenecks (MT profile, 2026-09-08)
+
+Reusable profile harness: `benchmark/suites/linalg_profile.jl`, same driver
+(`LINALG_BENCH_PROFILE=1|cpu|alloc|logs|all`). Deep warmup (10) + min of 5
+`Base.gc_num` deltas (AGENTS.md lesson 4), then one `Profile.@profile` pass and
+one `enable_logging!` / `fetch_logs!` pass. **Unlogged wall times are the
+truth**; log category times are *sums* over overlapping events and include
+logging overhead, so they can exceed wall. CPU-sample buckets count a frame if
+it appears anywhere in the sample: with 16 processor-runner threads, `other`
+is ~100% (`pthread_cond_wait` / `poptask`) and `scheduler` is ~48%
+(`Sch.jl` `start_processor_runner!`). That is idle-thread evidence, not
+“half the useful work is the scheduler.”
+
+**Hardware / software:** AWS `c6i.4xlarge` (16 vCPU, 32 GiB, `us-east-1`),
+Julia 1.12.7, 16 Julia threads, Dagger SHA **`862841e5`**, job
+`5d72cfb887d5a4a8` (`linalg-profile-mt`, then `done`). Raw:
+`benchmark/results/linalg_profile_mt.json`. Score is roughly
+`frequency × remaining_gap × fixability` (each 1–10). Published full-solve
+times below are from the MT table (SHA `292cd672`); profile applies are SHA
+`862841e5` on the same instance class.
+
+**Not profiled (no invented numbers):** MPI (same hang list as the table);
+full 192-iter GMRES (used `itmax=8`); GlobalAMG / `klu` / `splu` / `eigen` /
+CSR / mixed-eltype / multi-RHS / GPU; `jps/datadeps-region-async` second
+column (shared branches were not rebased).
+
+#### Ranked list
+
+| Rank | Bucket | Item | Score | Frequency | Remaining gap | Fixability | Evidence | Suspected cause | If fixed | Next experiment |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 1 | P0 | Per-op `spawn_datadeps` / scheduler tax on BLAS-1 (`dot` / `axpy!` / `axpby!` / `rmul!` / `norm` / `copyto!` / `fill!`) | ~800 | Every Krylov iter, every PC apply, every `mul!` support op (SciML `KrylovJL_GMRES` included) | 4-tile `n=4096`: `axpy!` 1.23 ms vs 0.7 µs; `dot` 477 µs vs 0.7 µs; `norm` 971 µs vs 1.2 µs. ~7 such ops/CG iter ≈ 7 ms before SpMV | High for fusion / local tile loops / region-async; Dagger will not beat host BLAS-1 on 4k vectors | Steady `axpby!` compute 0.20 ms vs wall 0.95 ms; 4 tasks; 6.3k allocs / 284 KiB (`ThreadProc`, `LockedObject{PriorityQueue}`, `ExactScope`). 16 tiles: `axpy!` 3.00 ms, 23k allocs | Each BLAS-1 is its own datadeps region + 4 (or 16) thunks. Useful work is sub-µs per tile | Cuts CG from ~12 ms/iter toward the SpMV term (~4 ms) and GMRES by more (Arnoldi is almost all BLAS-1) | Fuse one Krylov iteration into **one** `spawn_datadeps`; or skip datadeps when every chunk is local `ThreadProc`. Private rebase onto `jps/datadeps-region-async` and re-time `axpy!` / CG-one-iter |
+| 2 | P0 | All-pairs tiled SpMV (empty tiles still spawned) | ~630 | Every Krylov / LinearSolve iter; `Projected` / `BlockOperator` | Krylov 4×4: 3.69 ms vs 17.4 µs (16 tasks, **10** nonempty). 16×16: 22.9 ms vs 17.7 µs (256 tasks, **46** nonempty). Published 1-D `n=160k`: 7.26 ms vs 539 µs (64 tasks, **22** nonempty) | High to skip empty tiles / one task per row panel. Does not make 4k-unknowns SpMV beat host CSC | Logs: 16 / 256 / 64 `matvecmul!` tasks. 16×16 vs 4×4 is 6.2× at the same `nnz` | `gemv_dagger!` loops every `(row,col)` tile. 2-D Laplacian on 4×4 is already 6 structural zeros; 16×16 is 210 | 196-iter CG would drop ~0.7 s from SpMV alone at 4×4; 16×16 CG would stop being 5× worse | Count `nnz` (or a cached pattern) before `@spawn`; time 4×4 vs 16×16 again |
+| 3 | P0 | Tile-count multiplier (same tax × tiles) | ~510 | Anyone who picks small tiles “for more parallelism” | Published 16×16 CG ~5× slower than 4×4 at the same 196 iters. Profile: `axpy!` 1.23→3.00 ms; SpMV 3.69→22.9 ms | Docs + default `Blocks` policy are cheap; real fix is ranks 1–2 | 4 vs 16 tiles, same `n=4096`, same residual | More regions and more thunks, not more useful FLOPs (tiles are 256³ or smaller) | Stops users from making Krylov 5× worse by tiling finer | Publish a tile-size note; re-run CG at `Blocks(2048,2048)` (2×2) |
+| 4 | P0 | Per-task scheduler allocations | ~360 | Same as ranks 1–2 (per-argument / per-task; lesson 3) | 4k–6k allocs per 4-tile BLAS-1; 23k / 1.0 MiB per 4×4 SpMV; 58k / 2.4 MiB per CG-shaped iter; 479k / 20 MiB for `Krylov.cg` `itmax=8` | Medium–high (pools already exist; more reuse) | `Profile.Allocs` top types: `Dagger.ThreadProc`, `LockedObject{PriorityQueue{TaskSpec}}`, `start_processor_runner!` closures, `ExactScope`. Not the `Float64` buffers | Planning / fire / steal allocate on every thunk | Lowers GC on GMRES (1.07M allocs / 44 MiB at `itmax=8`) and assembly (740k / 59 MiB) | `measure_steady_state_allocs` on `axpy!` after a region-async rebase (lesson 4) |
+| 5 | P1 | `Krylov.cg` / SciML path (sum of P0) | — | Default iterative solve when the operator is SPD | Published 3.37 s vs 5.45 ms (196/196 iters, same `‖r‖/‖b‖`). Profile: **11.95 ms** for a CG-shaped iter (44 tasks: 16 `matvecmul!` + 12 `dot` + 8 `axpy!` + 4 `axpby!` + 4 `mapreduce`); `itmax=8` real `Krylov.cg` 101 ms (336 tasks, 12.7 ms/iter) | High *if* P0 lands; not a separate kernel bug | 196 × 11.95 ms ≈ 2.34 s, vs published 3.37 s (extra workspace `similar` / `copyto!` / stopping). Jacobi apply is another 1.80 ms (4 tasks) — published CG+Jacobi 3.79 s | Not “CG is slow”: 44 tiny tasks per iter on a 4k system | Same 196 iters at a few ms each would be competitive with host on this size only after P0; at large distributed `n` the tax is amortized | After P0, re-run the published CG row (do not treat `stats.solved` as `Ax≈b`, lesson 19) |
+| 6 | P1 | `Krylov.gmres` / `LinearSolve.KrylovJL_GMRES` (Arnoldi × P0) | — | `defaultalg` for a general `DMatrix` / SciML | Published 77.4 s / 78.0 s vs 45.4 / 42.6 ms (192 iters). Profile `itmax=8` `memory=50`: 246 ms, **748 tasks** (128 `matvecmul!`, 176 `axpy!`, 144 `dot`, 224 `allocate_array` workspace) | High *if* P0 lands; GMRES will always do more BLAS-1 than CG | 748/8 ≈ 94 tasks/iter already at `itmax=8`; late Arnoldi steps approach `memory` dots+axpys. Workspace `similar(b)` is 50+ vectors × 4 tiles (one-time) | Arnoldi is rank-1 of the P0 tax. LinearSolve is the same algorithm | The 1800× table row moves with BLAS-1+SpMV, not with a LinearSolve wrapper | Time `itmax=20` and plot tasks/iter vs `j`; do not run a 77 s profile loop |
+| 7 | P1 | Incremental `sparse(I,J,V, Blocks)` | — | Once per assembly / timestep | Profile 112 ms vs 31 ms host `sparse`+`distribute` (published 111 vs 59 ms). 512 tasks (256 `_assemble_coo_into_tile` + 256 `allocate_array`); 740k allocs / 59 MiB | Medium. MPI must keep a rank-uniform extract set (lesson 29) | `schedule`+`add_thunk` dominate the log sums; sparse compute is 3% of CPU samples | One spawn per (COO chunk, dest tile), including empties | Maybe ~2× vs host at this size; not the Krylov cliff | Profile with one COO chunk vs many; do not drop empty extracts under MPI |
+| 8 | P1 | Dense GEMM `A*B` | — | Dense `mul!` users | Profile 332 vs 241 ms (0.73×; published 0.80×). 576 tasks (512 `matmatmul!` + 64 `allocate_array`). **Only kernel where BLAS is visible** (23% of samples) | Low at `n=4096`: 16-thread OpenBLAS is the right host. Maybe 30–50 ms of scheduler left | 440k allocs / 149 MiB ≈ one extra `n×n` (`C`) plus planning. Tile GEMM is real work (compute log-sum 4.43 s over 16 threads ≈ wall) | `BLAS.set_num_threads(1)` per tile vs host 16-thread GEMM; 8×8×8 reduction | Do not expect to beat host at this size. Larger `n` / multi-node is the actual target | Repeat at `n=8192` tile=1024; do not raise Dagger BLAS threads |
+| 9 | P2 | Sparse `cholesky` gather-then-CHOLMOD | — | `A\b` direct; GlobalAMG / GMG coarse `\` | Setup 3.57 s; apply 1.29 ms vs host 405 µs. Combined factor+`\` 2.26 s (published 2.42 s vs 6.22 ms). **287M allocs / 9.8 GiB** on the combined path | Low at `n=6400`: both sides fit in RAM; CHOLMOD is already optimal. Distributed factor is a different feature | Apply is 6 tasks (`_direct_solve` + wraps). Combined log `compute` 26 s is a thread-sum; `map`×25 + `_assemble_and_factor_pinned` | Gather builds a process-local CSC (lesson 31). Alloc spike is the gather, not potrf | Apply is fine once factored. Setup cannot beat host CHOLMOD at this size | Split `_gather_sparse` vs `cholesky(::CSC)` timers; do not add `Dagger.spchol` |
+| 10 | P2 | Dense tiled LU / QR / Chol vs LAPACK | — | Dense `A\b` | LU profile 167 vs 54 ms (0.32×; published 0.37×). 752 tasks (`swaprows_trail!` 288, `gemm!` 140, …). Published QR 0.20×, Chol 0.27× | Low at `n=2048`: tiled getrf with BLAS=1 vs 16-thread LAPACK | Same idle-runner profile as Krylov, but there *is* panel compute | Latency of many small panels | Do not chase this before P0. Bigger `n` only | One LU profile at `n=4096` tile=512 |
+| 11 | P2 | `Projected` `mul!` | — | Nullspace / elasticity (not every solve) | 16.0 ms; 104 tasks (64 `matvecmul!` + 16 `dot` + 16 `axpy!` + 8 `map`) | Follows P0 (three SpMV-class applies + dots) | Published 28 ms vs 19 µs | `P A P` is three distributed applies | Moves with ranks 1–2 | None until P0 |
+| 12 | P2 | Dense SVD / BlockOperator / specialty | — | Rare vs SciML `A\b` | SVD published 406 vs 13.7 ms (tiled Jacobi vs `gesdd`). BlockOperator published 44.6 ms vs 242 µs. Not re-profiled | Low / correctness-adjacent | Table only | Algorithm mismatch (SVD) or P0 × nest (BlockOperator) | Do not optimize SVD against LAPACK | — |
+
+Block-PC apply is **not** a separate cliff: Jacobi 1.80 ms and BlockJacobi 1.92 ms (setup 563 ms) are one 4-task region, i.e. rank 1. BlockJacobi looks better in the published table (846 ms) because iters drop 196→43, not because apply is fast.
+
+#### Suggested order (no implementation in this pass)
+
+1. Fuse Krylov BLAS-1 (or a whole iteration) so 4-tile `axpy!` is not a 1 ms region.
+2. Skip empty SpMV tile pairs (or spawn one task per row tile).
+3. Re-profile CG / GMRES / LinearSolve; only then look at assembly allocs or GEMM.
+4. Leave gather-then-CHOLMOD, tiled SVD, and `n=2048` dense LU as “Dagger will lose at this size.”
 
 ---
 
