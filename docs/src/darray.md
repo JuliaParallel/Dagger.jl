@@ -668,6 +668,36 @@ A variety of other operations exist on the `DArray`, and it should generally
 behave otherwise similar to any other `AbstractArray` type. If you find that
 it's missing an operation that you need, please file an issue!
 
+## Indexing and slicing
+
+`DArray` indexing follows Base: a scalar index returns an element, a range
+index returns a new `DArray`, and `view` returns a `SubArray` that writes
+through to the parent. That last point is an intentional contract — Dagger
+does **not** overload `view(::DArray, I...)` to return another `DArray`
+(see the `de64cb1b` change). `A[I, J]` is the copy that stays tiled.
+
+```julia
+A = rand(Blocks(4, 4), 16, 16)
+
+A[2, 3]                 # scalar; subject to `allowscalar`
+view(A, 2:9, 3:12)      # `SubArray` sharing `A`'s tiles
+B = A[2:9, 3:12]        # new `DArray`, same `Blocks(4, 4)`
+A[:, 5]                 # `DVector` (dimension drop, like Base)
+A[:, 5:5]               # 16×1 `DMatrix` (no drop)
+```
+
+Range `getindex` / `setindex!` and `copyto!` of those views run **one task
+per overlapping tile pair**, not one task per element. Sparse-backed
+`DArray`s stay sparse (`allocate_tiled`); they are not silently densified.
+
+`copyto!` of a non-contiguous `view` (`view(A, 1:2:n, :)`) still throws
+`ArgumentError` — that is the documented `copyto!` contract. `A[1:2:n, :]`
+itself works: `getindex` materializes the `StepRange` as a `Vector` and
+copies by tile pair.
+
+Scalar indexing is independently gated by `allowscalar` / `allowscalar!`.
+Range operations do not require it.
+
 ### Known Supported Operations
 
 This list is not exhaustive, but documents operations which are known to work well with the `DArray`:

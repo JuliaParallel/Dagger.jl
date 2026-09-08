@@ -399,3 +399,20 @@ lesson.
    type (`BlockOperator`) and cannot reuse `hvcat`. `BlockArrays.mortar`
    is the ecosystem name for the assembled case, but adding that dependency
    does not give you matrix-free blocks or field-split `mul!`.
+
+35. **`view(::DArray, I...)` is a Base `SubArray`, on purpose.** `de64cb1b`
+   removed the DArray-valued `view` that used `lookup_parts`. Restoring it
+   is a breaking return-type change. `A[I, J]` is the copy that stays a
+   tiled `DArray` (same `Blocks` when ndims match). `copyto!` of those
+   views must go through `darray_copyto!` on `parent` / `parentindices` —
+   the catch-all `copyto!(::SubArray, ::StridedDArray)` used to wrap a
+   DArray parent as `view(parent, AutoBlocks())`, whose tiles are
+   SubArrays of a DArray, and the copy then scalar-indexed (one task per
+   element). Do not send a DArray parent through
+   `view(::AbstractArray, ::Blocks)`. `copyto!` of a StepRange view
+   throwing is intentional (`test/array/copyto.jl`); convert StepRange to
+   `Vector` only on the `getindex` path. Integer indices drop dimensions
+   like Base (`A[:, 5]` is a `DVector`); `A[:, 5:5]` stays n×1. Range
+   `getindex` must not call `length` on an integer (`to_indices` leaves
+   integers as integers). Allocate the same-ndims slice with `i:i`, copy,
+   then dropdims. `DArray{T}(undef, ...)` densifies; use `allocate_tiled`.
