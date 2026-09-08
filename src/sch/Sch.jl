@@ -2248,6 +2248,12 @@ function move_one_argument!(arg, mctx::MoveCtx)
     return
 end
 
+# Reusable per-task scratch cache for the metrics collected during `execute!`.
+# Task-local: each pooled scheduler worker task owns one and resets it before
+# each use, so its per-metric Dicts/Vectors are allocated once and reused rather
+# than rebuilt for every thunk.
+const DO_TASK_LOCAL_METRICS = TaskLocalValue{MT.MetricsCache}(() -> MT.MetricsCache())
+
 """
     do_task(to_proc, task::TaskSpec) -> Any
 
@@ -2397,7 +2403,12 @@ Executes a single task specified by `task` on `to_proc`.
     # under one key. `local_metrics_cache` is drained into the scheduler's
     # global cache by `handle_result!`.
     task_sig = signature(first(data), @view data[2:end]).sig
-    local_metrics_cache = MT.MetricsCache()
+    # Reuse this task's scratch cache rather than allocating a fresh
+    # `MetricsCache` (and its per-metric storage) per thunk. `do_task` runs on a
+    # pool of reusable tasks, so the same task services many thunks; `reset_pending!`
+    # empties the storages while keeping their capacity.
+    local_metrics_cache = DO_TASK_LOCAL_METRICS[]
+    MT.reset_pending!(local_metrics_cache)
     mspec = execute_metrics_spec()
 
     @dagdebug thunk_id :execute "Executing $Tf"
