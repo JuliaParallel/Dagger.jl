@@ -37,6 +37,7 @@ import ScopedValues: ScopedValue, @with, with
 import ..Dagger: SignatureMetric, ProcessorMetric, WorkerMetric, TransferSizeMetric, TransferTimeMetric, TransferRateMetric
 import ..Dagger: TASK_SIGNATURE, TASK_PROCESSOR, TASK_WORKER, TASK_TRANSFER_SIZE, TASK_TRANSFER_TIME
 import ..Dagger: execute_metrics_spec, metrics_lookup_runtime, metrics_lookup_alloc, metrics_lookup_transfer_rate
+import ..Dagger: SignatureRuntimeIndex, build_signature_runtime_index, metrics_lookup_runtime_from_index
 import ..Dagger: extract_collected_metrics, apply_collected_metrics!
 import ..Dagger.MetricsTracker as MT
 
@@ -1005,7 +1006,18 @@ concurrently across threads.
     sorted_procs = @reusable_vector :schedule_one!_sorted_procs Processor OSProc() 32
     resize!(sorted_procs, length(input_procs))
     costs = @reusable_dict :schedule_one!_costs Processor Float64 OSProc() 0.0 32
-    estimate_task_costs!(sorted_procs, costs, state, input_procs, task; sig)
+    # One metrics snapshot for the whole scheduling pass, shared by cost
+    # estimation and every per-processor `has_capacity` below. Taken separately,
+    # each of those rebuilds (deep-copies) the snapshot, because other threads
+    # bump the cache's generation on every task completion. Likewise, one
+    # per-signature index serves both callers: each is then O(1) per processor
+    # after a single O(N) build, instead of two independent end-to-end scans
+    # per task.
+    snap = MT.snapshot(MT.global_metrics_cache())
+    sig_vec_for_index = sig isa Dagger.Signature ? sig.sig : sig
+    runtime_index = build_signature_runtime_index(snap, sig_vec_for_index)
+    estimate_task_costs!(sorted_procs, costs, state, input_procs, task;
+                         sig, runtime_index, snap)
     empty!(input_procs)
 
     # Under uniform execution, measured costs are rank-local, so re-order by a
@@ -1021,7 +1033,8 @@ concurrently across threads.
         can_use, scope = can_use_proc(state, task, gproc, proc, options, scope)
         if can_use
             has_cap, est_time_util, est_alloc_util, est_occupancy =
-                has_capacity(state, proc, root_worker_id(gproc), options.time_util, options.alloc_util, options.occupancy, sig)
+                has_capacity(state, proc, root_worker_id(gproc), options.time_util, options.alloc_util, options.occupancy, sig;
+                             runtime_index, snap)
             # Under uniform execution capacity is rank-local; every rank must
             # take the first usable processor in the deterministic order.
             if has_cap || scheduling_ignore_capacity(accel)
