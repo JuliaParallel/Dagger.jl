@@ -298,10 +298,16 @@ function LinearAlgebra.ldiv!(x::DVector, F::_PinnedSparseFactor, b::DVector)
     return copyto!(x, F \ b)
 end
 
-# The pinned factor is a host sparse LU; those backends already accept a
-# matrix RHS (`F \\ B`), so do not loop columns here.
+# The pinned factor is a host sparse LU. PureLU only implements `F \\ b`;
+# UMFPACK accepts a matrix RHS. `B` is already gathered next to the factor,
+# so a column loop here is not the iterative gather-and-Krylov loop that
+# `block_gmres` replaces on `SparseIterativeFactorization`.
 function _direct_solve_matrix(fact, B::AbstractMatrix)
-    return fact \ B
+    X = similar(B)
+    for j in axes(B, 2)
+        X[:, j] = fact \ B[:, j]
+    end
+    return X
 end
 
 function Base.:\(F::DaggerSparseLU, B::DMatrix)
