@@ -115,4 +115,7 @@ Dagger.minres(A, b::DVector; kwargs...)   = Krylov.minres(A, b; kwargs...)
 Dagger.gmres(A, b::DVector; kwargs...)    = Krylov.gmres(A, b; kwargs...)
 Dagger.bicgstab(A, b::DVector; kwargs...) = Krylov.bicgstab(A, b; kwargs...)
 
+Dagger._sparse_iterative_lu(A::DMatrix) =
+    Dagger.SparseIterativeFactorization(A, size(A, 1))
+
 end # module KrylovExt

@@ -12,6 +12,7 @@ end
 # Sparse test bodies are shared with the CPU and MPI suites; see the file
 # header for the acceleration/backend matrix they cover.
 include(joinpath(@__DIR__, "array", "sparse_defs.jl"))
+include(joinpath(@__DIR__, "array", "sparse_solve_defs.jl"))
 
 @everywhere begin
     function isongpu(X)
@@ -245,6 +246,7 @@ end
             end
             test_sparse_darray(; scope, check_tile)
             test_sparse_solvers(; scope, check_tile)
+            test_sparse_solve_dispatch(; scope, check_tile, expect_direct=false, T=Float32)
             test_sparse_bare_args(; scope, T=Float32)
         end
     end
@@ -429,6 +431,7 @@ end
             end
             test_sparse_darray(; scope, check_tile)
             test_sparse_solvers(; scope, check_tile)
+            test_sparse_solve_dispatch(; scope, check_tile, expect_direct=false, T=Float32)
             test_sparse_bare_args(; scope, T=Float32)
         end
     end
@@ -613,6 +616,7 @@ end
             end
             test_sparse_darray(; scope, check_tile)
             test_sparse_solvers(; scope, check_tile)
+            test_sparse_solve_dispatch(; scope, check_tile, expect_direct=false, T=Float32)
             test_sparse_bare_args(; scope, T=Float32)
         end
     end
@@ -771,6 +775,7 @@ end
             end
             test_sparse_darray(; scope, check_tile)
             test_sparse_solvers(; scope, check_tile)
+            test_sparse_solve_dispatch(; scope, check_tile, expect_direct=false, T=Float32)
             test_sparse_bare_args(; scope, T=Float32)
         end
     end
@@ -890,6 +895,7 @@ end
             end
             test_sparse_darray(; scope, check_tile)
             test_sparse_solvers(; scope, check_tile)
+            test_sparse_solve_dispatch(; scope, check_tile, expect_direct=false, T=Float32)
             test_sparse_bare_args(; scope, T=Float32)
         end
     end

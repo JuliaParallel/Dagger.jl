@@ -1,3 +1,6 @@
+using Krylov
+include(joinpath(@__DIR__, "..", "sparse_solve_defs.jl"))
+
 @testset "$T" for T in (Float64, ComplexF64)
     tol = 1e-10
 
@@ -70,4 +73,11 @@
         LinearAlgebra.ldiv!(chol_DA, Db)
         @test collect(Db) ≈ b_ref rtol=tol
     end
+end
+
+# Krylov is loaded above; PureKLU / PureUMFPACK are not (this file runs before
+# sparsedirect.jl). This is the fallback packages hit when they write `A \ b`
+# without a sparse-direct backend.
+@testset "sparse-backed DMatrix stays off dense LU" begin
+    test_sparse_solve_dispatch(; expect_direct=false)
 end

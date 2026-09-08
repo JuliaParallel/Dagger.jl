@@ -357,3 +357,15 @@ function allocate_tiled(::Type{<:DSparseArray}, ::Type{T}, part::Blocks{N}, dims
                       return_type=DSparseArray{T,N})
     return _to_darray(a)
 end
+
+"""
+    is_sparse_backed(A::DArray) -> Bool
+
+Whether `A`'s tiles are [`DSparseArray`](@ref) wrappers.
+
+A `DArray`'s type parameters do not record the tile backend (`DMatrix{Float64}`
+is the same type for dense and sparse tiles), so this reads `darray_tiletype`.
+`lu` / `\\` / `ldiv!` / `factorize` use it to keep sparse-backed operators off
+the tiled dense LU path, which would silently densify them.
+"""
+is_sparse_backed(A::DArray) = darray_tiletype(A) <: DSparseArray
