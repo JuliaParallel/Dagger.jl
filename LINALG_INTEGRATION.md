@@ -6,7 +6,7 @@ branches; they do **not** merge into this workspace branch, and they do **not**
 edit other agents' rows here. Report status in your final message so the
 coordinator can update the table.
 
-Last coordinator pass: 2026-09-08 (P2 completeness merged; AWS job `2d19db10113920ac` still mine). All assigned P0/P1/P2 workstreams that were accepted are merged. Performance / Bottlenecks P0 is **out of scope** this pass. `vmbench.py` now tags EC2 `Name`/`vmbench-label` with the launch `--label` (plus pid/start); **batchd does not pass `label=` into `provision_vm`**, so `batchctl` VMs still get EC2 `Name=vmbench`. Identify jobs by **job id**. Do not `done` by label.
+Last coordinator pass: 2026-09-08 (P2 completeness merged at `40f75ac4`; subset + remaining suites green on job `2d19db10113920ac`). All assigned P0/P1/accepted-P2 workstreams are merged. Performance / Bottlenecks P0 is **out of scope**. Identify AWS jobs by **job id**, not EC2 `Name`/`vmbench-label` (see AWS note below).
 
 ---
 
@@ -302,6 +302,7 @@ Priority: **P0 done** / **P1 done** = merged onto `Dagger-linalg-ultra`. **P2** 
 | 2026-09-08 | `7186a439` `linalg/sparse-qr` @ `0f93b02e` | No conflicts. Lesson 46. AWS sparseqr 18, qr 184. Kept ultra `_solve_pinned_dvector`. |
 | 2026-09-08 | `026385e6` `linalg/dense-schur` @ `2c1e32b9` | Conflict: `AGENTS.md` (kept sparse-QR 46; incoming schur is 47). Docs/`runtests` auto-merged. AWS schur 8, eigen 34. |
 | 2026-09-08 | `0770052b` `linalg/matrix-io` @ `d2a05594` | No conflicts. AWS matrixio 9/9. |
+| 2026-09-08 | tracking + full suite | Job `2d19db10113920ac`: P2 suites green; full `array/linalg` (no Finch) green except NNS 39/40 (`24>25` P-width, twice). Remaining after NNS: sparsedirect 349, linearsolve 42, assembly 64, matrixio 9, partition 295. |
 
 ## Remaining follow-ups
 
@@ -327,6 +328,9 @@ P2 flags (completeness, not scheduled):
 - **MPI owned+ghost / `VecGhost`** — rank-owned `Chunk` + `HaloArray` / `@stencil` already cover this. A new public vector type is out of scope.
 - **`@stencil` restriction/prolongation** — not usable for GMG (lesson 37). Matrix `GeometricMultigrid` is the transfer path.
 - **Full dense geev / ScaLAPACK Schur** — not required. `eigen` stays LOBPCG; P2 `schur` is gather-then-LAPACK for dense tiles only.
+- **Near-nullspace Q1 elasticity `P`-width assert** — on `40f75ac4`, `array/linalg/nearnullspace` is 39/40 twice (`size(Mn.levels[1].P, 2) > size(Ms.levels[1].P, 2)` evaluated `24 > 25`). P2 did not touch AMG. Residual/`\\` checks in that testset were not reached. **Question:** is this a brittle width check vs a real NNS regression? Do not weaken it from P2.
+
+AWS labeling (2026-09-08 `vmbench.py` working-tree tweak): EC2 `Name` is now the launch `--label` (was always `vmbench`), plus `vmbench-label` / `vmbench-pid` / `vmbench-started`. `batchd` still calls `provision_vm` without `label=`, so new `batchctl` VMs would tag `Name=vmbench`. Pre-tweak instances (including `i-021ef9ff800fc17a4`) have no `vmbench-label` tag. Filter/teardown by **job id**. Reserved `dagger-distributed` (`2f5b7c978c2a0b3a`) and `dagger-mpi` (`a1e9f3af2f347b8d`) are already `done` in batchd — do not `done` them again.
 
 `AGENTS.md` lessons 27–47 are the union of the per-workstream lessons (through block Krylov 45; sparse `qr` is 46; dense `schur` is 47). Lesson 20 remains unused (pre-existing gap). Lesson 35 is GPU-PC; do not reuse that number.
 
