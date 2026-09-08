@@ -690,8 +690,18 @@ function test_stencil_sparse_gpu()
         @test collect(C2) ≈ dense_ref(Pad(0.0))
     end
 
+    @testset "sparse output is compressed on the device" begin
+        # A regression to the host-staged path would still give correct results,
+        # just several times slower, so assert the path itself rather than only
+        # the answer.
+        A = distribute(mkmat(), part)
+        @test all(Dagger.chunks(A)) do c
+            fetch(Dagger.@spawn (x -> Dagger.stencil_device_sparse_output(x.mat))(c))
+        end
+    end
+
     @testset "sparse output stays device-resident" begin
-        # A host-staged sweep that forgot to upload its result would leave the
+        # A sweep that forgot to store its compressed result back would leave the
         # tile on the host, and the next sweep would silently run on the CPU.
         tile_spaces(D) = unique(map(Dagger.chunks(D)) do c
             fetch(Dagger.@spawn (x -> Dagger.value_memory_space(x.mat))(c))

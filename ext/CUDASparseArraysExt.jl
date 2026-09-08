@@ -61,6 +61,15 @@ Dagger._sparse_copy(A::Union{CuSparseMatrixCSC,CuSparseMatrixCSR,CuSparseVector}
 # kernel argument: same device buffers, no copy, wrapped in Dagger's
 # `DeviceSparseMatrixCSC`, which has both a device-side `getindex` and an adaptor.
 # Mirrors `ROCSparseArraysExt`.
+# A dense device tile can be compressed back into vendor CSC storage without
+# leaving the device, so a sparse output needs no host round trip.
+Dagger.stencil_device_sparse_output(::CuSparseMatrixCSC) = true
+function Dagger.stencil_device_compress(like::CuSparseMatrixCSC, dense)
+    Ti = eltype(like.colPtr)
+    colptr, rowval, nzval = Dagger.device_csc_arrays(dense, Ti)
+    return CuSparseMatrixCSC(colptr, rowval, nzval, size(dense))
+end
+
 Dagger.stencil_kernel_view(A::CuSparseMatrixCSC) =
     Dagger.DeviceSparseMatrixCSC(size(A, 1), size(A, 2), A.colPtr, A.rowVal, A.nzVal)
 

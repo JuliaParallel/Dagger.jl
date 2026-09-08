@@ -1088,10 +1088,13 @@ end
 Whether a sweep may write `storage` elementwise where it runs.
 
 False for device-resident sparse tiles: storing a value that is not already
-present changes the sparsity structure, which a kernel cannot do. Note that this
-is about *writes* only -- such storage is perfectly readable by a kernel (see
-[`stencil_kernel_view`](@ref)), so a stencil that reads sparse operands and
-writes a dense output needs none of this.
+present changes the sparsity structure, which a kernel cannot do. Such an output
+is routed to [`stencil_unwritable_sweep!`](@ref), which for most backends still
+never leaves the device -- it sweeps a dense tile and compresses it back.
+
+Note that this is about *writes* only: such storage is perfectly readable by a
+kernel (see [`stencil_kernel_view`](@ref)), so a stencil that reads sparse
+operands and writes a dense output needs none of this.
 """
 stencil_kernel_writable(@nospecialize(storage)) = true
 
@@ -1101,12 +1104,104 @@ stencil_kernel_writable(@nospecialize(storage)) = true
 Run a sweep for an output the executing processor cannot write elementwise, by
 staging it through host storage: gather, sweep on the CPU, upload the result.
 
-Slow -- a host round trip per tile per sweep -- but correct, and it is the same
-fallback the rest of Dagger's device sparse support uses (see `matmatmul!` for
-`DeviceSparseMatrixCSC`, and `_copyto_view_hosted!`). Backends that can produce a
-sparse tile on the device would override this.
+The last-resort path. It is correct but costs a full host round trip per tile per
+sweep; a backend that can compress a dense tile on the device takes
+[`stencil_device_compress`](@ref) instead. See [`stencil_unwritable_sweep!`](@ref).
 """
 function stencil_host_sweep! end
+
+"""
+    stencil_unwritable_sweep!(style, processor, f, output, read_vars)
+
+Sweep for an output whose storage the executing processor cannot write
+elementwise (see [`stencil_kernel_writable`](@ref)).
+"""
+function stencil_unwritable_sweep! end
+
+"""
+    stencil_device_sparse_output(storage) -> Bool
+
+Whether a sweep producing `storage` can stay on the device: the backend can both
+materialize the tile dense and compress a dense tile back into this format,
+without a host round trip. False by default, which routes to
+[`stencil_host_sweep!`](@ref).
+"""
+stencil_device_sparse_output(@nospecialize(storage)) = false
+
+"""
+    stencil_device_compress(like, dense) -> storage
+
+Compress the dense device tile `dense` into `like`'s own sparse storage format,
+on the device. Backends wrap [`device_csc_arrays`](@ref) with their own
+constructor.
+"""
+function stencil_device_compress end
+
+@kernel function _csc_count_cols_kernel!(counts, dense)
+    j = @index(Global, Linear)
+    c = zero(eltype(counts))
+    @inbounds for i in axes(dense, 1)
+        c += !iszero(dense[i, j])
+    end
+    @inbounds counts[j] = c
+end
+
+# Single work item on purpose. `n` is a *tile's* column count -- hundreds, not
+# millions -- so a serial scan costs microseconds, while the portable
+# alternatives do not exist: `accumulate!` on an OpenCL array falls back to
+# scalar indexing, and doing the scan on the host would reintroduce the very
+# device->host->device hop this path is here to remove.
+@kernel function _csc_scan_kernel!(colptr, counts, n::Int)
+    @inbounds begin
+        acc = one(eltype(colptr))
+        colptr[1] = acc
+        for j in 1:n
+            acc += counts[j]
+            colptr[j + 1] = acc
+        end
+    end
+end
+
+@kernel function _csc_fill_kernel!(rowval, nzval, dense, colptr)
+    j = @index(Global, Linear)
+    @inbounds begin
+        p = colptr[j]
+        for i in axes(dense, 1)
+            v = dense[i, j]
+            if !iszero(v)
+                rowval[p] = i
+                nzval[p] = v
+                p += one(p)
+            end
+        end
+    end
+end
+
+"""
+    device_csc_arrays(dense, Ti) -> (colptr, rowval, nzval)
+
+Compress a dense device matrix into CSC storage arrays, on the device.
+
+Counting per column and filling per column both parallelize over columns, and
+each column's rows are visited in order, so `rowval` comes out sorted within
+every column without a sort. Exactly one value crosses back to the host -- the
+nonzero count, which is needed to size the storage.
+"""
+function device_csc_arrays(dense::AbstractMatrix{Tv}, ::Type{Ti}) where {Tv,Ti}
+    m, n = size(dense)
+    counts = similar(dense, Ti, n)
+    Kernel(_csc_count_cols_kernel!)(counts, dense; ndrange=n)
+    colptr = similar(dense, Ti, n + 1)
+    Kernel(_csc_scan_kernel!)(colptr, counts, n; ndrange=1)
+    KernelAbstractions.synchronize(gpu_kernel_backend())
+    # The only device->host transfer left in this path: 1 element, via a view so
+    # it is a buffer copy rather than (disallowed) scalar indexing.
+    nnz = Int(Array(view(colptr, (n + 1):(n + 1)))[1]) - 1
+    rowval = similar(dense, Ti, nnz)
+    nzval = similar(dense, Tv, nnz)
+    Kernel(_csc_fill_kernel!)(rowval, nzval, dense, colptr; ndrange=n)
+    return colptr, rowval, nzval
+end
 
 @inline function _inner_stencil!(::DenseSweep, processor, f, output, read_vars)
     # See `stencil_storage`: unwrapping here is what makes `inner_stencil_proc!`
@@ -1116,7 +1211,7 @@ function stencil_host_sweep! end
     if stencil_kernel_writable(storage)
         inner_stencil_proc!(processor, f, storage, vars)
     else
-        stencil_host_sweep!(DenseSweep(), f, output, vars)
+        stencil_unwritable_sweep!(DenseSweep(), processor, f, output, vars)
     end
     return
 end
@@ -1127,7 +1222,7 @@ end
     # wrapper exists to hide from Datadeps.
     vars = map(stencil_storage, read_vars)
     if !stencil_kernel_writable(stencil_storage(output))
-        stencil_host_sweep!(SparseSweep(), f, output, vars)
+        stencil_unwritable_sweep!(SparseSweep(), processor, f, output, vars)
     elseif !try_sparse_stencil_sweep!(processor, f, output, vars)
         _inner_stencil!(DenseSweep(), processor, f, output, read_vars)
     end

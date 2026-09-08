@@ -363,8 +363,48 @@ Adapt.adapt_structure(to, A::DeviceSparseMatrixCSC) =
 stencil_dense_halo_proto(A::DeviceSparseMatrixCSC) = A.nzval
 
 # Inserting a nonzero is a structural change, so no kernel can write one of
-# these; a sweep whose output is device sparse stages through the host.
+# these directly; such an output goes through `stencil_unwritable_sweep!` below.
 stencil_kernel_writable(::DeviceSparseMatrixCSC) = false
+
+# A sweep whose output storage no kernel can write elementwise. Preferred route:
+# materialize the tile dense on the device, run the ordinary device sweep into
+# it, and compress it back to sparse there -- so nothing but the resulting
+# nonzero count crosses to the host. Backends without device-side compression
+# fall back to `stencil_host_sweep!`.
+#
+# Sweeping dense and compressing gives exactly the result the dense sweep would
+# have written, so `SparseSweep` needs no special handling here: its dilated
+# candidate set only ever *skips* indices whose result is zero, which the
+# compression drops anyway. (On a device those skipped evaluations are near-free,
+# running in parallel with the rest, so restricting them would buy nothing.)
+function stencil_unwritable_sweep!(style, processor, f, output::DSparseArray, read_vars)
+    storage = output.mat
+    if !stencil_device_sparse_output(storage)
+        return stencil_host_sweep!(style, f, output, read_vars)
+    end
+    dense = stencil_dense_tile(storage)
+    inner_stencil_proc!(processor, f, dense, read_vars)
+    output.mat = stencil_device_compress(storage, dense)
+    return
+end
+
+# The tile, materialized dense on the device. Seeded from the current contents so
+# a kernel that reads its output (`A[idx] = A[idx] + ...`) sees the previous
+# values, exactly as an in-place dense sweep would.
+function stencil_dense_tile(storage)
+    src = stencil_kernel_view(storage)
+    dense = similar(stencil_dense_halo_proto(src), eltype(src), size(src))
+    Kernel(_densify_region_kernel!)(dense, src, zero(CartesianIndex{ndims(src)});
+                                    ndrange=size(dense))
+    return dense
+end
+
+stencil_device_sparse_output(::DeviceSparseMatrixCSC) = true
+function stencil_device_compress(::DeviceSparseMatrixCSC{Tv,Ti}, dense) where {Tv,Ti}
+    m, n = size(dense)
+    colptr, rowval, nzval = device_csc_arrays(dense, Ti)
+    return DeviceSparseMatrixCSC(m, n, colptr, rowval, nzval)
+end
 
 # Host-staged sweep for a device-resident sparse output (see the docstring in
 # array/stencil.jl). Gather the output tile and every operand to host storage,
