@@ -329,7 +329,20 @@ rows: warmup 5, samples 3. Krylov used 4×4 tiles (`Blocks(1024,1024)` on
 `n=4096`); a 16×16 (`tile=256`) CG probe was ~5× slower (15.8 s) at the same
 iteration count — scheduling-bound, not a different residual.
 
-**MPI:** not yet measured (next `batchctl --count ≥ 2` pass). No empty MPI table.
+**Hardware / software (MPI):** AWS 4× `m6i.xlarge` (4 vCPU / 16 GiB each,
+`us-east-1`), one rank per VM (`mpiexec --map-by ppr:1:node --bind-to none`),
+Julia 1.12.7, 4 Julia threads/rank, system OpenMPI 4.1.6,
+2026-09-08 UTC. Dagger code SHA **`92c2aee4`**. Warmup 3, samples 3 (min).
+Host baseline is the same problem on `Array`/`SparseMatrixCSC` on every rank
+(4-thread OpenBLAS) — a **single-node** ecosystem number, not a distributed
+PETSc/Trilinos baseline (none was practical to stand up on this AMI). Raw
+JSON: `benchmark/results/linalg_integration_mpi.json`.
+
+A first `mul!(C, A, A)` GEMM hung in MPI aliasing `bcast_yield` (same array
+as both operands). `C = A * B` matches `contrib/mpi/run_matmul.jl` and
+completed (that script: n=2000, tile=1000, 8.52 s including compile). Several
+other ops then hit the 300 s hang detector on `recv`/`send` to rank 3; those
+rows are omitted, not invented. `jps/datadeps-region-async` was not rebased.
 
 ### Multi-threaded
 
@@ -355,10 +368,22 @@ iteration count — scheduling-bound, not a different residual.
 | `Projected` `mul!` | 1-D Laplacian n=2048, tile=256, constant nullspace | 28.0 ms | 19.0 µs (serial `PAP`) | 28.0 ms / 19.0 µs | 0.00068× | correctness-adjacent; constructor orthonormalizes |
 | `BlockOperator` `mul!` | 2-field nest n=2048 (2×1024), tile=256 | 44.6 ms | 242 µs (assembled `*(::Matrix)`) | 44.6 ms / 242 µs | 0.0054× | correctness-adjacent; `hvcat` would assemble |
 
+### MPI
+
+| Feature | Problem | Dagger | Baseline (name) | Time D / Time B | Speedup | Notes |
+|---|---|---|---|---|---|---|
+| Dense GEMM / `mul!` | n=2048, tile=1024×1024, Float64, `C←A*B` | 261 ms | 120 ms (`*(::Matrix, ::Matrix)` OpenBLAS, 4 threads) | 261 ms / 120 ms | 0.46× | 4 ranks; Dagger BLAS=1; host is single-node |
+| Dense LU + `\` | n=1024, tile=512×512, factor + `\` | 2.00 s | 16.4 ms (`lu(::Matrix)` LAPACK getrf) | 2.00 s / 16.4 ms | 0.0082× | |
+| Sparse SpGEMM | `sprand` n=1600, p=0.008, nnz=20561, tile=800×800 | 14.6 ms | 4.22 ms (`*(::CSC, ::CSC)`) | 14.6 ms / 4.22 ms | 0.29× | host CSC×CSC is single-threaded |
+| `Projected` `mul!` | 1-D Laplacian n=1024, tile=512, constant nullspace | 15.9 ms | 15.3 µs (serial `PAP`) | 15.9 ms / 15.3 µs | 0.00096× | correctness-adjacent |
+| `BlockOperator` `mul!` | 2-field nest n=1024 (2×512), tile=512 | 18.6 ms | 159 µs (assembled `*(::Matrix)`) | 18.6 ms / 159 µs | 0.0086× | correctness-adjacent |
+
 ### Skipped on this pass (no invented numbers)
 
-- **GlobalAMG, `Dagger.klu` / `splu`, LinearSolve `PureUMFPACKFactorization`:** at SHA `292cd672`, `DaggerSparseLU \ DVector` is ambiguous (`sparsedirect.jl`). Later integration commits (`775d4d4a` and follow-ups) add `_solve_pinned_dvector`. Re-bench on current HEAD.
-- **P1 now on `origin/Dagger-linalg-ultra` (after this SHA):** numeric refactor, tiled-`P` GlobalAMG, RAS `type=:basic`, GMG, CSR SpMV, graph `partitioner=`, `eigen`, mixed-precision, multi-RHS. Not present on the measured clone.
+- **MT GlobalAMG, `Dagger.klu` / `splu`, LinearSolve `PureUMFPACKFactorization`:** at the MT SHA `292cd672`, `DaggerSparseLU \ DVector` is ambiguous. Later commits (`775d4d4a`+) add `_solve_pinned_dvector`. Not re-run on the MT box.
+- **MT P1** (numeric refactor, tiled-`P` GlobalAMG, RAS `:basic`, GMG, CSR SpMV, graph `partitioner=`, `eigen`, mixed-precision, multi-RHS): not on the MT clone. Harness now has rows; MPI re-run hung or was not launched for these.
+- **MPI hangs** (300 s deadlock detector, rank 0 ↔ rank 3 `recv`/`send`/`bcast_meta`): dense Cholesky, dense QR (also hung at 900 s and was aborted), sparse SpMV, sparse `cholesky`/`klu`/`splu`, incremental `sparse(I,J,V, Blocks)`, numeric `lu!(F,A)`, mixed-eltype SpMV. No times published.
+- **MPI not launched** (too likely to hang given the above, or no GPU): Krylov CG/GMRES and all PCs (Jacobi, BlockJacobi, BlockILU, per-tile AMG, GlobalAMG, RAS `:restrict`/`:basic`, GMG), LinearSolve, `eigen`, CSR SpMV, graph Metis, multi-RHS, GPU-PC. No distributed non-Dagger baseline.
 - **`jps/datadeps-region-async`:** not rebased; no second column.
 
 ---

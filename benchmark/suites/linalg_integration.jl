@@ -51,13 +51,23 @@ if MPI_MODE
     const COMM = MPI.COMM_WORLD
     const RANK = MPI.Comm_rank(COMM)
     const NRANKS = MPI.Comm_size(COMM)
+    # First datadeps/MPI compile can exceed the 120s hang detector. Planning
+    # runs on this task, so a TaskLocalValue write here is the one that matters.
+    let ext = Base.get_extension(Dagger, :MPIExt)
+        if ext !== nothing
+            ext.DEADLOCK_TIMEOUT_PERIOD[] = parse(Float64, get(ENV, "DAGGER_MPI_DEADLOCK_TIMEOUT", "900"))
+            ext.DEADLOCK_WARN_PERIOD[] = parse(Float64, get(ENV, "DAGGER_MPI_DEADLOCK_WARN", "60"))
+        end
+    end
 else
     const RANK = 0
     const NRANKS = 1
 end
 
 is_root() = RANK == 0
-maybe_barrier() = (MPI_MODE && MPI.Barrier(COMM); nothing)
+# Do not mix MPI.Barrier with Dagger's tagged P2P (deadlocks under compile
+# skew). Dagger SPMD ops already synchronize; host baselines run on every rank.
+maybe_barrier() = nothing
 
 const NTHREADS = Threads.nthreads()
 const BLAS_DAGGER = 1
@@ -78,30 +88,29 @@ function timed_min(f; warmup=WARMUP, samples=SAMPLES, sync=true)
         f()
     end
     GC.gc()
-    sync && maybe_barrier()
     best = Inf
     for _ in 1:samples
-        sync && maybe_barrier()
         t = @elapsed f()
-        sync && maybe_barrier()
         best = min(best, t)
     end
     return best
 end
 
-function timed_min_root(f; kwargs...)
-    is_root() || return NaN
-    return timed_min(f; sync=false, kwargs...)
-end
+# Host baselines run on every rank (SPMD). timed_min_root is a compatibility
+# alias — it no longer skips work on non-root, which used to let other ranks
+# enter the next Dagger collective while rank 0 was still in serial host code.
+timed_min_root(f; kwargs...) = timed_min(f; kwargs...)
 
 function instance_type()
+    env = get(ENV, "LINALG_BENCH_INSTANCE", "")
+    isempty(env) || return env
     try
         tok = read(`curl -fsS -X PUT http://169.254.169.254/latest/api/token
                     -H X-aws-ec2-metadata-token-ttl-seconds: 60 --max-time 2`, String)
         return strip(read(`curl -fsS -H "X-aws-ec2-metadata-token: $tok"
                            http://169.254.169.254/latest/meta-data/instance-type --max-time 2`, String))
     catch
-        return get(ENV, "LINALG_BENCH_INSTANCE", "unknown")
+        return "unknown"
     end
 end
 
@@ -226,6 +235,33 @@ function HostRAS(A::AbstractMatrix, bs::Integer, overlap::Integer)
     return HostRAS(factors, interiors, omegas)
 end
 
+struct HostRASBasic{F}
+    factors::Vector{F}
+    omegas::Vector{UnitRange{Int}}
+end
+
+function HostRASBasic(A::AbstractMatrix, bs::Integer, overlap::Integer)
+    n = size(A, 1)
+    factors = Any[]
+    omegas = UnitRange{Int}[]
+    for s in 1:bs:n
+        interior = s:min(s + bs - 1, n)
+        Ω = max(1, first(interior) - overlap):min(n, last(interior) + overlap)
+        push!(factors, lu(A[Ω, Ω]))
+        push!(omegas, Ω)
+    end
+    return HostRASBasic(factors, omegas)
+end
+
+function LinearAlgebra.mul!(y::AbstractVector, P::HostRASBasic, x::AbstractVector)
+    fill!(y, zero(eltype(y)))
+    for (F, Ω) in zip(P.factors, P.omegas)
+        yΩ = F \ view(x, Ω)
+        y[Ω] .+= yΩ
+    end
+    return y
+end
+
 function LinearAlgebra.mul!(y::AbstractVector, P::HostRAS, x::AbstractVector)
     fill!(y, zero(eltype(y)))
     for (F, interior, Ω) in zip(P.factors, P.interiors, P.omegas)
@@ -260,17 +296,20 @@ const S = if SCALE == "small"
      assembly_grid=64, assembly_b=128,
      op_n=256, op_b=64)
 elseif SCALE == "mpi"
-    (gemm_n=2048, gemm_b=512,
-     lu_n=1536, lu_b=256,
-     qr_n=1536, qr_b=256,
-     chol_n=1536, chol_b=256,
+    # Tile sides chosen so a 4-rank run is ~2×2 (dense) / 4×4 (Krylov), matching
+    # the working contrib/mpi/run_matmul.jl pattern. Fine tiles hung in MPI
+    # aliasing bcasts on the first pass.
+    (gemm_n=2048, gemm_b=1024,
+     lu_n=1024, lu_b=512,
+     qr_n=1024, qr_b=512,
+     chol_n=1024, chol_b=512,
      svd_n=256, svd_b=128,
-     spmv_n=65_536, spmv_b=8_192,
-     spgemm_n=2_000, spgemm_b=500, spgemm_p=0.008,
-     krylov_grid=64, krylov_b=256,
-     direct_grid=64, direct_b=256,
-     assembly_grid=128, assembly_b=512,
-     op_n=1_024, op_b=256)
+     spmv_n=65_536, spmv_b=16_384,
+     spgemm_n=1_600, spgemm_b=800, spgemm_p=0.008,
+     krylov_grid=64, krylov_b=1024,
+     direct_grid=64, direct_b=1024,
+     assembly_grid=128, assembly_b=1024,
+     op_n=1_024, op_b=512)
 else
     (gemm_n=4096, gemm_b=512,
      lu_n=2048, lu_b=256,
@@ -304,7 +343,7 @@ const META = Dict{String,Any}(
     "julia" => string(VERSION),
     "threads" => NTHREADS,
     "ranks" => NRANKS,
-    "instance" => is_root() ? instance_type() : "",
+    "instance" => instance_type(),
     "date" => string(Dates.today()),
     "datetime" => string(Dates.now()),
     "warmup" => WARMUP,
@@ -315,7 +354,6 @@ const META = Dict{String,Any}(
     "rtol" => RTOL,
     "itmax" => ITMAX,
 )
-MPI_MODE && (META["instance"] = let v = MPI.bcast(META["instance"], 0, COMM); v; end)
 
 const ROWS = Dict{String,Any}[]
 
@@ -485,24 +523,25 @@ end
 function bench_dense_gemm()
     n, b = S.gemm_n, S.gemm_b
     td = with_blas(BLAS_DAGGER) do
-        A = rand(Blocks(b, b), Float64, n, n); wait(A)
-        C = Dagger.zeros(Blocks(b, b), Float64, n, n); wait(C)
+        A = rand(Blocks(b, b), Float64, n, n)
+        B = rand(Blocks(b, b), Float64, n, n)
         timed_min() do
-            mul!(C, A, A); wait(C)
+            C = A * B
+            wait(C)
         end
     end
     tb = with_blas(BLAS_BASELINE) do
-        Ah = is_root() ? rand(n, n) : nothing
-        Ch = is_root() ? zeros(n, n) : nothing
-        timed_min_root() do
-            mul!(Ch, Ah, Ah)
+        Ah = rand(n, n)
+        Bh = rand(n, n)
+        timed_min() do
+            Ah * Bh
         end
     end
     push_row!(feature="Dense GEMM / mul!", key="dense_gemm",
-              problem="n=$(n), tile=$(b)×$(b), Float64, C←A*A",
+              problem="n=$(n), tile=$(b)×$(b), Float64, C←A*B",
               dagger_s=td, baseline_s=tb,
-              baseline_name="LinearAlgebra.mul!(::Matrix) OpenBLAS",
-              notes="Dagger BLAS=$(BLAS_DAGGER); host BLAS=$(BLAS_BASELINE)")
+              baseline_name="LinearAlgebra.*(::Matrix, ::Matrix) OpenBLAS",
+              notes="Dagger BLAS=$(BLAS_DAGGER); host BLAS=$(BLAS_BASELINE); A*B not mul!(C,A,A) (MPI aliasing)")
 end
 
 function bench_dense_factor(feature, key, n, b, dagger_f, host_f, host_name)
@@ -517,9 +556,9 @@ function bench_dense_factor(feature, key, n, b, dagger_f, host_f, host_name)
         end
     end
     tb = with_blas(BLAS_BASELINE) do
-        Ah = is_root() ? rand(n, n) : nothing
-        bh = is_root() ? rand(n) : nothing
-        timed_min_root() do
+        Ah = rand(n, n)
+        bh = rand(n)
+        timed_min() do
             F = host_f(Ah)
             F \ bh
         end
@@ -546,9 +585,9 @@ function bench_dense_chol()
         end
     end
     tb = with_blas(BLAS_BASELINE) do
-        Ah = is_root() ? dense_spd(Float64, n) : nothing
-        bh = is_root() ? rand(n) : nothing
-        timed_min_root() do
+        Ah = dense_spd(Float64, n)
+        bh = rand(n)
+        timed_min() do
             F = cholesky(Ah)
             F \ bh
         end
@@ -570,8 +609,8 @@ function bench_dense_svd()
         end
     end
     tb = with_blas(BLAS_BASELINE) do
-        Ah = is_root() ? rand(n, n) : nothing
-        timed_min_root() do
+        Ah = rand(n, n)
+        timed_min() do
             svd(Ah)
         end
     end
@@ -611,15 +650,17 @@ function bench_spgemm()
     n, b, p = S.spgemm_n, S.spgemm_b, S.spgemm_p
     Random.seed!(1234)
     Ah = sprand(Float64, n, n, p)
+    Bh = sprand(Float64, n, n, p)
     td = with_blas(BLAS_DAGGER) do
-        A = distribute(Ah, Blocks(b, b)); wait(A)
+        A = distribute(Ah, Blocks(b, b))
+        B = distribute(Bh, Blocks(b, b))
         timed_min() do
-            C = A * A
+            C = A * B
             wait(C)
         end
     end
-    tb = timed_min_root() do
-        Ah * Ah
+    tb = timed_min() do
+        Ah * Bh
     end
     push_row!(feature="Sparse SpGEMM", key="sparse_spgemm",
               problem="sprand n=$(n), p=$(p), nnz=$(nnz(Ah)), tile=$(b)×$(b)",
@@ -666,22 +707,17 @@ function _krylov_pair(; feature, key, grid, b, solver_d, solver_b, host_name,
 
     Pb = nothing
     setup_b = nothing
-    tb = NaN
-    iters_b = nothing
-    rel_b = nothing
-    if is_root()
-        if build_b !== nothing
-            setup_b = @elapsed begin
-                Pb = build_b(Ah)
-            end
+    if build_b !== nothing
+        setup_b = @elapsed begin
+            Pb = build_b(Ah)
         end
-        tb = timed_min_root() do
-            solver_b(Ah, bh, Pb; ldiv=host_ldiv)
-        end
-        xh, stb = solver_b(Ah, bh, Pb; ldiv=host_ldiv)
-        iters_b = hasproperty(stb, :niter) ? stb.niter : nothing
-        rel_b = true_relres(Ah, xh, bh)
     end
+    tb = timed_min() do
+        solver_b(Ah, bh, Pb; ldiv=host_ldiv)
+    end
+    xh, stb = solver_b(Ah, bh, Pb; ldiv=host_ldiv)
+    iters_b = hasproperty(stb, :niter) ? stb.niter : nothing
+    rel_b = true_relres(Ah, xh, bh)
     note = join(filter(!isempty, [notes, method_notes,
                                   "square tiles; same atol=$(ATOL) rtol=$(RTOL) itmax=$(ITMAX)"]), "; ")
     push_row!(feature=feature, key=key,
@@ -792,59 +828,74 @@ function bench_sparse_direct()
     end
     Db = distribute(bh, Blocks(b)); wait(Db)
 
-    # Cholesky vs CHOLMOD
-    td = with_blas(BLAS_DAGGER) do
-        timed_min() do
-            F = cholesky(DA)
-            x = F \ Db
-            wait_d(x)
+    if wanted("sparse_chol")
+        td = with_blas(BLAS_DAGGER) do
+            timed_min() do
+                F = cholesky(DA)
+                x = F \ Db
+                wait_d(x)
+            end
         end
+        tb = timed_min_root() do
+            F = cholesky(Ah)
+            F \ bh
+        end
+        push_row!(feature="Sparse cholesky + \\", key="sparse_chol",
+                  problem="2-D Laplacian $(grid)×$(grid) (n=$(n), nnz=$(nnz(Ah))), tile=$(b)×$(b)",
+                  dagger_s=td, baseline_s=tb,
+                  baseline_name="CHOLMOD cholesky(::CSC)",
+                  notes="Dagger gathers then CHOLMOD on one worker; both fit in RAM")
     end
-    tb = timed_min_root() do
-        F = cholesky(Ah)
-        F \ bh
-    end
-    push_row!(feature="Sparse cholesky + \\", key="sparse_chol",
-              problem="2-D Laplacian $(grid)×$(grid) (n=$(n), nnz=$(nnz(Ah))), tile=$(b)×$(b)",
-              dagger_s=td, baseline_s=tb,
-              baseline_name="CHOLMOD cholesky(::CSC)",
-              notes="Dagger gathers then CHOLMOD on one worker; both fit in RAM")
 
-    # KLU
-    td = with_blas(BLAS_DAGGER) do
-        timed_min() do
-            F = Dagger.klu(DA)
-            x = F \ Db
-            wait_d(x)
+    if wanted("sparse_klu")
+        try
+            td = with_blas(BLAS_DAGGER) do
+                timed_min() do
+                    F = Dagger.klu(DA)
+                    x = F \ Db
+                    wait_d(x)
+                end
+            end
+            tb = timed_min_root() do
+                F = PureKLU.klu(Ah)
+                F \ bh
+            end
+            push_row!(feature="Sparse klu + \\", key="sparse_klu",
+                      problem="2-D Laplacian $(grid)×$(grid) (n=$(n), nnz=$(nnz(Ah))), tile=$(b)×$(b)",
+                      dagger_s=td, baseline_s=tb,
+                      baseline_name="PureKLU.klu(::CSC)",
+                      notes="Dagger.klu gathers to one worker; host is already local CSC")
+        catch err
+            push_row!(feature="Sparse klu + \\", key="sparse_klu", problem="(failed)",
+                      dagger_s=nothing, baseline_s=nothing, baseline_name="PureKLU.klu(::CSC)",
+                      error=sprint(showerror, err))
         end
     end
-    tb = timed_min_root() do
-        F = PureKLU.klu(Ah)
-        F \ bh
-    end
-    push_row!(feature="Sparse klu + \\", key="sparse_klu",
-              problem="2-D Laplacian $(grid)×$(grid) (n=$(n), nnz=$(nnz(Ah))), tile=$(b)×$(b)",
-              dagger_s=td, baseline_s=tb,
-              baseline_name="PureKLU.klu(::CSC)",
-              notes="Dagger.klu gathers to one worker; host is already local CSC")
 
-    # UMFPACK / splu
-    td = with_blas(BLAS_DAGGER) do
-        timed_min() do
-            F = Dagger.splu(DA)
-            x = F \ Db
-            wait_d(x)
+    if wanted("sparse_splu")
+        try
+            td = with_blas(BLAS_DAGGER) do
+                timed_min() do
+                    F = Dagger.splu(DA)
+                    x = F \ Db
+                    wait_d(x)
+                end
+            end
+            tb = timed_min_root() do
+                F = lu(Ah)
+                F \ bh
+            end
+            push_row!(feature="Sparse splu + \\", key="sparse_splu",
+                      problem="2-D Laplacian $(grid)×$(grid) (n=$(n), nnz=$(nnz(Ah))), tile=$(b)×$(b)",
+                      dagger_s=td, baseline_s=tb,
+                      baseline_name="SparseArrays.lu(::CSC) UMFPACK",
+                      notes="Dagger.splu gathers; host UMFPACK on local CSC")
+        catch err
+            push_row!(feature="Sparse splu + \\", key="sparse_splu", problem="(failed)",
+                      dagger_s=nothing, baseline_s=nothing, baseline_name="SparseArrays.lu(::CSC) UMFPACK",
+                      error=sprint(showerror, err))
         end
     end
-    tb = timed_min_root() do
-        F = lu(Ah)
-        F \ bh
-    end
-    push_row!(feature="Sparse splu + \\", key="sparse_splu",
-              problem="2-D Laplacian $(grid)×$(grid) (n=$(n), nnz=$(nnz(Ah))), tile=$(b)×$(b)",
-              dagger_s=td, baseline_s=tb,
-              baseline_name="SparseArrays.lu(::CSC) UMFPACK",
-              notes="Dagger.splu gathers; host UMFPACK on local CSC")
 end
 
 function bench_assembly()
@@ -978,6 +1029,158 @@ function bench_operators()
               notes="correctness-adjacent; hvcat would assemble, this stays matrix-free")
 end
 
+function bench_krylov_asm_basic()
+    _krylov_pair(; feature="Additive Schwarz (BASIC)", key="krylov_asm_basic",
+                 grid=S.krylov_grid, b=S.krylov_b,
+                 solver_d=_cg_d, solver_b=_cg_b,
+                 host_name="Krylov.cg + hand-rolled ASM BASIC (serial)",
+                 build_d=A -> Dagger.AdditiveSchwarzPreconditioner(A; overlap=1, type=:basic),
+                 build_b=A -> HostRASBasic(A, S.krylov_b, 1),
+                 notes="type=:basic (SPD); overlap=1; host is serial pre-factored ASM")
+end
+
+function bench_gmg()
+    _krylov_pair(; feature="Krylov CG + GeometricMultigrid", key="krylov_gmg",
+                 grid=S.krylov_grid, b=S.krylov_b,
+                 solver_d=_cg_d, solver_b=_cg_b,
+                 host_name="Krylov.cg + AlgebraicMultigrid SA (no Julia GMG)",
+                 build_d=A -> Dagger.GeometricMultigrid(A; grid=(S.krylov_grid, S.krylov_grid),
+                                                       presweeps=2, postsweeps=2),
+                 build_b=A -> AlgebraicMultigrid.aspreconditioner(AlgebraicMultigrid.smoothed_aggregation(A)),
+                 host_ldiv=true,
+                 notes="2+2 damped-Jacobi; host baseline is algebraic SA (no ecosystem GMG)")
+end
+
+function bench_csr_spmv()
+    n, b = S.spmv_n, S.spmv_b
+    Random.seed!(1234)
+    Ah = laplacian_1d(Float64, n)
+    xh = rand(n)
+    # Prefer a 2-D-sized 1-D operator already used for SpMV; CSR vs CSC tiles.
+    csr_ok = try
+        @eval using SparseMatricesCSR
+        true
+    catch
+        false
+    end
+    csr_ok || (push_row!(feature="CSR SpMV", key="csr_spmv", problem="(skipped)",
+                         dagger_s=nothing, baseline_s=nothing, baseline_name="—",
+                         error="SparseMatricesCSR not in environment"); return)
+    td = with_blas(BLAS_DAGGER) do
+        A = SparseMatricesCSR.sparsecsr(Ah, Blocks(b, b)); wait(A)
+        x = distribute(xh, Blocks(b)); wait(x)
+        y = Dagger.zeros(Blocks(b), Float64, n); wait(y)
+        timed_min() do
+            mul!(y, A, x); wait(y)
+        end
+    end
+    tb = timed_min_root() do
+        Ah * xh
+    end
+    push_row!(feature="CSR SpMV", key="csr_spmv",
+              problem="1-D Laplacian n=$(n), nnz=$(nnz(Ah)), CSR tiles $(b)",
+              dagger_s=td, baseline_s=tb,
+              baseline_name="SparseArrays *(::CSC, ::Vector)",
+              notes="Dagger SparseMatrixCSR tiles vs host CSC; compare also to CSC SpMV row")
+end
+
+function bench_eigen()
+    grid, b = 32, 256
+    n = grid * grid
+    Random.seed!(1234)
+    Ah = laplacian_2d(Float64, grid)
+    td = with_blas(BLAS_DAGGER) do
+        A = distribute(Ah, Blocks(b, b)); wait(A)
+        timed_min() do
+            F = eigen(A; nev=1, which=:SR)
+            wait_d(F.vectors)
+        end
+    end
+    tb = timed_min_root() do
+        eigen(Symmetric(Matrix(Ah)))
+    end
+    push_row!(feature="eigen (LOBPCG)", key="eigen",
+              problem="2-D Laplacian $(grid)×$(grid) (n=$(n)), tile=$(b)×$(b), nev=1",
+              dagger_s=td, baseline_s=tb,
+              baseline_name="LinearAlgebra.eigen(::Symmetric) dense geev",
+              notes="Dagger is LOBPCG (1 pair); host is full dense geev — different work")
+end
+
+function bench_numeric_refactor()
+    grid, b = S.direct_grid, S.direct_b
+    n = grid * grid
+    Random.seed!(1234)
+    Ah = laplacian_2d(Float64, grid)
+    # Same sparsity, different values (KLU numeric update, not symbolic).
+    Ah2 = Ah + SparseArrays.spdiagm(0 => fill(0.1, n))
+    DA = distribute(Ah, Blocks(b, b)); wait(DA)
+    DA2 = distribute(Ah2, Blocks(b, b)); wait(DA2)
+    F = Dagger.klu(DA)
+    wait_factor(F)
+    td = with_blas(BLAS_DAGGER) do
+        timed_min() do
+            lu!(F, DA2)
+            wait_factor(F)
+        end
+    end
+    Fh = PureKLU.klu(Ah)
+    tb = timed_min() do
+        PureKLU.klu!(Fh, Ah2)
+    end
+    push_row!(feature="Numeric refactor (klu!)", key="numeric_refactor",
+              problem="2-D Laplacian $(grid)×$(grid) (n=$(n)), same pattern, tile=$(b)×$(b)",
+              dagger_s=td, baseline_s=tb,
+              baseline_name="PureKLU.klu!(::CSC)",
+              notes="setup excluded; Dagger lu!(F, A) vs host klu!; same sparsity")
+end
+
+function bench_mixed_mul()
+    n, b = S.spmv_n, S.spmv_b
+    Random.seed!(1234)
+    Ah = laplacian_1d(Float32, n)
+    xh = rand(Float64, n)
+    td = with_blas(BLAS_DAGGER) do
+        A = distribute(Ah, Blocks(b, b)); wait(A)
+        x = distribute(xh, Blocks(b)); wait(x)
+        y = Dagger.zeros(Blocks(b), Float64, n); wait(y)
+        timed_min() do
+            mul!(y, A, x); wait(y)
+        end
+    end
+    tb = timed_min_root() do
+        Ah * xh
+    end
+    push_row!(feature="Mixed-eltype SpMV", key="mixed_mul",
+              problem="1-D Laplacian n=$(n), A::Float32 * x::Float64, tile=$(b)",
+              dagger_s=td, baseline_s=tb,
+              baseline_name="SparseArrays *(::CSC{Float32}, ::Vector{Float64})",
+              notes="mixed-eltype mul!; compare also to Float64 SpMV row")
+end
+
+function bench_multi_rhs()
+    grid, b, nrhs = 32, 256, 4
+    n = grid * grid
+    Random.seed!(1234)
+    Ah = laplacian_2d(Float64, grid)
+    Bh = rand(n, nrhs)
+    DA = distribute(Ah, Blocks(b, b)); wait(DA)
+    DB = distribute(Bh, Blocks(b, nrhs)); wait(DB)
+    td = with_blas(BLAS_DAGGER) do
+        timed_min() do
+            X = DA \ DB
+            wait_d(X)
+        end
+    end
+    tb = timed_min_root() do
+        Ah \ Bh
+    end
+    push_row!(feature="Multi-RHS A \\ B", key="multi_rhs",
+              problem="2-D Laplacian $(grid)×$(grid) (n=$(n)), $(nrhs) RHS, tile=$(b)×$(nrhs)",
+              dagger_s=td, baseline_s=tb,
+              baseline_name="SparseArrays \\ (::CSC, ::Matrix) UMFPACK",
+              notes="Dagger sparse A\\B is block_gmres; host is UMFPACK multi-RHS — different work")
+end
+
 # --- main ------------------------------------------------------------------
 
 function main()
@@ -1019,10 +1222,27 @@ function main()
     @safe_bench "krylov_amg_tile" bench_krylov_amg_tile()
     @safe_bench "krylov_globalamg" bench_krylov_globalamg()
     @safe_bench "krylov_asm" bench_krylov_asm()
-    @safe_bench "sparse_chol" bench_sparse_direct()
+    if wanted("sparse_chol") || wanted("sparse_klu") || wanted("sparse_splu")
+        try
+            bench_sparse_direct()
+        catch err
+            is_root() && @error "bench sparse_direct failed" exception = (err, catch_backtrace())
+            push_row!(feature="sparse_direct", key="sparse_direct", problem="(failed)",
+                      dagger_s=nothing, baseline_s=nothing, baseline_name="—",
+                      error=sprint(showerror, err))
+        end
+        GC.gc(); maybe_barrier()
+    end
     @safe_bench "assembly" bench_assembly()
     @safe_bench "linearsolve_krylov" bench_linearsolve()
     @safe_bench "projected" bench_operators()
+    @safe_bench "krylov_asm_basic" bench_krylov_asm_basic()
+    @safe_bench "krylov_gmg" bench_gmg()
+    @safe_bench "csr_spmv" bench_csr_spmv()
+    @safe_bench "eigen" bench_eigen()
+    @safe_bench "numeric_refactor" bench_numeric_refactor()
+    @safe_bench "mixed_mul" bench_mixed_mul()
+    @safe_bench "multi_rhs" bench_multi_rhs()
 
     if is_root()
         println()
