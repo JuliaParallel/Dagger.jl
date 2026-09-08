@@ -408,4 +408,13 @@ lesson.
    `DMatrix` is a nested `DArray` (lesson 33). Check `‖Ax-λx‖`, not only the
    Ritz residual. This is not ScaLAPACK geev and does not return the full
    spectrum. `Hermitian{<:DMatrix}` / `Symmetric{<:DMatrix}` must be hooked
-   too, or they steal the dense `Hermitian` method.
+   too, or they steal the dense `Hermitian` method. Match LinearAlgebra's
+   real `Hermitian`/`Symmetric` union with `S<:DMatrix` — a looser
+   `Hermitian{<:Any,<:DMatrix}` is ambiguous with the stdlib method.
+
+36. **A Union-typed `\` plus an `AbstractVector` fallback is ambiguous on `DVector`.**
+   `_PinnedSparseFactor = Union{DaggerSparseLU, DaggerSparseCholesky}` with
+   `\(F::Union, b::DVector)` and `\(F::DaggerSparseLU, b::AbstractVector)`
+   are equally specific on a `DaggerSparseLU \ DVector` (GlobalAMG coarse
+   solve). Specialize `\(F::DaggerSparseLU, b::DVector)` too; do not rely
+   on the Union method to win.
