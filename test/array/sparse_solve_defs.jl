@@ -98,7 +98,8 @@ function test_sparse_solve_dispatch(; scope=nothing, check_tile=nothing,
         @test xv isa Dagger.DVector
         @test collect(xv) ≈ xref rtol=cmp_rtol
 
-        # Multi-RHS stays off the dense factor path.
+        # Multi-RHS stays off the dense factor path. The iterative fallback
+        # is block-GMRES (`mul!(W, A, P)`), not a gather-and-loop of `A \ b`.
         DB = distribute(B, Blocks(k, k))
         X = DA \ DB
         @test X isa Dagger.DMatrix

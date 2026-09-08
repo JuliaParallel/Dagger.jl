@@ -113,6 +113,47 @@ end
     @test collect(sol_k.u) ≈ xref rtol = 1e-6
 end
 
+@testset "multi-RHS DMatrix via LinearSolve" begin
+    n = 32
+    k = 16
+    p = 3
+    Asp = advection_diffusion_1d(Float64, n)
+    B = rand(n, p)
+    Xref = Matrix(Asp) \ B
+    DA = distribute(Asp, Blocks(k, k))
+    DB = distribute(B, Blocks(k, k))
+    assump = LinearSolve.OperatorAssumptions(true)
+
+    # Sparse + multi-RHS default is still the gathered direct factor.
+    alg = LinearSolve.defaultalg(DA, DB, assump)
+    @test alg isa Union{LinearSolve.PureKLUFactorization,
+                        LinearSolve.PureUMFPACKFactorization}
+    sol = LinearSolve.solve(LinearProblem(DA, DB))
+    @test sol.retcode == ReturnCode.Success
+    @test sol.u isa Dagger.DMatrix
+    @test collect(sol.u) ≈ Xref rtol = 1e-8
+
+    sol_k = LinearSolve.solve(LinearProblem(DA, DB), KrylovJL_GMRES();
+        abstol = 1e-12, reltol = 1e-10)
+    @test sol_k.u isa Dagger.DMatrix
+    @test collect(sol_k.u) ≈ Xref rtol = 1e-6
+
+    DA_dense = distribute(Matrix(Asp), Blocks(k, k))
+    alg_d = LinearSolve.defaultalg(DA_dense, DB, assump)
+    @test alg_d isa LinearSolve.KrylovJL
+    sol_d = LinearSolve.solve(LinearProblem(DA_dense, DB), KrylovJL_GMRES();
+        abstol = 1e-12, reltol = 1e-10)
+    @test collect(sol_d.u) ≈ Xref rtol = 1e-6
+
+    S = Matrix(laplacian_1d(Float64, n))
+    Bspd = rand(n, p)
+    DS = distribute(S, Blocks(k, k))
+    DBspd = distribute(Bspd, Blocks(k, k))
+    sol_m = LinearSolve.solve(LinearProblem(DS, DBspd), KrylovJL_MINRES();
+        abstol = 1e-12, reltol = 1e-10)
+    @test collect(sol_m.u) ≈ S \ Bspd rtol = 1e-6
+end
+
 @testset "cache reuse and Dagger preconditioner as Pl" begin
     n = 32
     k = 16

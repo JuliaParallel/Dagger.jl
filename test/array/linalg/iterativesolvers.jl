@@ -110,6 +110,49 @@ end
         end
     end
 
+    @testset "block Krylov multi-RHS ($(backend))" for backend in (:dense, :sparse)
+        p = 3
+        Asp = advection_diffusion_1d(Float64, n)
+        Adense = Matrix(Asp)
+        B = rand(n, p)
+        Xref = Adense \ B
+        DA = backend === :dense ? distribute(Adense, A_part) : distribute(Asp, A_part)
+        DB = distribute(B, Blocks(k, k))
+
+        ws = Krylov.BlockGmresWorkspace(DA, DB)
+        @test ws.X isa AbstractMatrix
+        @test parent(ws.X) isa Dagger.DMatrix || ws.X isa Dagger.DMatrix
+
+        X, stats = Krylov.block_gmres(DA, DB; atol = 1e-12, rtol = 1e-10, itmax = 200)
+        @test X isa Dagger.DMatrix
+        @test stats.solved
+        @test collect(X) ≈ Xref rtol = 1e-6
+        # True residual — `stats.solved` is the block residual, not a column loop.
+        R = similar(DB)
+        mul!(R, DA, X)
+        R .-= DB
+        @test LinearAlgebra.norm(collect(R)) / LinearAlgebra.norm(B) < 1e-8
+
+        X2, stats2 = Dagger.block_gmres(DA, DB; atol = 1e-12, rtol = 1e-10, itmax = 200)
+        @test collect(X2) ≈ Xref rtol = 1e-6
+        @test stats2.solved
+
+        X3, stats3 = Dagger.krylov_solve(:block_gmres, DA, DB; atol = 1e-12, rtol = 1e-10)
+        @test collect(X3) ≈ Xref rtol = 1e-6
+        @test stats3.solved
+
+        Asp_spd = laplacian_1d(Float64, n)
+        Bspd = rand(n, p)
+        Xspd = Matrix(Asp_spd) \ Bspd
+        DA_spd = backend === :dense ? distribute(Matrix(Asp_spd), A_part) :
+                 distribute(Asp_spd, A_part)
+        DB_spd = distribute(Bspd, Blocks(k, k))
+        Xm, sm = Krylov.block_minres(DA_spd, DB_spd; atol = 1e-12, rtol = 1e-10, itmax = 200)
+        @test Xm isa Dagger.DMatrix
+        @test sm.solved
+        @test collect(Xm) ≈ Xspd rtol = 1e-6
+    end
+
     @testset "complex SPD (Hermitian) operator" begin
         # Real SPD tridiagonal is Hermitian as a complex matrix.
         Asp = SparseArrays.spdiagm(
