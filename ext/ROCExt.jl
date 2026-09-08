@@ -576,4 +576,20 @@ function __init__()
     end
 end
 
+# Dense block-Jacobi: vendor getrf on a GPU tile. AMDGPU does not define
+# `lu(::ROCArray)` / `ldiv!(::LU, ::ROCArray)`, so factor through
+# `LAPACK.getrf!` and apply through `LAPACK.getrs!`.
+function Dagger._factorize_tile(A::ROCArray)
+    factors, ipiv, info = LinearAlgebra.LAPACK.getrf!(copy(A))
+    return LinearAlgebra.LU(factors, ipiv, Int(info))
+end
+function Dagger._apply_inverse!(y::ROCArray, F::LinearAlgebra.LU{T,<:ROCArray},
+                                x::ROCArray) where T
+    copyto!(y, x)
+    LinearAlgebra.LAPACK.getrs!('N', F.factors, F.ipiv, y)
+    return y
+end
+Dagger._supports_device_apply(::LinearAlgebra.LU{T,<:ROCArray},
+                              ::ROCArray) where T = true
+
 end # module ROCExt

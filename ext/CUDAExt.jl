@@ -555,4 +555,17 @@ function __init__()
     end
 end
 
+# Dense block-Jacobi: vendor getrf on a GPU tile, apply via getrs / `ldiv!`.
+# Without this, the generic `_factorize_tile` gathers to host (Metal/OpenCL
+# do not have `lu(::DeviceArray)`).
+Dagger._factorize_tile(A::CuArray) = LinearAlgebra.lu(A)
+function Dagger._apply_inverse!(y::CuArray, F::LinearAlgebra.LU{T,<:CuArray},
+                                x::CuArray) where T
+    copyto!(y, x)
+    LinearAlgebra.ldiv!(F, y)
+    return y
+end
+Dagger._supports_device_apply(::LinearAlgebra.LU{T,<:CuArray},
+                              ::CuArray) where T = true
+
 end # module CUDAExt

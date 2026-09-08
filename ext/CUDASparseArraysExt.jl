@@ -170,4 +170,18 @@ function Dagger.transpose_tile(B::CuSparseMatrixCSC, uplo::Char)
     return CuSparseMatrixCSC(Ct)
 end
 
+# Vendor ILU(0) for [`Dagger.BlockILUPreconditioner`](@ref). More specific
+# than IncompleteLUExt's host `_ilu_tile`, so GPU tiles stay on-device.
+# CSC is converted to CSR first: cuSPARSE's CSC `ilu02` runs the CSR kernel
+# on the transpose, which would not pair with `UnitLowerTriangular` /
+# `UpperTriangular` apply of A. `τ` is ignored — ILU0 has no drop tolerance.
+function Dagger._ilu_tile(A::CuSparseMatrixCSC; kwargs...)
+    return Dagger.DeviceILU0(CUDA.CUSPARSE.ilu02(CuSparseMatrixCSR(A)))
+end
+function Dagger._ilu_tile(A::CuSparseMatrixCSR; kwargs...)
+    return Dagger.DeviceILU0(CUDA.CUSPARSE.ilu02(A))
+end
+Dagger._supports_device_apply(::Dagger.DeviceILU0{<:Union{CuSparseMatrixCSC,CuSparseMatrixCSR}},
+                              ::CuArray) = true
+
 end # module CUDASparseArraysExt
