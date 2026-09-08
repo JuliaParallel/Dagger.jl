@@ -284,7 +284,11 @@ function _direct_solve(fact, bparts...)
     return fact \ b
 end
 
-function Base.:\(F::_PinnedSparseFactor, b::DVector)
+# Concrete `DVector` methods: `DaggerSparseLU` also has `\(F, ::AbstractVector)`
+# (host Vector staging), and `DVector <: AbstractVector`, so a Union first
+# argument is ambiguous with that method (GlobalAMG coarse solve and Schur
+# `klu(A) \ b` both hit this).
+function _solve_pinned_dvector(F, b::DVector)
     length(b) == F.n || throw(DimensionMismatch(
         "factorization is $(F.n)×$(F.n) but b has length $(length(b))"))
     # Solve on the factor's worker (factor stays pinned); only the O(n) solution
@@ -293,6 +297,8 @@ function Base.:\(F::_PinnedSparseFactor, b::DVector)
                     F.fact, b.chunks...))
     return distribute(x, b.partitioning)
 end
+Base.:\(F::DaggerSparseLU, b::DVector) = _solve_pinned_dvector(F, b)
+Base.:\(F::DaggerSparseCholesky, b::DVector) = _solve_pinned_dvector(F, b)
 
 function LinearAlgebra.ldiv!(x::DVector, F::_PinnedSparseFactor, b::DVector)
     return copyto!(x, F \ b)
