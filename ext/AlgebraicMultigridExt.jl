@@ -78,7 +78,7 @@ function _amg_tile_starts(A::DMatrix)
     return row_starts, col_starts
 end
 
-function _amg_iface_from_row!(iface_local, iface_nbr, assigned, diag_j, col_starts, tiles...)
+function _amg_iface_from_row!(iface_local, iface_nbr, k, diag_j, col_starts, tiles...)
     for j in 1:length(tiles)
         j == diag_j && continue
         Aj = _amg_tile_csc(tiles[j])
@@ -86,7 +86,7 @@ function _amg_iface_from_row!(iface_local, iface_nbr, assigned, diag_j, col_star
         for col in 1:size(Aj, 2)
             for p in SparseArrays.nzrange(Aj, col)
                 r = Aj.rowval[p]
-                (r < 1 || r > length(assigned) || assigned[r]) && continue
+                (r < 1 || r > k) && continue
                 Aj.nzval[p] == 0 && continue
                 push!(iface_local, r)
                 push!(iface_nbr, c0 + col - 1)
@@ -94,6 +94,23 @@ function _amg_iface_from_row!(iface_local, iface_nbr, assigned, diag_j, col_star
         end
     end
     return nothing
+end
+
+function _amg_finish_interp(I, J, V, nagg, k, ::Type{T}, diag_j, col_starts, tiles...) where T
+    iface_local = Int[]
+    iface_nbr = Int[]
+    _amg_iface_from_row!(iface_local, iface_nbr, k, diag_j, col_starts, tiles...)
+    row_agg = zeros(Int, k)
+    for p in eachindex(I)
+        r = I[p]
+        (1 <= r <= k) && (row_agg[r] = J[p])
+    end
+    iface_agg = Vector{Int}(undef, length(iface_local))
+    for t in eachindex(iface_local)
+        loc = iface_local[t]
+        iface_agg[t] = (1 <= loc <= k) ? row_agg[loc] : 0
+    end
+    return AMGTileInterp{T}(I, J, V, nagg, iface_local, iface_nbr, iface_agg)
 end
 
 function _amg_row_coarsen_sa(diag_j::Int, col_starts::Vector{Int},
@@ -107,23 +124,16 @@ function _amg_row_coarsen_sa(diag_j::Int, col_starts::Vector{Int},
     I = Int[]
     J = Int[]
     V = T[]
-    assigned = falses(k)
     if nagg > 0
         Tent, _ = AlgebraicMultigrid.fit_candidates(AggOp, ones(T, k))
         if size(Tent, 2) > 0
             I, J, V = SparseArrays.findnz(Tent)
             nagg = size(Tent, 2)
-            for r in I
-                assigned[r] = true
-            end
         else
             nagg = 0
         end
     end
-    iface_local = Int[]
-    iface_nbr = Int[]
-    _amg_iface_from_row!(iface_local, iface_nbr, assigned, diag_j, col_starts, tiles...)
-    return AMGTileInterp{T}(I, J, V, nagg, iface_local, iface_nbr)
+    return _amg_finish_interp(I, J, V, nagg, k, T, diag_j, col_starts, tiles...)
 end
 
 function _amg_row_coarsen_rs(diag_j::Int, col_starts::Vector{Int}, extra, tiles...)
@@ -134,13 +144,11 @@ function _amg_row_coarsen_rs(diag_j::Int, col_starts::Vector{Int}, extra, tiles.
     J = Int[]
     V = T[]
     nagg = 0
-    assigned = falses(k)
     if k <= 1
         nagg = 1
         I = Int[1]
         J = Int[1]
         V = T[one(T)]
-        assigned[1] = true
     else
         ml = AlgebraicMultigrid.ruge_stuben(Ad; max_levels=2, max_coarse=max(k - 1, 1), extra...)
         if !isempty(ml.levels)
@@ -148,16 +156,10 @@ function _amg_row_coarsen_rs(diag_j::Int, col_starts::Vector{Int}, extra, tiles.
             if size(P, 2) > 0
                 I, J, V = SparseArrays.findnz(P)
                 nagg = size(P, 2)
-                for r in I
-                    assigned[r] = true
-                end
             end
         end
     end
-    iface_local = Int[]
-    iface_nbr = Int[]
-    _amg_iface_from_row!(iface_local, iface_nbr, assigned, diag_j, col_starts, tiles...)
-    return AMGTileInterp{T}(I, J, V, nagg, iface_local, iface_nbr)
+    return _amg_finish_interp(I, J, V, nagg, k, T, diag_j, col_starts, tiles...)
 end
 
 # Named so workers resolve it without a closure. `tiles` is one row of `A`
@@ -174,64 +176,108 @@ function Dagger._amg_row_coarsen(method::Symbol, diag_j::Int, col_starts::Vector
     end
 end
 
+function _amg_find!(parent, x)
+    while parent[x] != x
+        parent[x] = parent[parent[x]]
+        x = parent[x]
+    end
+    return x
+end
+
+function _amg_union!(parent, a, b)
+    ra, rb = _amg_find!(parent, a), _amg_find!(parent, b)
+    ra == rb && return
+    if ra < rb
+        parent[rb] = ra
+    else
+        parent[ra] = rb
+    end
+    return nothing
+end
+
+# Merge local aggregates that share an interface edge. Unassigned interface
+# nodes (no local aggregate) are paired or kept as singletons, as before.
 function _amg_match_interface(headers, row_starts, ::Type{T}) where T
     mt = length(headers)
+    offsets = Vector{Int}(undef, mt)
+    nagg_total = 0
+    for i in 1:mt
+        offsets[i] = nagg_total
+        nagg_total += headers[i].nagg
+    end
+
+    node_info = Dict{Int,Tuple{Int,Int,Int}}()
     edges = Vector{Tuple{Int,Int}}()
-    node_tile = Dict{Int,Tuple{Int,Int}}()
     for i in 1:mt
         h = headers[i]
         r0 = row_starts[i]
-        for (loc, nbr) in zip(h.iface_local, h.iface_nbr)
+        for t in eachindex(h.iface_local)
+            loc = h.iface_local[t]
+            nbr = Int(h.iface_nbr[t])
+            agg = t <= length(h.iface_agg) ? Int(h.iface_agg[t]) : 0
             g = r0 + loc - 1
-            node_tile[g] = (i, loc)
-            lo, hi = minmax(g, Int(nbr))
+            node_info[g] = (i, loc, agg)
+            lo, hi = minmax(g, nbr)
             push!(edges, (lo, hi))
         end
     end
     unique!(sort!(edges))
-    unmatched = Set(keys(node_tile))
-    pairs = Vector{Tuple{Int,Int}}()
+
+    unassigned = sort!(Int[g for (g, info) in node_info if info[3] == 0])
+    extra_id = Dict{Int,Int}()
+    nids = nagg_total
+    for g in unassigned
+        nids += 1
+        extra_id[g] = nids
+    end
+    nids == 0 && return ([Int[] for _ in 1:mt],
+                         [Vector{Tuple{Int,Int,T}}() for _ in 1:mt], 0)
+
+    parent = collect(1:nids)
+    node_id = function (g)
+        t, _, agg = node_info[g]
+        return agg > 0 ? (offsets[t] + agg) : extra_id[g]
+    end
     for (a, b) in edges
-        (a in unmatched && b in unmatched) || continue
-        (haskey(node_tile, a) && haskey(node_tile, b)) || continue
-        delete!(unmatched, a)
-        delete!(unmatched, b)
-        push!(pairs, (a, b))
+        (haskey(node_info, a) && haskey(node_info, b)) || continue
+        _amg_union!(parent, node_id(a), node_id(b))
     end
-    offsets = Vector{Int}(undef, mt)
-    acc = 0
+
+    roots = Vector{Int}(undef, nids)
+    for i in 1:nids
+        roots[i] = _amg_find!(parent, i)
+    end
+    uroots = sort!(unique!(roots))
+    col_of_root = Dict{Int,Int}(r => i for (i, r) in enumerate(uroots))
+    nc = length(uroots)
+
+    colmaps = [zeros(Int, headers[i].nagg) for i in 1:mt]
     for i in 1:mt
-        offsets[i] = acc
-        acc += headers[i].nagg
+        for a in 1:headers[i].nagg
+            colmaps[i][a] = col_of_root[_amg_find!(parent, offsets[i] + a)]
+        end
     end
+
     matches = [Vector{Tuple{Int,Int,T}}() for _ in 1:mt]
-    extra = 0
     w2 = T(1 / sqrt(2))
-    for (a, b) in pairs
-        extra += 1
-        gcol = acc + extra
-        ta, la = node_tile[a]
-        tb, lb = node_tile[b]
-        push!(matches[ta], (la, gcol, w2))
-        push!(matches[tb], (lb, gcol, w2))
+    for g in unassigned
+        t, loc, _ = node_info[g]
+        root = _amg_find!(parent, extra_id[g])
+        w = root <= nagg_total ? one(T) : w2
+        push!(matches[t], (loc, col_of_root[root], w))
     end
-    for g in sort!(collect(unmatched))
-        extra += 1
-        gcol = acc + extra
-        t, l = node_tile[g]
-        push!(matches[t], (l, gcol, one(T)))
-    end
-    return offsets, matches, acc + extra
+    return colmaps, matches, nc
 end
 
 # Local-index CSC for one `P` tile. `match` is `(local_row, global_col, weight)`.
-function Dagger._amg_fill_p_tile(interp::AMGTileInterp{T}, match, offset::Int,
+# `colmap[local_agg]` is the global coarse column after interface merges.
+function Dagger._amg_fill_p_tile(interp::AMGTileInterp{T}, match, colmap,
                                  col0::Int, ncols::Int, tm::Int, tn::Int) where T
     I = Int[]
     J = Int[]
     V = T[]
     for p in eachindex(interp.I)
-        gcol = offset + interp.J[p]
+        gcol = colmap[interp.J[p]]
         if col0 <= gcol < col0 + ncols
             push!(I, interp.I[p])
             push!(J, gcol - col0 + 1)
@@ -253,7 +299,7 @@ function _amg_replace_chunks(A::DMatrix{T}, new_chunks) where T
     return Dagger.DArray(T, A.domain, A.subdomains, new_chunks, A.partitioning, A.concat)
 end
 
-function _amg_assemble_p(A::DMatrix{T}, interp_tasks, offsets, matches, nc) where T
+function _amg_assemble_p(A::DMatrix{T}, interp_tasks, colmaps, matches, nc) where T
     n = size(A, 1)
     k = Int(A.partitioning.blocksize[1])
     TT = Dagger.is_sparse_backed(A) ? Dagger.darray_tiletype(A) : Dagger.DSparseArray{T,2}
@@ -271,7 +317,7 @@ function _amg_assemble_p(A::DMatrix{T}, interp_tasks, offsets, matches, nc) wher
         tm = length(P0.subdomains[i, j].indexes[1])
         tn = length(P0.subdomains[i, j].indexes[2])
         new_chunks[i, j] = Dagger.@spawn return_type=Dagger.DSparseArray{T,2} Dagger._amg_fill_p_tile(
-            interp_tasks[i], matches[i], offsets[i], col0s[j], colns[j], tm, tn)
+            interp_tasks[i], matches[i], colmaps[i], col0s[j], colns[j], tm, tn)
     end
     return _amg_replace_chunks(P0, new_chunks)
 end
@@ -365,9 +411,9 @@ function _amg_prolongation(A::DMatrix{T}; method::Symbol, smooth::Bool,
     for i in 1:mt
         headers[i] = fetch(Dagger.@spawn return_type=AMGTileHeader Dagger._amg_interp_header(interp_tasks[i]))
     end
-    offsets, matches, nc = _amg_match_interface(headers, row_starts, T)
+    colmaps, matches, nc = _amg_match_interface(headers, row_starts, T)
     (nc == 0 || nc >= n) && return nothing
-    Tent = _amg_assemble_p(A, interp_tasks, offsets, matches, nc)
+    Tent = _amg_assemble_p(A, interp_tasks, colmaps, matches, nc)
     if !smooth
         return Tent
     end
