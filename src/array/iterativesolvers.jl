@@ -134,10 +134,15 @@ _set_inv_diag!(out, tile) = (out .= inv.(LinearAlgebra.diag(tile)); return nothi
 # its body returns, but `_build_block_preconditioner` spawns the per-tile builds
 # without awaiting them, and the operators it retains are built *from* these
 # tiles.
-function _square_tiled_layout(A::DMatrix)
+function _square_tiled_dmatrix(A::DMatrix)
     n = LinearAlgebra.checksquare(A)
     mb, nb = A.partitioning.blocksize
     Asq = mb == nb ? A : repartition(A, Blocks(min(mb, nb), min(mb, nb)))
+    return n, Asq
+end
+
+function _square_tiled_layout(A::DMatrix)
+    n, Asq = _square_tiled_dmatrix(A)
     Ac = Asq.chunks
     mt, _ = size(Ac)
     return n, Ac, mt, Asq.partitioning.blocksize[1]
@@ -182,7 +187,9 @@ _jacobi_apply!(y, dinv, x) = (y .= dinv .* x; return nothing)
 # layout. A single tile (`Blocks(n, n)`) makes any of these a *global*
 # preconditioner over the whole matrix; many tiles make it a scalable
 # block-Jacobi / additive-Schwarz variant that trades some convergence for
-# parallelism. All re-tile a non-square `A` to square tiles (see
+# parallelism. Overlapping additive Schwarz (`AdditiveSchwarzPreconditioner`)
+# is the same idea with a halo-expanded diagonal block; overlap 0 is this
+# family. All re-tile a non-square `A` to square tiles (see
 # `_square_tiled_layout`).
 #
 # A per-tile operator (`lu`/ILU factor, AMG hierarchy) generally cannot be moved
@@ -432,3 +439,225 @@ end
 BlockUMFPACKPreconditioner(A; kwargs...) = throw(ArgumentError(
     "Dagger.BlockUMFPACKPreconditioner requires PureUMFPACK.jl. Run \
     `using PureUMFPACK` to enable block UMFPACK preconditioning."))
+
+# --- Overlapping additive Schwarz ------------------------------------------
+# Restricted ASM (PETSc `PCASM` / `PC_ASM_RESTRICT`): each subdomain solves a
+# halo-expanded diagonal block `A[Ω, Ω]`, restriction copies the residual on the
+# whole of `Ω`, and interpolation writes back only the owned interior. The
+# interiors partition `1:n`, so there is no overlap reduction. Overlap 0 is
+# exactly block Jacobi. Overlap rows may span neighbor tiles; those tiles are
+# gathered onto the interior tile's worker, the expanded block is factored once
+# (same `lu` / user `build` as the block-Jacobi family), and every apply is
+# pinned there.
+
+"""
+    AdditiveSchwarzPreconditioner(A::DMatrix; overlap=1, build=_factorize_tile)
+
+Overlapping additive Schwarz preconditioner. Each square diagonal tile of `A`
+owns an interior index set `Iᵢ`; the subdomain is the halo expansion
+`Ωᵢ = Iᵢ` grown by `overlap` rows on each side (clipped to `1:n`). The object
+represents `M⁻¹` under Krylov's `ldiv=false` convention: `mul!(y, P, x)`
+restricts `x` onto each `Ωᵢ`, solves `A[Ωᵢ, Ωᵢ] y_Ω = x_Ω`, and interpolates
+by writing only the interior slice of `y_Ω` into `y[Iᵢ]` (PETSc
+`PC_ASM_RESTRICT`). Off-subdomain values on interpolate are ignored.
+
+`overlap = 0` is block Jacobi — the same per-tile exact solve as
+[`BlockJacobiPreconditioner`](@ref), with no neighbor gather. The default
+`overlap = 1` matches PETSc `PCASM`. `build` is the per-subdomain factory
+(`build(AΩ) -> op`); it receives the assembled host block (dense `Matrix` or
+`SparseMatrixCSC`, not a Dagger tile) and defaults to the same `lu` used by
+block Jacobi. Pass a `klu` / `splu` factory to reuse those sub-solves.
+
+If `A` does not have square tiles, it is re-tiled to square ones at
+construction (see [`AbstractBlockPreconditioner`](@ref)).
+"""
+struct AdditiveSchwarzPreconditioner{F,S} <: AbstractDaggerPreconditioner
+    ops::F
+    scopes::S
+    part::Blocks{1}
+    n::Int
+    overlap::Int
+    interiors::Vector{UnitRange{Int}}
+end
+
+function AdditiveSchwarzPreconditioner(A::DMatrix; overlap::Integer=1,
+                                       build=_factorize_tile)
+    overlap >= 0 || throw(ArgumentError(
+        "AdditiveSchwarzPreconditioner overlap must be ≥ 0, got $overlap"))
+    return _build_asm_preconditioner(A, Int(overlap), build)
+end
+
+function _expand_overlap(r::UnitRange{Int}, overlap::Int, n::Int)
+    return max(Int(1), first(r) - overlap):min(n, last(r) + overlap)
+end
+
+function _range_tile_span(ranges::Vector{UnitRange{Int}}, Ω::UnitRange{Int})
+    lo = findfirst(r -> last(r) >= first(Ω), ranges)
+    hi = findlast(r -> first(r) <= last(Ω), ranges)
+    (lo === nothing || hi === nothing) && return 1:0
+    return lo::Int:hi::Int
+end
+
+# Host-resident tile contents. `_tile_matrix` already collects GPU sparse to
+# host CSC; remaining non-`Array` tiles with CSC storage stay sparse so an
+# overlapping block is not silently densified (lesson 22).
+function _asm_host_matrix(tile)
+    m = _tile_matrix(tile)
+    m isa Array && return m
+    hasfield(typeof(m), :colptr) && hasfield(typeof(m), :nzval) && return m
+    return Adapt.adapt(Array, m)
+end
+
+_asm_is_sparse(A) =
+    hasfield(typeof(A), :colptr) && hasfield(typeof(A), :rowval) && hasfield(typeof(A), :nzval)
+
+function _asm_copy_intersect!(dest, Ω::UnitRange{Int}, rr::UnitRange{Int},
+                              cr::UnitRange{Int}, src)
+    r = intersect(rr, Ω)
+    c = intersect(cr, Ω)
+    (isempty(r) || isempty(c)) && return dest
+    rd = (first(r) - first(Ω) + 1):(last(r) - first(Ω) + 1)
+    cd = (first(c) - first(Ω) + 1):(last(c) - first(Ω) + 1)
+    rs = (first(r) - first(rr) + 1):(last(r) - first(rr) + 1)
+    cs = (first(c) - first(cr) + 1):(last(c) - first(cr) + 1)
+    dest[rd, cd] = src[rs, cs]
+    return dest
+end
+
+# SparseArraysExt adds a `_gather_sparse` + slice method so CSC tiles stay CSC.
+# The varargs fallback densifies (same signature as `_gather_sparse`'s stub).
+function _asm_assemble_sparse end
+_asm_assemble_sparse(args...) = _asm_assemble_dense(args...)
+
+function _asm_assemble_dense(Ω::UnitRange{Int}, row_ranges, col_ranges, hosts)
+    nΩ = length(Ω)
+    AΩ = zeros(eltype(first(hosts)), nΩ, nΩ)
+    k = 0
+    for jr in eachindex(row_ranges), jc in eachindex(col_ranges)
+        k += 1
+        _asm_copy_intersect!(AΩ, Ω, row_ranges[jr], col_ranges[jc], hosts[k])
+    end
+    return AΩ
+end
+
+function _asm_assemble(Ω::UnitRange{Int}, row_ranges, col_ranges, tiles...)
+    nr = length(row_ranges)
+    nc = length(col_ranges)
+    length(tiles) == nr * nc || throw(DimensionMismatch(
+        "overlapping ASM expected $(nr * nc) tiles, got $(length(tiles))"))
+    hosts = map(_asm_host_matrix, tiles)
+    if _asm_is_sparse(first(hosts))
+        return _asm_assemble_sparse(Ω, row_ranges, col_ranges, hosts)
+    end
+    return _asm_assemble_dense(Ω, row_ranges, col_ranges, hosts)
+end
+
+function _asm_build_pinned(build, Ω, row_ranges, col_ranges, tiles...)
+    AΩ = _asm_assemble(Ω, row_ranges, col_ranges, tiles...)
+    return _build_tile_pinned(build, AΩ)
+end
+
+function _build_asm_preconditioner(A::DMatrix, overlap::Int, build)
+    n, Asq = _square_tiled_dmatrix(A)
+    Ac = Asq.chunks
+    mt, nt = size(Ac)
+    mb = Asq.partitioning.blocksize[1]
+    row_ranges = [Asq.subdomains[i, 1].indexes[1] for i in 1:mt]
+    col_ranges = [Asq.subdomains[1, j].indexes[2] for j in 1:nt]
+    interiors = Vector{UnitRange{Int}}(undef, mt)
+    for i in 1:mt
+        interiors[i] = Asq.subdomains[i, i].indexes[1]
+    end
+    ops = Vector{Any}(undef, mt)
+    scopes = Vector{ProcessScope}(undef, mt)
+    for i in 1:mt
+        interior = interiors[i]
+        Ω = _expand_overlap(interior, overlap, n)
+        rows = _range_tile_span(row_ranges, Ω)
+        cols = _range_tile_span(col_ranges, Ω)
+        scope = _tile_scope(Ac[i, i])
+        scopes[i] = scope
+        tiles = [Ac[r, c] for r in rows for c in cols]
+        rr = row_ranges[rows]
+        cr = col_ranges[cols]
+        ops[i] = Dagger.spawn(_asm_build_pinned, Options(; compute_scope=scope),
+                              build, Ω, rr, cr, tiles...)
+    end
+    return AdditiveSchwarzPreconditioner(ops, scopes, Blocks(mb), n, overlap, interiors)
+end
+
+function LinearAlgebra.mul!(y::DVector, P::AdditiveSchwarzPreconditioner, x::DVector)
+    part = P.part
+    maybe_copy_buffered(x => part, y => part) do x, y
+        xc, yc = x.chunks, y.chunks
+        length(yc) == length(P.ops) || throw(DimensionMismatch(
+            "AdditiveSchwarzPreconditioner has $(length(P.ops)) blocks but the \
+            vector has $(length(yc)) chunks"))
+        interiors = P.interiors
+        Dagger.spawn_datadeps() do
+            for i in eachindex(yc)
+                Ω = _expand_overlap(interiors[i], P.overlap, P.n)
+                js = _range_tile_span(interiors, Ω)
+                ranges = interiors[js]
+                x_ins = ntuple(k -> In(xc[js[k]]), length(js))
+                Dagger.spawn(_asm_apply!, Options(; compute_scope=P.scopes[i]),
+                             Out(yc[i]), P.ops[i], Ω, interiors[i], ranges, x_ins...)
+            end
+        end
+    end
+    return y
+end
+
+_asm_host_vec(x::Array) = x
+_asm_host_vec(x) = Adapt.adapt(Array, x)
+
+_asm_apply!(y, P::PinnedTileOperator, Ω, interior, ranges, xs...) =
+    _asm_apply!(y, P.op, Ω, interior, ranges, xs...)
+
+function _asm_all_host_vecs(xs)
+    for x in xs
+        x isa Array || return false
+    end
+    return true
+end
+
+function _asm_apply!(y, op, Ω, interior, ranges, xs...)
+    if y isa Array && _asm_all_host_vecs(xs)
+        _asm_apply_host!(y, op, Ω, interior, ranges, xs)
+    else
+        _asm_apply_adapt!(y, op, Ω, interior, ranges, xs)
+    end
+    return nothing
+end
+
+function _asm_apply_adapt!(y, op, Ω, interior, ranges, xs)
+    xh = map(_asm_host_vec, xs)
+    yh = y isa Array ? y : Vector{eltype(y)}(undef, length(y))
+    _asm_apply_host!(yh, op, Ω, interior, ranges, xh)
+    if !(y isa Array)
+        copyto!(y, yh)
+    end
+    return nothing
+end
+
+function _asm_restrict_from_chunk!(xΩ, Ω::UnitRange{Int}, cr::UnitRange{Int}, x)
+    r = intersect(cr, Ω)
+    isempty(r) && return
+    dest0 = first(r) - first(Ω) + 1
+    src0 = first(r) - first(cr) + 1
+    copyto!(xΩ, dest0, x, src0, length(r))
+    return nothing
+end
+
+function _asm_apply_host!(y, op, Ω, interior, ranges, xs)
+    T = eltype(y)
+    xΩ = Vector{T}(undef, length(Ω))
+    for k in 1:length(xs)
+        _asm_restrict_from_chunk!(xΩ, Ω, ranges[k], xs[k])
+    end
+    yΩ = Vector{T}(undef, length(Ω))
+    _apply_inverse!(yΩ, op, xΩ)
+    off = first(interior) - first(Ω)
+    copyto!(y, 1, yΩ, 1 + off, length(interior))
+    return nothing
+end

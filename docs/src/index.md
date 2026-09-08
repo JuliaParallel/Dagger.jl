@@ -430,7 +430,8 @@ x, stats = Krylov.cg(DA, b; M = P)      # pass as `M`
 ```
 
 Other preconditioners: `Dagger.JacobiPreconditioner`,
-`Dagger.BlockJacobiPreconditioner` (core), `Dagger.BlockILUPreconditioner`
+`Dagger.BlockJacobiPreconditioner`, `Dagger.AdditiveSchwarzPreconditioner`
+(core; overlapping restricted ASM), `Dagger.BlockILUPreconditioner`
 (load `IncompleteLU`), and `Dagger.BlockPreconditioner(A, build)` to plug in any
 third-party per-tile factory. Any object implementing `mul!(y, A, x)` over
 `DVector`s can be used as a matrix-free operator `A`.

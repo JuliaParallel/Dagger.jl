@@ -330,3 +330,18 @@ lesson.
    `move!` and no bucket method exists (`ArgumentError` at `memory-spaces.jl`).
    Regular `@spawn` serializes the fragment like `AllocateArray`; replace
    dest chunks with the assemble `DTask`s rather than `InOut`-mutating.
+
+30. **Restricted additive Schwarz writes back only the interior.**
+   `AdditiveSchwarzPreconditioner` is PETSc `PC_ASM_RESTRICT`: the subdomain
+   solve sees the halo-expanded residual (`A[Ω,Ω] \\ x[Ω]`), but interpolation
+   ignores overlap values and writes only the owned interior. Interiors
+   partition `1:n`, so there is no overlap reduction. Overlap 0 is block
+   Jacobi. Index-range overlap (grow the tile's row/column set by `overlap`
+   on each side) matches graph overlap on 1-D stencils; neighbor tiles are
+   gathered onto the interior tile's worker. Check the true residual
+   (lesson 19), not only `stats.solved`. RAS restriction is nonsymmetric,
+   so CG can take *more* iterations with overlap than without (seen 15 →
+   171 on a 64×64 Laplacian); use GMRES. Overlap 1 also does not reduce
+   GMRES `niter` on a well-conditioned 1-D Laplacian with a handful of
+   large tiles (n=64, 8 tiles of 8: 15=15). The iteration drop needs
+   smaller subdomains (n=48, tiles of 3: 31→17) or stronger convection.
