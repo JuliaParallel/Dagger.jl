@@ -298,14 +298,10 @@ function LinearAlgebra.ldiv!(x::DVector, F::_PinnedSparseFactor, b::DVector)
     return copyto!(x, F \ b)
 end
 
+# The pinned factor is a host sparse LU; those backends already accept a
+# matrix RHS (`F \\ B`), so do not loop columns here.
 function _direct_solve_matrix(fact, B::AbstractMatrix)
-    x1 = fact \ B[:, 1]
-    X = similar(B, eltype(x1), size(B))
-    X[:, 1] = x1
-    for j in 2:size(B, 2)
-        X[:, j] = fact \ B[:, j]
-    end
-    return X
+    return fact \ B
 end
 
 function Base.:\(F::DaggerSparseLU, B::DMatrix)
@@ -347,13 +343,10 @@ end
 function Base.:\(F::SparseIterativeFactorization, B::DMatrix)
     size(B, 1) == F.n || throw(DimensionMismatch(
         "factorization is $(F.n)×$(F.n) but B has $(size(B, 1)) rows"))
-    B_local = collect(B)
-    part = Blocks(F.A.partitioning.blocksize[1])
-    X_local = similar(B_local)
-    for j in axes(B_local, 2)
-        X_local[:, j] = collect(F \ distribute(B_local[:, j], part))
-    end
-    return distribute(X_local, B.partitioning)
+    X, stats = block_gmres(F.A, B)
+    stats.solved || throw(ArgumentError(
+        "block iterative solve of sparse DMatrix failed to converge after $(stats.niter) iterations"))
+    return X
 end
 
 function Base.:\(F::SparseIterativeFactorization, b::AbstractVector)
