@@ -440,6 +440,10 @@ Other preconditioners: `Dagger.JacobiPreconditioner`,
 third-party per-tile factory. Any object implementing `mul!(y, A, x)` over
 `DVector`s can be used as a matrix-free operator `A`.
 
+`eigen(DA)` / `eigvals(DA)` compute a few extreme eigenpairs of a sparse or
+matrix-free operator by LOBPCG (`nev=1`, `which=:SR` by default). This is not
+dense geev; check `‖Ax-λx‖`.
+
 -----
 
 ## Quickstart: Stencil Operations

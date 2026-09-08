@@ -553,3 +553,18 @@ lesson.
    (lessons 19/32). `AMGPreconditioner` is still per-tile Schwarz — do
    not change it. Aggregates still do not come from a distributed MIS;
    a row-coarsen task sees one row of tiles.
+
+43. **`eigen(::DMatrix)` is LOBPCG for a few pairs, not dense geev.**
+   LinearAlgebra's generic `eigen` would collect and run LAPACK. The `DMatrix`
+   method computes `nev` extreme eigenpairs (default 1, `which=:SR`) via
+   LOBPCG over `DVector`s — a sparse-backed operator stays sparse. Keep the
+   trial block as a `Vector{DVector}`: column `getindex` of a tall-skinny
+   `DMatrix` is a nested `DArray` (lesson 33). Check `‖Ax-λx‖`, not only the
+   Ritz residual. This is not ScaLAPACK geev and does not return the full
+   spectrum. `Hermitian{<:DMatrix}` / `Symmetric{<:DMatrix}` must be hooked
+   too, or they steal the dense `Hermitian` method. Match LinearAlgebra's
+   real `Hermitian`/`Symmetric` union with `S<:DMatrix` — a looser
+   `Hermitian{<:Any,<:DMatrix}` is ambiguous with the stdlib method.
+   The `DaggerSparseLU \ DVector` tie-breaker this workstream also hit is
+   already lesson 36 (`_solve_pinned_dvector`); do not add a second `invoke`
+   method. Dense tiled SVD (`src/array/svd.jl`) is unchanged.
