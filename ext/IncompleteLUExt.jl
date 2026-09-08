@@ -3,25 +3,18 @@ module IncompleteLUExt
 import IncompleteLU
 import SparseArrays
 import Dagger
-import Dagger: DMatrix
 import LinearAlgebra
 
-# Block incomplete-LU preconditioner, built per diagonal tile on top of Dagger's
-# block-preconditioner machinery (see `src/array/iterativesolvers.jl`). Each tile
-# gets an ILU factorization (drop tolerance `τ`) once at construction; the apply
-# is a forward/backward substitution per block.
+# Host ILU factory for [`Dagger.BlockILUPreconditioner`](@ref). The constructor
+# lives in core and calls `_ilu_tile`; GPU sparse extensions add more-specific
+# methods (vendor ILU0) that win when the tile is device-resident.
 
 _as_sparse(A::SparseArrays.SparseMatrixCSC) = A
 _as_sparse(A::AbstractMatrix) = SparseArrays.sparse(A)
 
-function _ilu_operator(tile; τ=0.001, kwargs...)
+function Dagger._ilu_tile(tile; τ=0.001, kwargs...)
     S = _as_sparse(Dagger._tile_matrix(tile))
     return IncompleteLU.ilu(S; τ=τ, kwargs...)
-end
-
-function Dagger.BlockILUPreconditioner(A::DMatrix; kwargs...)
-    build = tile -> _ilu_operator(tile; kwargs...)
-    return Dagger._build_block_preconditioner(Dagger.BlockILUPreconditioner, A, build)
 end
 
 # An ILU factorization applies via `ldiv!`. It subtypes `Factorization`, so this
