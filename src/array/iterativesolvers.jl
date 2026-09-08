@@ -211,8 +211,21 @@ block. Concrete subtypes (`BlockJacobiPreconditioner`, `BlockILUPreconditioner`,
 """
 abstract type AbstractBlockPreconditioner <: AbstractDaggerPreconditioner end
 
-_tile_scope(c::Chunk) = ProcessScope(root_worker_id(c))
-_tile_scope(t::DTask) = ProcessScope(root_worker_id(fetch(t; raw=true)))
+# Pin block-PC build/apply to the tile's *processor*, not just its worker.
+# ProcessScope lets Datadeps place the apply on a CPU thread, which then
+# moves GPU vector chunks to host (`iscompatible_arg(ThreadProc, CuArray)`
+# is false, so the scheduler gathers) and restamps the Krylov workspace as
+# host `Array`s — killing the GPU SpMV path. CPU tiles keep ProcessScope so
+# any thread on the worker can run the apply.
+function _tile_scope(c::Chunk)
+    space = memory_space(c)
+    space isa CPURAMMemorySpace && return ProcessScope(root_worker_id(c))
+    return memory_space_scope(space)
+end
+function _tile_scope(t::DTask)
+    raw = fetch(t; raw=true)
+    return raw isa Chunk ? _tile_scope(raw) : ProcessScope(root_worker_id(raw))
+end
 
 """
     PinnedTileOperator(op)
@@ -231,12 +244,39 @@ struct PinnedTileOperator{T}
 end
 type_may_alias(::Type{<:PinnedTileOperator}) = false
 
+"""
+    DeviceILU0(factors)
+
+Vendor ILU(0) factors stored as one device-sparse matrix (`L` unit-lower + `U`
+upper in the same pattern). Built by GPU sparse extensions (`cuSPARSE` /
+`rocSPARSE`); applied on-device via triangular `ldiv!`. `τ` from
+[`BlockILUPreconditioner`](@ref) is ignored — ILU0 has no drop tolerance.
+"""
+struct DeviceILU0{M}
+    factors::M
+end
+type_may_alias(::Type{<:DeviceILU0}) = false
+
+# Memory space of a pinned operator, used to stamp the Chunk (lesson 26): a
+# host UMFPACK/AMG factor built under a GPU compute scope is still CPURAM, a
+# vendor `LU`/`DeviceILU0` follows its device buffers.
+_pc_op_memory_space(P::PinnedTileOperator) = _pc_op_memory_space(P.op)
+_pc_op_memory_space(F::LinearAlgebra.LU) = value_memory_space(F.factors)
+_pc_op_memory_space(F::DeviceILU0) = value_memory_space(F.factors)
+_pc_op_memory_space(x) = value_memory_space(x)
+
 # Build the per-tile operator on the current worker and pin the result there: the
 # returned `Chunk` is process-scoped, so it can never be moved off this worker.
+# Stamp `proc`/`space` from the operator itself so a host factor built on a GPU
+# processor is not VRAM-labelled (lesson 26).
 function _build_tile_pinned(build, tile)
     op = PinnedTileOperator(build(tile))
+    space = _pc_op_memory_space(op)
     proc = Dagger.task_processor()
-    return tochunk(op, proc, ProcessScope(root_worker_id(proc)))
+    if space isa CPURAMMemorySpace && !(proc isa Union{OSProc,ThreadProc})
+        proc = OSProc(myid())
+    end
+    return tochunk(op, proc, space, ProcessScope(root_worker_id(proc)))
 end
 
 # Build a block preconditioner of type `Ctor` by applying `build` to each
@@ -245,7 +285,7 @@ end
 function _build_block_preconditioner(Ctor, A::DMatrix, build)
     n, Ac, mt, mb = _square_tiled_layout(A)
     ops = Vector{Any}(undef, mt)
-    scopes = Vector{ProcessScope}(undef, mt)
+    scopes = Vector{AbstractScope}(undef, mt)
     for i in 1:mt
         tile = Ac[i, i]
         scope = _tile_scope(tile)
@@ -264,9 +304,9 @@ function LinearAlgebra.mul!(y::DVector, P::AbstractBlockPreconditioner, x::DVect
             $(length(yc)) chunks"))
         Dagger.spawn_datadeps() do
             for i in eachindex(yc)
-                # Pin the apply to the operator's worker; the operator is passed as
-                # an untracked arg (read-only, already-pinned) so datadeps never
-                # moves it -- only the vector chunks are moved to this worker.
+                # Pin the apply to the tile's processor (GPU ExactScope when
+                # the tile lives in VRAM) so vector chunks stay on-device.
+                # The operator is an untracked, process-pinned arg.
                 Dagger.@spawn compute_scope=P.scopes[i] _block_apply!(Out(yc[i]), P.ops[i], In(xc[i]))
             end
         end
@@ -276,12 +316,26 @@ end
 
 # Apply one block operator: `y = op⁻¹ x`.
 #
-# Host factorizations (UMFPACK/`lu` of a gathered CSC) need a host RHS, so a GPU
-# vector chunk is gathered, solved, and written back; a CPU `Array`
-# short-circuits.
+# Device-capable operators (dense vendor LU, [`DeviceILU0`](@ref)) apply
+# in-place when the vector is already on-device. Host-only factors (UMFPACK,
+# CHOLMOD, AlgebraicMultigrid.jl, IncompleteLU.jl) still gather a temporary
+# RHS; the DArray chunk itself stays on the GPU processor so the next SpMV
+# does not re-upload.
+_is_gpu_vec(x) = x isa GPUArraysCore.AbstractGPUArray
+
+# Default: no device apply. Host `Array` vectors take the native path in
+# `_block_apply!` without going through this hook (avoids an `(Any, Array)`
+# method that would be ambiguous with `(LU, Any)`).
+_supports_device_apply(op, x) = false
+function _supports_device_apply(F::LinearAlgebra.LU, x)
+    x isa Array && return true
+    return _is_gpu_vec(x) && _is_gpu_vec(F.factors)
+end
+_supports_device_apply(::DeviceILU0, x) = _is_gpu_vec(x)
+
 _block_apply!(y, P::PinnedTileOperator, x) = _block_apply!(y, P.op, x)
 function _block_apply!(y, op, x)
-    if x isa Array
+    if (x isa Array && y isa Array) || _supports_device_apply(op, x)
         _apply_inverse!(y, op, x)
     else
         xh = Adapt.adapt(Array, x)
@@ -292,12 +346,29 @@ function _block_apply!(y, op, x)
     return nothing
 end
 
-# `y = op⁻¹ x` for a host operator. Factorizations are applied with `\`;
-# everything else (multigrid hierarchies, KrylovPreconditioners' operators, and
-# whatever a user's `build` returns) with `ldiv!`, which is the interface those
-# define. Backends may still override `_block_apply!` for a faster path.
+# `y = op⁻¹ x`. Factorizations default to `\`; backends and device types
+# override with in-place `ldiv!`. Host-only operators (AMG, UMFPACK, …) keep
+# the `\` / `ldiv!` convention they already define.
 _apply_inverse!(y, op, x) = LinearAlgebra.ldiv!(y, op, x)
-_apply_inverse!(y, op::LinearAlgebra.Factorization, x) = copyto!(y, op \ x)
+function _apply_inverse!(y, op::LinearAlgebra.Factorization, x)
+    copyto!(y, op \ x)
+    return y
+end
+function _apply_inverse!(y, op::LinearAlgebra.LU, x)
+    if _is_gpu_vec(y) && _is_gpu_vec(x) && _is_gpu_vec(op.factors)
+        copyto!(y, x)
+        LinearAlgebra.ldiv!(op, y)
+        return y
+    end
+    copyto!(y, op \ x)
+    return y
+end
+function _apply_inverse!(y, F::DeviceILU0, x)
+    copyto!(y, x)
+    LinearAlgebra.ldiv!(LinearAlgebra.UnitLowerTriangular(F.factors), y)
+    LinearAlgebra.ldiv!(LinearAlgebra.UpperTriangular(F.factors), y)
+    return y
+end
 
 # Underlying matrix of a tile (overridden for `DSparseArray` in `sparse.jl`).
 _tile_matrix(A) = A
@@ -313,14 +384,16 @@ coupling); a single tile recovers an exact solve. See
 """
 struct BlockJacobiPreconditioner{F,S} <: AbstractBlockPreconditioner
     ops::F            # cached per-tile factorizations (pinned to their workers)
-    scopes::S         # the `ProcessScope` each operator/apply is pinned to
+    scopes::S         # tile apply scope (`ProcessScope` on CPU, device ExactScope on GPU)
     part::Blocks{1}   # partitioning of the vectors it applies to
     n::Int
 end
 
-# Factorize a diagonal tile. Backends override for their storage (e.g. sparse
-# tiles factorize the inner `SparseMatrixCSC`); the default is a dense LU factor.
-_factorize_tile(A) = LinearAlgebra.lu(A)
+# Factorize a diagonal tile. Backends override for device-resident dense
+# storage (vendor getrf). The generic path gathers to host so Metal / OpenCL /
+# oneAPI tiles do not hit a missing `lu(::CLArray)` / `lu(::MtlArray)`.
+_factorize_tile(A::Array) = LinearAlgebra.lu(A)
+_factorize_tile(A) = LinearAlgebra.lu(Adapt.adapt(Array, A))
 
 BlockJacobiPreconditioner(A::DMatrix) =
     _build_block_preconditioner(BlockJacobiPreconditioner, A, _factorize_tile)
@@ -364,10 +437,14 @@ BlockPreconditioner(A::DMatrix, build) =
 """
     BlockILUPreconditioner(A::DMatrix; τ=0.001, kwargs...)
 
-Block incomplete-LU preconditioner: an ILU factorization (with drop tolerance
-`τ`) of each diagonal tile, applied per block. Cheaper setup than a full block
-solve, good as a general-purpose preconditioner. Requires `IncompleteLU.jl` to
-be loaded and sparse-backed tiles. See [`AbstractBlockPreconditioner`](@ref).
+Block incomplete-LU preconditioner: an ILU factorization of each diagonal
+tile, applied per block. Cheaper setup than a full block solve, good as a
+general-purpose preconditioner.
+
+On a GPU sparse tile the factory uses vendor ILU(0) (`cuSPARSE` /
+`rocSPARSE`) when those packages are loaded; `τ` is then ignored. Host tiles
+need `IncompleteLU.jl` (drop tolerance `τ`). See
+[`AbstractBlockPreconditioner`](@ref).
 """
 struct BlockILUPreconditioner{F,S} <: AbstractBlockPreconditioner
     ops::F
@@ -375,10 +452,22 @@ struct BlockILUPreconditioner{F,S} <: AbstractBlockPreconditioner
     part::Blocks{1}
     n::Int
 end
-# Friendly fallback (shadowed by the `::DMatrix` method added in `ext/IncompleteLUExt.jl`).
+
+# Host IncompleteLU and GPU sparse extensions add `_ilu_tile` methods.
+# No `::Any` default here — that signature is what IncompleteLUExt implements,
+# and overwriting it during extension precompile is forbidden.
+function _ilu_tile end
+_ilu_tile(M::DSparseArray; kwargs...) = _ilu_tile(M.mat; kwargs...)
+
+function BlockILUPreconditioner(A::DMatrix; kwargs...)
+    build = tile -> _ilu_tile(tile; kwargs...)
+    return _build_block_preconditioner(BlockILUPreconditioner, A, build)
+end
+# Friendly fallback for non-`DMatrix` arguments.
 BlockILUPreconditioner(A; kwargs...) = throw(ArgumentError(
-    "Dagger.BlockILUPreconditioner requires IncompleteLU.jl. Run `using IncompleteLU` \
-    to enable block incomplete-LU preconditioning."))
+    "Dagger.BlockILUPreconditioner requires IncompleteLU.jl (host ILU) or a \
+    GPU sparse backend with ILU0 (CUDA/ROCm). Run `using IncompleteLU`, or \
+    load CUDA/AMDGPU with SparseArrays."))
 
 """
     BlockICPreconditioner(A::DMatrix)
@@ -612,7 +701,7 @@ function _build_asm_preconditioner(A::DMatrix, overlap::Int, build)
         interiors[i] = Asq.subdomains[i, i].indexes[1]
     end
     ops = Vector{Any}(undef, mt)
-    scopes = Vector{ProcessScope}(undef, mt)
+    scopes = Vector{AbstractScope}(undef, mt)
     for i in 1:mt
         interior = interiors[i]
         Ω = _expand_overlap(interior, overlap, n)
@@ -664,12 +753,33 @@ function _asm_all_host_vecs(xs)
     return true
 end
 
+function _asm_vecs_match_y(y, xs)
+    for x in xs
+        typeof(x) === typeof(y) || return false
+    end
+    return true
+end
+
 function _asm_apply!(y, op, Ω, interior, ranges, xs...)
-    if y isa Array && _asm_all_host_vecs(xs)
+    if _supports_device_apply(op, y) && _asm_vecs_match_y(y, xs)
+        _asm_apply_native!(y, op, Ω, interior, ranges, xs)
+    elseif y isa Array && _asm_all_host_vecs(xs)
         _asm_apply_host!(y, op, Ω, interior, ranges, xs)
     else
         _asm_apply_adapt!(y, op, Ω, interior, ranges, xs)
     end
+    return nothing
+end
+
+function _asm_apply_native!(y, op, Ω, interior, ranges, xs)
+    xΩ = similar(y, length(Ω))
+    yΩ = similar(y, length(Ω))
+    for k in 1:length(xs)
+        _asm_restrict_from_chunk!(xΩ, Ω, ranges[k], xs[k])
+    end
+    _apply_inverse!(yΩ, op, xΩ)
+    off = first(interior) - first(Ω)
+    copyto!(y, 1, yΩ, 1 + off, length(interior))
     return nothing
 end
 

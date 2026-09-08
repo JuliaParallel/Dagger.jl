@@ -11,6 +11,8 @@ using Krylov
 using AlgebraicMultigrid
 using IncompleteLU
 
+include(joinpath(@__DIR__, "..", "gpu_pc_defs.jl"))
+
 # Strongly diagonally-dominant tridiagonal SPD matrix. The large diagonal keeps
 # the condition number small so the Krylov methods converge in a handful of
 # iterations (keeping the distributed test fast). `inv(diag) == 1/4`.
@@ -796,4 +798,25 @@ end
     xd, sd = Krylov.cg(Ad, Db; M = P, atol = 1e-12, rtol = 1e-10, itmax = 200)
     @test sd.solved
     @test collect(xd) ≈ Adiag \ b rtol = 1e-6
+end
+
+# CPU path of the GPU-resident apply bodies, plus dispatch unit tests.
+# Device residency (`check_vec` / `check_device_lu`) is asserted from
+# test/gpu.jl and test/mpi_gpu_suite.jl.
+@testset "GPU-resident PC apply (CPU path)" begin
+    test_gpu_pc_apply(; T=Float64)
+
+    A = Matrix(laplacian_1d(Float64, 8))
+    F = lu(A)
+    x = rand(8)
+    @test Dagger._supports_device_apply(F, x)
+    y = similar(x)
+    Dagger._block_apply!(y, F, x)
+    @test y ≈ F \ x
+
+    # Non-Array wrapper still gathers rather than requiring a device apply.
+    xs = view(x, :)
+    ys = similar(x)
+    Dagger._block_apply!(ys, F, xs)
+    @test ys ≈ F \ x
 end

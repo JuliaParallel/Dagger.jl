@@ -172,4 +172,16 @@ function Dagger.transpose_tile(B::ROCSparseMatrixCSC, uplo::Char)
     return ROCSparseMatrixCSC(Ct)
 end
 
+# Vendor ILU(0) for [`Dagger.BlockILUPreconditioner`](@ref). CSC → CSR so
+# triangular apply is of A, not Aᵀ. rocSPARSE requires an index base (`'O'`
+# matches Julia / cuSPARSE). `τ` is ignored — ILU0 has no drop tolerance.
+function Dagger._ilu_tile(A::ROCSparseMatrixCSC; kwargs...)
+    return Dagger.DeviceILU0(AMDGPU.rocSPARSE.ilu0(ROCSparseMatrixCSR(A), 'O'))
+end
+function Dagger._ilu_tile(A::ROCSparseMatrixCSR; kwargs...)
+    return Dagger.DeviceILU0(AMDGPU.rocSPARSE.ilu0(A, 'O'))
+end
+Dagger._supports_device_apply(::Dagger.DeviceILU0{<:Union{ROCSparseMatrixCSC,ROCSparseMatrixCSR}},
+                              ::ROCArray) = true
+
 end # module ROCSparseArraysExt

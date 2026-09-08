@@ -13,6 +13,7 @@ end
 # header for the acceleration/backend matrix they cover.
 include(joinpath(@__DIR__, "array", "sparse_defs.jl"))
 include(joinpath(@__DIR__, "array", "sparse_solve_defs.jl"))
+include(joinpath(@__DIR__, "array", "gpu_pc_defs.jl"))
 
 @everywhere begin
     function isongpu(X)
@@ -250,6 +251,12 @@ end
             test_sparse_bare_args(; scope, T=Float32)
             test_sparse_assembly(; scope, check_tile, T=Float32)
             test_sparse_collect(; scope, T=Float32)
+            check_vec = chunk -> begin
+                v = Dagger.MemPool.poolget(chunk.handle)
+                return v isa CUDA.CuArray && chunk.space isa CUDAExt.CUDAVRAMMemorySpace
+            end
+            check_device_lu = F -> F isa LinearAlgebra.LU && F.factors isa CUDA.CuArray
+            test_gpu_pc_apply(; scope, check_vec, check_device_lu, T=Float32)
         end
     end
 end
@@ -437,6 +444,12 @@ end
             test_sparse_bare_args(; scope, T=Float32)
             test_sparse_assembly(; scope, check_tile, T=Float32)
             test_sparse_collect(; scope, T=Float32)
+            check_vec = chunk -> begin
+                v = Dagger.MemPool.poolget(chunk.handle)
+                return v isa AMDGPU.ROCArray && chunk.space isa ROCExt.ROCVRAMMemorySpace
+            end
+            check_device_lu = F -> F isa LinearAlgebra.LU && F.factors isa AMDGPU.ROCArray
+            test_gpu_pc_apply(; scope, check_vec, check_device_lu, T=Float32)
         end
     end
 end
@@ -624,6 +637,11 @@ end
             test_sparse_bare_args(; scope, T=Float32)
             test_sparse_assembly(; scope, check_tile, T=Float32)
             test_sparse_collect(; scope, T=Float32)
+            check_vec = chunk -> begin
+                v = Dagger.MemPool.poolget(chunk.handle)
+                return v isa oneArray && chunk.space isa IntelExt.IntelVRAMMemorySpace
+            end
+            test_gpu_pc_apply(; scope, check_vec, T=Float32)
         end
     end
 end
@@ -785,6 +803,11 @@ end
             test_sparse_bare_args(; scope, T=Float32)
             test_sparse_assembly(; scope, check_tile, T=Float32)
             test_sparse_collect(; scope, T=Float32)
+            check_vec = chunk -> begin
+                v = Dagger.MemPool.poolget(chunk.handle)
+                return v isa MtlArray && chunk.space isa MetalExt.MetalVRAMMemorySpace
+            end
+            test_gpu_pc_apply(; scope, check_vec, T=Float32)
         end
     end
 end
@@ -907,6 +930,11 @@ end
             test_sparse_bare_args(; scope, T=Float32)
             test_sparse_assembly(; scope, check_tile, T=Float32)
             test_sparse_collect(; scope, T=Float32)
+            check_vec = chunk -> begin
+                v = Dagger.MemPool.poolget(chunk.handle)
+                return v isa CLArray && chunk.space isa OpenCLExt.CLMemorySpace
+            end
+            test_gpu_pc_apply(; scope, check_vec, T=Float32)
         end
     end
 end

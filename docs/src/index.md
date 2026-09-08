@@ -433,7 +433,7 @@ x, stats = Krylov.gmres(DA, b; M = P)             # check ‖Ax−b‖, not just
 Other preconditioners: `Dagger.JacobiPreconditioner`,
 `Dagger.BlockJacobiPreconditioner`, `Dagger.AdditiveSchwarzPreconditioner`
 (core; overlapping restricted ASM), `Dagger.BlockILUPreconditioner`
-(load `IncompleteLU`), and `Dagger.BlockPreconditioner(A, build)` to plug in any
+(load `IncompleteLU` on CPU, or CUDA/ROCm sparse for on-device ILU0), and `Dagger.BlockPreconditioner(A, build)` to plug in any
 third-party per-tile factory. Any object implementing `mul!(y, A, x)` over
 `DVector`s can be used as a matrix-free operator `A`.
 

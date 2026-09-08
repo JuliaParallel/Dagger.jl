@@ -40,6 +40,7 @@ include(joinpath(@__DIR__, "util.jl"))
 include(joinpath(@__DIR__, "array", "stencil_defs.jl"))
 include(joinpath(@__DIR__, "array", "sparse_defs.jl"))
 include(joinpath(@__DIR__, "array", "sparse_solve_defs.jl"))
+include(joinpath(@__DIR__, "array", "gpu_pc_defs.jl"))
 
 # Broadcast-only mutation helpers (scalar indexing is illegal on GPU arrays)
 add1!(X) = (X .+= 1; nothing)
@@ -324,6 +325,13 @@ if get(cfg, :sparse, false)
             test_sparse_bare_args(; T=elt, writeback_visible = rank == 0)
             test_sparse_assembly(; T=elt, check_tile)
             test_sparse_collect(; T=elt)
+            check_vec = chunk -> begin
+                handle = chunk.handle
+                handle.rank == rank || return true
+                v = Dagger.MemPool.poolget(handle; uniform=false)
+                return !(Dagger.value_memory_space(v) isa Dagger.CPURAMMemorySpace)
+            end
+            test_gpu_pc_apply(; T=elt, check_vec)
         end
     end
 end
