@@ -5,7 +5,8 @@ import SparseArrays: SparseMatrixCSC, SparseVector
 import LinearAlgebra
 import Dagger
 import Dagger: Blocks, AutoBlocks, BlocksOrAuto, AssignmentType, DSparseArray, DSparseMatrix
-import Dagger: DArray, DMatrix, SparseCOOBucket
+import Dagger: DArray, DMatrix, DVector, SparseCOOBucket
+import Dagger: GeometricMultigrid, GeometricMGLevel
 
 # Keep tiles sparse through `collect`/`cat`; the outer `collect` densifies.
 Dagger._sparse_collect(M::SparseMatrixCSC) = copy(M)
@@ -605,5 +606,145 @@ Dagger.ichol(A::Dagger.DMatrix) = Dagger.BlockICPreconditioner(A)
 
 # Prefer in-place `ldiv!` over the generic Factorization `\` path.
 Dagger._apply_inverse!(y, F::IC0Factor, x) = LinearAlgebra.ldiv!(y, F, x)
+
+#==============================================================================
+  Geometric multigrid (`GeometricMultigrid`)
+
+  Transfer operators are assembled with `sparse(I, J, V, m, n, Blocks)` so they
+  stay tiled and sparse (lesson 29). The V-cycle apply lives in
+  `src/array/gmg.jl` and does not need SparseArrays.
+==============================================================================#
+
+function _gmg_assemble_coo(I, J, V, m::Integer, n::Integer, row_bs::Integer, col_bs::Integer)
+    return SparseArrays.sparse(I, J, V, m, n, Blocks(row_bs, col_bs))
+end
+
+function _gmg_as_transfer(M, ::Type{T}, m::Integer, n::Integer,
+                          row_bs::Integer, col_bs::Integer) where T
+    size(M) == (m, n) || throw(DimensionMismatch(
+        "transfer is $(size(M, 1))×$(size(M, 2)) but expected $m×$n"))
+    part = Blocks(row_bs, col_bs)
+    if M isa Dagger.DMatrix
+        eltype(M) === T || throw(ArgumentError(
+            "transfer eltype $(eltype(M)) does not match operator eltype $T"))
+        return M.partitioning == part ? M : Dagger.repartition(M, part)
+    end
+    S = M isa SparseMatrixCSC ? M : SparseArrays.sparse(M)
+    if eltype(S) !== T
+        SI, SJ, SV = SparseArrays.findnz(S)
+        S = SparseArrays.sparse(SI, SJ, T.(SV), size(S, 1), size(S, 2))
+    end
+    return Dagger.distribute(S, part)
+end
+
+function _gmg_make_R(::Type{T}, spec, grid, n::Integer, nc::Integer, k::Integer) where T
+    if spec isa Symbol
+        I, J, V, nc2, n2 = Dagger._gmg_restriction_coo(T, grid, spec)
+        (nc2, n2) == (nc, n) || throw(DimensionMismatch(
+            "restriction COO is $(nc2)×$(n2) but expected $nc×$n"))
+        return _gmg_assemble_coo(I, J, V, nc, n, k, k)
+    end
+    return _gmg_as_transfer(spec, T, nc, n, k, k)
+end
+
+function _gmg_make_P(::Type{T}, spec, grid, n::Integer, nc::Integer, k::Integer) where T
+    if spec isa Symbol
+        I, J, V, n2, nc2 = Dagger._gmg_prolongation_coo(T, grid, spec)
+        (n2, nc2) == (n, nc) || throw(DimensionMismatch(
+            "prolongation COO is $(n2)×$(nc2) but expected $n×$nc"))
+        return _gmg_assemble_coo(I, J, V, n, nc, k, k)
+    end
+    return _gmg_as_transfer(spec, T, n, nc, k, k)
+end
+
+function _gmg_galerkin(A::Dagger.DMatrix{T}, R::Dagger.DMatrix{T}, P::Dagger.DMatrix{T}) where T
+    n = size(A, 1)
+    nc = size(P, 2)
+    k = Int(A.partitioning.blocksize[1])
+    kc = Int(P.partitioning.blocksize[2])
+    kr = Int(R.partitioning.blocksize[1])
+    TT = Dagger.darray_tiletype(A)
+    AP = Dagger.allocate_tiled(TT, T, Blocks(k, kc), (n, nc))
+    LinearAlgebra.mul!(AP, A, P)
+    Ac = Dagger.allocate_tiled(TT, T, Blocks(kr, kc), (nc, nc))
+    LinearAlgebra.mul!(Ac, R, AP)
+    return Ac
+end
+
+function _gmg_level(A::Dagger.DMatrix{T}, R::Dagger.DMatrix{T}, P::Dagger.DMatrix{T}) where T
+    n = size(A, 1)
+    nc = size(P, 2)
+    k = Int(A.partitioning.blocksize[1])
+    kc = Int(P.partitioning.blocksize[2])
+    dinv = Dagger._jacobi_dinv(A)
+    res = DVector{T}(undef, Blocks(k), n)
+    coarse_x = DVector{T}(undef, Blocks(kc), nc)
+    coarse_b = DVector{T}(undef, Blocks(kc), nc)
+    return GeometricMGLevel(A, R, P, dinv, res, coarse_x, coarse_b)
+end
+
+function Dagger.GeometricMultigrid(A::Dagger.DMatrix{T};
+                                   grid=nothing,
+                                   restriction=:full_weighting,
+                                   prolongation=nothing,
+                                   max_levels::Integer=3,
+                                   max_coarse::Integer=32,
+                                   relax::Real=2 / 3,
+                                   presweeps::Integer=2,
+                                   postsweeps::Integer=2) where T
+    max_levels >= 1 || throw(ArgumentError("max_levels must be ≥ 1"))
+    max_coarse >= 1 || throw(ArgumentError("max_coarse must be ≥ 1"))
+    presweeps >= 0 && postsweeps >= 0 || throw(ArgumentError(
+        "presweeps and postsweeps must be ≥ 0"))
+
+    n, A = Dagger._square_tiled_dmatrix(A)
+    g0 = Dagger._gmg_normalize_grid(n, grid)
+    g = g0
+    k = Int(A.partitioning.blocksize[1])
+    r_show = Dagger._gmg_kind_symbol(restriction)
+    p_show = prolongation === nothing ? Dagger._gmg_default_prolongation(g0) :
+             Dagger._gmg_kind_symbol(prolongation)
+
+    levels = GeometricMGLevel[]
+    first_level = true
+    while length(levels) + 1 < max_levels && Dagger._gmg_can_coarsen(g, max_coarse)
+        rspec = if first_level
+            restriction
+        else
+            restriction isa Symbol ? restriction : :full_weighting
+        end
+        pspec = if first_level
+            prolongation === nothing ? Dagger._gmg_default_prolongation(g) : prolongation
+        elseif prolongation isa Symbol
+            prolongation
+        else
+            Dagger._gmg_default_prolongation(g)
+        end
+        g_next = Dagger._gmg_coarse_grid(g)
+        nf = prod(g)
+        nc = prod(g_next)
+        if !(rspec isa Symbol)
+            size(rspec, 2) == nf || throw(DimensionMismatch(
+                "restriction is $(size(rspec, 1))×$(size(rspec, 2)) but A is $(nf)×$(nf)"))
+            nc = size(rspec, 1)
+            nc == prod(g_next) || (g_next = (nc,))
+        end
+        if !(pspec isa Symbol)
+            size(pspec) == (nf, nc) || throw(DimensionMismatch(
+                "prolongation is $(size(pspec, 1))×$(size(pspec, 2)) but expected $nf×$nc"))
+        end
+        R = _gmg_make_R(T, rspec, g, nf, nc, k)
+        P = _gmg_make_P(T, pspec, g, nf, nc, k)
+        Ac = _gmg_galerkin(A, R, P)
+        push!(levels, _gmg_level(A, R, P))
+        A = Ac
+        g = g_next
+        first_level = false
+    end
+    coarse = Dagger._spawn_direct_factorization(A, LinearAlgebra.lu)
+    part = Blocks(Int((isempty(levels) ? A : levels[1].A).partitioning.blocksize[1]))
+    return GeometricMultigrid(levels, coarse, A, Float64(relax), Int(presweeps),
+                              Int(postsweeps), n, part, g0, r_show, p_show)
+end
 
 end # module SparseArraysExt

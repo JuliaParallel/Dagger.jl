@@ -429,6 +429,21 @@ lesson.
     uses `findnz` (drops stored zeros), so a value that becomes exactly 0
     can change the CSC pattern; KLU then falls back to a full `klu`.
     `\(F::DaggerSparseLU, ::AbstractVector)` and `\(F::_PinnedSparseFactor, ::DVector)`
-    are ambiguous (`DVector <: AbstractVector`); GlobalAMG's coarse solve hits
-    that. Give `DaggerSparseLU` / `DaggerSparseCholesky` their own `DVector`
-    methods instead of a Union.
+    are ambiguous (`DVector <: AbstractVector`); GlobalAMG and
+    [`GeometricMultigrid`](@ref) coarse solves hit that. Give
+    `DaggerSparseLU` / `DaggerSparseCholesky` their own `DVector` methods
+    instead of a Union.
+
+37. **`@stencil` cannot express geometric restriction / prolongation.**
+   `origin/jps/sparse-stencil` adds sparse-tile sweeps and `@stencil
+   sparse=true` (dilated CSC support, GPU halo staging). It is still a
+   same-`idx`, same-size, same-chunk halo sweep — neighborhood access at any
+   other index is rejected, and operands must share shape and layout. A V-cycle
+   transfer maps a fine grid of size `n` onto a coarse grid of size `n/2`.
+   Do not implement a competing stencil stack for that gap. [`GeometricMultigrid`](@ref)
+   is matrix-based: injection / full-weighting `R` and linear / bilinear `P`
+   as sparse `DMatrix`s, Galerkin `Ac = R A P`, damped-Jacobi via existing
+   `mul!`. Check `‖Ax−b‖`, not only `stats.solved` (lessons 19 / 32). Two
+   Jacobi sweeps each side of the V-cycle (lesson 32). This does not change
+   [`AMGPreconditioner`](@ref) or [`GlobalAMG`](@ref). Coarse-grid `\`
+   dispatch is lesson 36.

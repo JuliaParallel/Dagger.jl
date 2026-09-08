@@ -391,7 +391,8 @@ end
 
 # Concrete `DVector` methods: `DaggerSparseLU` also has `\(F, ::AbstractVector)`
 # (host Vector staging), and `DVector <: AbstractVector`, so a Union first
-# argument is ambiguous with that method (GlobalAMG coarse solve hits this).
+# argument is ambiguous with that method (GlobalAMG / GeometricMultigrid
+# coarse solves hit this).
 function _solve_pinned_dvector(F, b::DVector)
     length(b) == F.n || throw(DimensionMismatch(
         "factorization is $(F.n)×$(F.n) but b has length $(length(b))"))

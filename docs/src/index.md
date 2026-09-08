@@ -430,6 +430,8 @@ x, stats = Krylov.gmres(DA, b; M = P)             # check ‖Ax−b‖, not just
 ```
 
 `Dagger.AMGPreconditioner` is the older **per-tile** (additive-Schwarz) AMG.
+On a regular 1-D / 2-D grid, `Dagger.GeometricMultigrid(DA)` is the geometric
+(PFMG-like) V-cycle; it does not change `GlobalAMG`.
 Other preconditioners: `Dagger.JacobiPreconditioner`,
 `Dagger.BlockJacobiPreconditioner`, `Dagger.AdditiveSchwarzPreconditioner`
 (core; overlapping restricted ASM), `Dagger.BlockILUPreconditioner`
