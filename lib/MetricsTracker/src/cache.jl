@@ -1,11 +1,13 @@
 mutable struct MetricsSnapshot
     const contexts::Dict{ContextKey, AbstractContextStorage}
     const generation::UInt64
+    # When this snapshot was built, for `snapshot_stale` (see below).
+    const built_ns::UInt64
     @atomic key_indexes::Union{Dict{Tuple{ContextKey, AbstractMetric, Any}, Any}, Nothing}
 end
 
 MetricsSnapshot(contexts::Dict{ContextKey, AbstractContextStorage}, generation::UInt64) =
-    MetricsSnapshot(contexts, generation, nothing)
+    MetricsSnapshot(contexts, generation, time_ns(), nothing)
 
 Base.length(s::MetricsSnapshot) = length(s.contexts)
 Base.isempty(s::MetricsSnapshot) = isempty(s.contexts)
@@ -94,6 +96,38 @@ function snapshot(cache::MetricsCache)
     active = @atomic cache.active_snapshot
     current_gen = @atomic cache.generation
     if active.generation == current_gen
+        return active
+    end
+    return rebuild_snapshot!(cache)
+end
+
+"""
+    snapshot_stale(cache::MetricsCache, max_age_ns::UInt64) -> MetricsSnapshot
+
+Like [`snapshot`](@ref), but reuses the active snapshot when it is younger than
+`max_age_ns` even if the cache has advanced since it was built.
+
+Rebuilding is not cheap — it deep-copies every context and every per-metric
+storage — and the generation advances on *every* recorded value. A consumer
+that snapshots per operation therefore pays a full copy per operation: measured
+at 273 allocations / 67 KB against a cache holding 488 values.
+
+That cost is only worth paying for a consumer that needs an exact view. A cost
+*model* does not: it reduces many samples to an estimate, and one built from a
+view a few milliseconds old is indistinguishable in effect from an exact one.
+Such consumers should use this and bound how often they rebuild, rather than
+tying rebuild frequency to task completion rate.
+"""
+function snapshot_stale(cache::MetricsCache, max_age_ns::UInt64)
+    active = @atomic cache.active_snapshot
+    current_gen = @atomic cache.generation
+    if active.generation == current_gen
+        return active
+    end
+    # `time_ns` is monotonic, but guard against a snapshot stamped in the
+    # future by a clock quirk rather than underflowing the unsigned subtraction.
+    now = time_ns()
+    if now >= active.built_ns && (now - active.built_ns) < max_age_ns
         return active
     end
     return rebuild_snapshot!(cache)
