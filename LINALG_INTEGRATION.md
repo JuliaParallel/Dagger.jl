@@ -6,7 +6,7 @@ branches; they do **not** merge into this workspace branch, and they do **not**
 edit other agents' rows here. Report status in your final message so the
 coordinator can update the table.
 
-Last coordinator pass: 2026-09-07.
+Last coordinator pass: 2026-09-07 (seven workstreams merged onto `Dagger-linalg-ultra`).
 
 ---
 
@@ -237,13 +237,13 @@ Status values: `not started` | `in progress` | `blocked` | `done` | `failed`.
 
 | Workstream | Status | Branch | Owner notes | Last update |
 |---|---|---|---|---|
-| sparse-solve-dispatch | not started | `linalg/sparse-solve-dispatch` | Sparse `A\b` / `lu` / `factorize` must not densify. Today's `ldiv!(::DMatrix, …)` always `lu`s densely (`src/array/linalg.jl`). Numeric refactor of the actual sparse factorization is later; this workstream is dispatch + stay-sparse. Existing gathered `Dagger.klu`/`splu` are not the Base API. | 2026-09-07 |
-| linearsolve | not started | `linalg/linearsolve` | LinearSolve.jl algorithm that dispatches on `DArray`. Prefer `LinearSolve.solve(prob, …)` over a new Dagger entry point. Krylov.jl integration already exists and is not this workstream. | 2026-09-07 |
-| assembly | not started | `linalg/assembly` | Incremental sparse assembly (MatSetValues-shaped). Prefer existing Julia APIs: `SparseArrays.sparse(I,J,V)` distributed, plus accumulation into existing sparse tiles. `sprand`/`spzeros`/`distribute` already exist — do not reinvent those. | 2026-09-07 |
-| overlapping-asm | not started | `linalg/overlapping-asm` | Overlapping additive Schwarz preconditioner. Current block Jacobi / ILU / AMG are **non-overlapping** (one op per diagonal tile). | 2026-09-07 |
-| sparse-chol-ic | not started | `linalg/sparse-chol-ic` | Sparse Cholesky + incomplete Cholesky. Dense tiled `cholesky` and per-tile `BlockILUPreconditioner` already exist; do not break them. | 2026-09-07 |
-| global-amg | not started | `linalg/global-amg` | True distributed AMG, **not** per-tile. `AMGPreconditioner` is block-diagonal; `Blocks(n,n)` is the only "global" mode today. `stats.solved` is not `Ax≈b` for block AMG (AGENTS.md lesson 19). | 2026-09-07 |
-| operator-types | not started | `linalg/operator-types` | MatNullSpace-shaped nullspace + nested / fieldsplit operators. Extend existing Julia/ecosystem types if they exist; do not invent PETSc clones. | 2026-09-07 |
+| sparse-solve-dispatch | done | `linalg/sparse-solve-dispatch` @ `57c7414b` | Sparse `A\b` / `lu` / `factorize` route off dense LU via `is_sparse_backed`. AWS: array/linalg pass. Numeric refactor skipped — PureUMFPACK has no `splu!`. `inv` on sparse uses the sparse factor (`factorize` + `ldiv!` into `I`). | 2026-09-07 |
+| linearsolve | done | `linalg/linearsolve` @ `55c38361` | `LinearSolve.solve` / `defaultalg` on `DArray` (direct `KrylovJL_GMRES` / `PureKLU` / `PureUMFPACK`, never `DefaultLinearSolver`). AWS: linearsolve 25/25, full array/linalg pass. AlgebraicMultigrid compat `"1, 2"`. | 2026-09-07 |
+| assembly | done | `linalg/assembly` @ `6018c6f4` | `sparse` / `sparse!` + `Blocks` tile-routed COO; regular `@spawn`, not datadeps (`SparseCOOBucket` has no `move!`). AWS: assembly 64/64, array/linalg pass. | 2026-09-07 |
+| overlapping-asm | done | `linalg/overlapping-asm` @ `5a2102f7` | `AdditiveSchwarzPreconditioner` (`PC_ASM_RESTRICT`). RAS is not SPD — use GMRES. Overlap benefit is problem-dependent (no `niter` drop on well-conditioned 1-D Laplacian with large tiles). AWS: iterativesolvers 346, array/linalg pass. | 2026-09-07 |
+| sparse-chol-ic | done | `linalg/sparse-chol-ic` @ `5c1f9991` | Sparse `cholesky` via `_cholesky` / `cholesky!` (never `_chol!`); per-tile `BlockICPreconditioner` / `ichol`. AWS: sparse chol 55, array/linalg pass. | 2026-09-07 |
+| global-amg | done | `linalg/global-amg` @ `c7779f81` | `GlobalAMG` / `SmoothedAggregationPreconditioner` / `RugeStubenPreconditioner`. First cut still gathers to build `P`; RAP and the V-cycle do not. Check `‖Ax−b‖`, not only `stats.solved`. AWS: global_amg 113, iterativesolvers 297. | 2026-09-07 |
+| operator-types | done | `linalg/operator-types` @ `9158cb47` | `Projected` (nullspace; constructor orthonormalizes) + `BlockOperator` / `BlockDiagonalPC`. AWS: iterativesolvers 346, array/linalg pass. | 2026-09-07 |
 
 ---
 
@@ -251,15 +251,31 @@ Status values: `not started` | `in progress` | `blocked` | `done` | `failed`.
 
 | Date | Merge | Notes |
 |---|---|---|
-| 2026-09-07 | _(none yet)_ | Integration branch created at `origin/master` (`39528ab3`). Tracking doc only. |
+| 2026-09-07 | tracking doc only | Integration branch created at `origin/master` (`39528ab3`). |
+| 2026-09-07 | `b31d56c0` `linalg/sparse-solve-dispatch` @ `57c7414b` | No conflicts. |
+| 2026-09-07 | `f12a2f2a` `linalg/linearsolve` @ `55c38361` | Conflict: `AGENTS.md` (kept both lesson 27s as 27–28). |
+| 2026-09-07 | `08074b4e` `linalg/assembly` @ `6018c6f4` | Conflicts: `AGENTS.md` (lesson 29), `test/runtests.jl` (kept LinearSolve + assembly entries). |
+| 2026-09-07 | `bd3943d3` `linalg/overlapping-asm` @ `5a2102f7` | Conflict: `AGENTS.md` (lesson 30). Docs/ext auto-merged. |
+| 2026-09-07 | `0e3c0e48` `linalg/sparse-chol-ic` @ `5c1f9991` | Conflicts: `AGENTS.md` (lesson 31), `ext/SparseArraysExt.jl` (union assembly + IC0). `runtests.jl` auto-kept `sparsechol.jl`. |
+| 2026-09-07 | `79fa35f5` `linalg/global-amg` @ `c7779f81` | Conflicts: `AGENTS.md` (lesson 32), `docs/src/iterative-solving.md` (kept ASM prose + GlobalAMG warning). |
+| 2026-09-07 | `e5e7eaaa` `linalg/operator-types` @ `9158cb47` | Conflict: `AGENTS.md` (lessons 33–34; Projected orthonormalize folded into 33). |
+
+## Remaining follow-ups
+
+- **Numeric refactor of sparse LU** — skipped. Dispatch stays sparse; PureUMFPACK has no `splu!` in-place hook, so a later numeric rewrite of the actual factorization is still open.
+- **GlobalAMG first cut still gathers to build `P`.** RAP and the V-cycle are distributed; setup of the prolongation is not. More coarse levels / smoothing variants are also open.
+- **RAS overlap benefit is problem-dependent.** Overlap 1 does not reduce GMRES `niter` on a well-conditioned 1-D Laplacian with large tiles; the drop needs smaller subdomains or stronger convection. RAS is nonsymmetric — use GMRES, not CG.
+- **`inv` on a sparse-backed `DMatrix`** uses the sparse factor (`factorize` + `ldiv!` into `I`) rather than a dedicated sparse inverse. The result is still a dense `I` solve.
+
+`AGENTS.md` lessons 27–34 are the union of the per-workstream lesson 27s (LinearSolve `DefaultLinearSolver`; ASM Restricted / GMRES; GlobalAMG vs per-tile residual; qualify `cholesky!`/`mul!`; `SparseCOOBucket` not in datadeps; Projected orthonormalize / `Adjoint` `mul!`; `hvcat` is not `MatNest`). Lesson 20 remains unused (pre-existing gap).
 
 ---
 
 ## Integration-branch git facts (coordinator)
 
 - Workspace: `/home/jpsamaroo/.julia/dev/Dagger-linalg-ultra`
-- Branch: `Dagger-linalg-ultra` (no upstream at first commit of this doc;
-  pushed to `origin` if that succeeded — see coordinator notes)
+- Branch: `Dagger-linalg-ultra` tracks `origin/Dagger-linalg-ultra`
 - Remotes: `origin` → `ssh://git@github.com/JuliaParallel/Dagger.jl.git`;
   `victor` → `victorcamaraa/Dagger.jl-with-Multistreams.git` (unrelated)
 - Do not discard dirty work in this tree or in any listed `git worktree`.
+- No Dagger tests or benchmarks were run on this host during the merge pass.
