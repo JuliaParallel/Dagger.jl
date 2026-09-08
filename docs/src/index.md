@@ -432,7 +432,7 @@ x, stats = Krylov.gmres(DA, b; M = P)             # check ‖Ax−b‖, not just
 `Dagger.AMGPreconditioner` is the older **per-tile** (additive-Schwarz) AMG.
 Other preconditioners: `Dagger.JacobiPreconditioner`,
 `Dagger.BlockJacobiPreconditioner`, `Dagger.AdditiveSchwarzPreconditioner`
-(core; overlapping restricted ASM), `Dagger.BlockILUPreconditioner`
+(core; overlapping ASM, `:restrict` or `:basic`), `Dagger.BlockILUPreconditioner`
 (load `IncompleteLU`), and `Dagger.BlockPreconditioner(A, build)` to plug in any
 third-party per-tile factory. Any object implementing `mul!(y, A, x)` over
 `DVector`s can be used as a matrix-free operator `A`.
