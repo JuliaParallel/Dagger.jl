@@ -372,8 +372,8 @@ stencil_kernel_writable(::DeviceSparseMatrixCSC) = false
 # nonzero count crosses to the host. Backends without device-side compression
 # fall back to `stencil_host_sweep!`.
 #
-# Sweeping dense and compressing gives exactly the result the dense sweep would
-# have written, so `SparseSweep` needs no special handling here: its dilated
+# Sweeping dense and compressing gives exactly the result a full sweep would have
+# written, so `ZeroPreservingSweep` needs no special handling here: its dilated
 # candidate set only ever *skips* indices whose result is zero, which the
 # compression drops anyway. (On a device those skipped evaluations are near-free,
 # running in parallel with the rest, so restricting them would buy nothing.)

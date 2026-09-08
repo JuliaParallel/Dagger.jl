@@ -304,14 +304,25 @@ Base.IndexStyle(::Type{<:_StencilAccumulator}) = IndexCartesian()
     return v
 end
 
-function Dagger.try_sparse_stencil_sweep!(proc, f, output::Dagger.DSparseArray, read_vars)
+function Dagger.try_sparse_output_sweep!(proc, style, f, output::Dagger.DSparseArray, read_vars)
     old = output.mat
     (old isa SparseMatrixCSC || old isa SparseVector) || return false
+    _sparse_output_sweep!(_restrictable(style, old, read_vars), f, output, old, read_vars)
+    return true
+end
+
+# Whether this expression can actually restrict which indices it visits. Only a
+# `ZeroPreservingSweep` may, and only when every operand contributes a pattern to
+# dilate; otherwise the sweep still runs -- it just visits every index, which is
+# what `FullSweep` does anyway. Returns the style to sweep with, paired with the
+# sources it needs (empty for a full sweep).
+_restrictable(::Dagger.FullSweep, old, read_vars) = (Dagger.FullSweep(), ())
+function _restrictable(style::Dagger.ZeroPreservingSweep, old, read_vars)
     N = ndims(old)
     sources = map(v -> _stencil_pattern_source(v, Val(N)), Tuple(values(read_vars)))
     # A dense operand can be nonzero anywhere, so there is no pattern to dilate
-    # and every index is a candidate; the dense sweep is what that reduces to.
-    any(isnothing, sources) && return false
+    # and every index is a candidate -- which is exactly a full sweep.
+    any(isnothing, sources) && return (Dagger.FullSweep(), ())
     if isempty(sources)
         # The output is the only operand (`B[idx] = B[idx] * 2`, common as a
         # follow-up expression in a stencil block): its own pattern is the
@@ -320,13 +331,24 @@ function Dagger.try_sparse_stencil_sweep!(proc, f, output::Dagger.DSparseArray, 
     end
     # Operands are indexed at the same `idx` as the output, so a size mismatch
     # would make the dilated pattern meaningless.
-    all(src -> size(src[1]) == size(old), sources) || return false
-    _sparse_stencil_sweep!(f, output, old, read_vars, sources)
-    return true
+    all(src -> size(src[1]) == size(old), sources) || return (Dagger.FullSweep(), ())
+    return (style, sources)
 end
 
-# Widest halo reach over all operands, per dimension.
-function _stencil_shell(sources)
+# Rows of column `j` this sweep must visit, as clipped intervals. A full sweep
+# visits the whole column; only the zero-preserving style restricts.
+@inline function _column_intervals!(ivals, ::Dagger.FullSweep, sources, j, m, n, shell)
+    empty!(ivals)
+    push!(ivals, (1, m))
+    return ivals
+end
+@inline _column_intervals!(ivals, ::Dagger.ZeroPreservingSweep, sources, j, m, n, shell) =
+    _stencil_column_intervals!(ivals, sources, j, m, n, shell)
+
+# Widest halo reach over all operands, per dimension. A full sweep visits every
+# index anyway, so it needs no shell.
+_stencil_shell(::Dagger.FullSweep, sources) = ()
+function _stencil_shell(::Dagger.ZeroPreservingSweep, sources)
     N = length(sources[1][2])
     return ntuple(N) do d
         w = 0
@@ -337,44 +359,56 @@ function _stencil_shell(sources)
     end
 end
 
+# Candidate rows of column `j`: the operands' stored entries dilated by their halo
+# reach, plus the boundary shell, as sorted clipped intervals.
+function _stencil_column_intervals!(ivals, sources, j, m, n, shell)
+    empty!(ivals)
+    if _in_shell(j, n, shell[2])
+        push!(ivals, (1, m))
+        return ivals
+    end
+    shell[1] > 0 && push!(ivals, (1, min(m, shell[1])))
+    shell[1] > 0 && push!(ivals, (max(1, m - shell[1] + 1), m))
+    for (A, hw) in sources
+        _push_dilated!(ivals, A, hw, j, m, n)
+    end
+    sort!(ivals; by=first)
+    return ivals
+end
+
 # Stored entries of a *neighboring* chunk reach this tile's outermost `shell`
 # elements. Rather than extract each halo region's own pattern, treat that shell
 # as candidate wholesale: it over-approximates by O(w * perimeter) indices,
 # against the O(prod(size)) the sweep is avoiding.
 @inline _in_shell(i, n, w) = w > 0 && (i <= w || i > n - w)
 
-function _sparse_stencil_sweep!(f::F, output, old::SparseMatrixCSC{Tv,Ti},
-                                read_vars, sources) where {F,Tv,Ti}
+_sparse_output_sweep!((style, sources)::Tuple, f, output, old, read_vars) =
+    _sparse_output_sweep!(style, sources, f, output, old, read_vars)
+
+function _sparse_output_sweep!(style, sources, f::F, output, old::SparseMatrixCSC{Tv,Ti},
+                               read_vars) where {F,Tv,Ti}
     m, n = size(old)
-    shell = _stencil_shell(sources)
+    shell = _stencil_shell(style, sources)
     acc = _StencilAccumulator{Tv,Ti}((m, n), old)
     colptr = Vector{Ti}(undef, n + 1)
     colptr[1] = 1
     ivals = Tuple{Int,Int}[]
+    w = Dagger._max_halo_width(values(read_vars), (0, 0))
+    interior_vars = map(Dagger._interior_var, read_vars)
 
     for j in 1:n
-        empty!(ivals)
-        if _in_shell(j, n, shell[2])
-            push!(ivals, (1, m))
-        else
-            shell[1] > 0 && push!(ivals, (1, min(m, shell[1])))
-            shell[1] > 0 && push!(ivals, (max(1, m - shell[1] + 1), m))
-            for (A, hw) in sources
-                _push_dilated!(ivals, A, hw, j, m, n)
-            end
-            sort!(ivals; by=first)
-        end
+        _column_intervals!(ivals, style, sources, j, m, n, shell)
         # Walk the sorted intervals, merging overlaps, and sweep each maximal run.
         lo = 0; hi = -1
         for (a, b) in ivals
             if a > hi + 1
-                lo > 0 && _sweep_run!(f, acc, read_vars, lo, hi, j)
+                lo > 0 && _sweep_run!(f, acc, read_vars, interior_vars, w, m, n, lo, hi, j)
                 lo, hi = a, b
             else
                 hi = max(hi, b)
             end
         end
-        lo > 0 && _sweep_run!(f, acc, read_vars, lo, hi, j)
+        lo > 0 && _sweep_run!(f, acc, read_vars, interior_vars, w, m, n, lo, hi, j)
         colptr[j+1] = length(acc.nzval) + 1
     end
 
@@ -394,19 +428,68 @@ end
     return
 end
 
-@inline function _sweep_run!(f::F, acc, read_vars, lo::Int, hi::Int, j::Int) where F
+# Sweep rows `lo:hi` of column `j`, splitting off the part whose whole
+# neighborhood lands inside the center array.
+#
+# This is the same interior/shell split `cpu_stencil_sweep!` makes, and it has to
+# be made here too: assembling a sparse output requires visiting indices in
+# column-major order, so this sweep cannot reuse that one, and without the split
+# every `@neighbors` access would pay `HaloArray`'s region-code dispatch even
+# where it provably cannot reach a halo.
+@inline function _sweep_run!(f::F, acc, read_vars, interior_vars, w, m, n,
+                             lo::Int, hi::Int, j::Int) where F
+    if w[2] < j <= n - w[2]
+        ilo = max(lo, w[1] + 1)
+        ihi = min(hi, m - w[1])
+        if ilo <= ihi
+            for i in lo:(ilo - 1)
+                @inline f(CartesianIndex(i, j), acc, read_vars)
+            end
+            for i in ilo:ihi
+                @inline f(CartesianIndex(i, j), acc, interior_vars)
+            end
+            for i in (ihi + 1):hi
+                @inline f(CartesianIndex(i, j), acc, read_vars)
+            end
+            return
+        end
+    end
     for i in lo:hi
         @inline f(CartesianIndex(i, j), acc, read_vars)
     end
     return
 end
 
-function _sparse_stencil_sweep!(f::F, output, old::SparseVector{Tv,Ti},
-                                read_vars, sources) where {F,Tv,Ti}
+function _sparse_output_sweep!(style, sources, f::F, output, old::SparseVector{Tv,Ti},
+                               read_vars) where {F,Tv,Ti}
     n = length(old)
-    w = _stencil_shell(sources)[1]
     acc = _StencilAccumulator{Tv,Ti}((n,), old)
     ivals = Tuple{Int,Int}[]
+    _vector_intervals!(ivals, style, sources, n)
+    w = Dagger._max_halo_width(values(read_vars), (0,))
+    interior_vars = map(Dagger._interior_var, read_vars)
+
+    lo = 0; hi = -1
+    for (a, b) in ivals
+        if a > hi + 1
+            lo > 0 && _sweep_run_1d!(f, acc, read_vars, interior_vars, w, n, lo, hi)
+            lo, hi = a, b
+        else
+            hi = max(hi, b)
+        end
+    end
+    lo > 0 && _sweep_run_1d!(f, acc, read_vars, interior_vars, w, n, lo, hi)
+
+    output.mat = SparseVector{Tv,Ti}(n, acc.rowval, acc.nzval)
+    return
+end
+
+@inline function _vector_intervals!(ivals, ::Dagger.FullSweep, sources, n)
+    push!(ivals, (1, n))
+    return ivals
+end
+function _vector_intervals!(ivals, ::Dagger.ZeroPreservingSweep, sources, n)
+    w = _stencil_shell(Dagger.ZeroPreservingSweep(), sources)[1]
     w > 0 && push!(ivals, (1, min(n, w)))
     w > 0 && push!(ivals, (max(1, n - w + 1), n))
     for (A, hw) in sources
@@ -415,23 +498,25 @@ function _sparse_stencil_sweep!(f::F, output, old::SparseVector{Tv,Ti},
         end
     end
     sort!(ivals; by=first)
-
-    lo = 0; hi = -1
-    for (a, b) in ivals
-        if a > hi + 1
-            lo > 0 && _sweep_run_1d!(f, acc, read_vars, lo, hi)
-            lo, hi = a, b
-        else
-            hi = max(hi, b)
-        end
-    end
-    lo > 0 && _sweep_run_1d!(f, acc, read_vars, lo, hi)
-
-    output.mat = SparseVector{Tv,Ti}(n, acc.rowval, acc.nzval)
-    return
+    return ivals
 end
 
-@inline function _sweep_run_1d!(f::F, acc, read_vars, lo::Int, hi::Int) where F
+@inline function _sweep_run_1d!(f::F, acc, read_vars, interior_vars, w, n,
+                                lo::Int, hi::Int) where F
+    ilo = max(lo, w[1] + 1)
+    ihi = min(hi, n - w[1])
+    if ilo <= ihi
+        for i in lo:(ilo - 1)
+            @inline f(CartesianIndex(i), acc, read_vars)
+        end
+        for i in ilo:ihi
+            @inline f(CartesianIndex(i), acc, interior_vars)
+        end
+        for i in (ihi + 1):hi
+            @inline f(CartesianIndex(i), acc, read_vars)
+        end
+        return
+    end
     for i in lo:hi
         @inline f(CartesianIndex(i), acc, read_vars)
     end

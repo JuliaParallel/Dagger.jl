@@ -1038,42 +1038,79 @@ end
 #############################################################################
 
 """
-    DenseSweep()
+    FullSweep()
 
 Evaluate the stencil at every index of the output tile. The default, and the only
 style that is correct for an arbitrary kernel.
+
+Note that this says nothing about how the result is *stored*: a sparse output is
+still assembled in one pass rather than by repeated insertion (see
+[`try_sparse_output_sweep!`](@ref)). Which indices are visited and how the result
+is built are independent choices.
 """
-struct DenseSweep end
-
-"""
-    SparseSweep()
-
-Evaluate the stencil only where its result can be nonzero, and build the output
-tile from those values in one shot. Selected by `@stencil sparse=true`.
-
-This is sound only for a *zero-preserving* kernel -- one that maps an all-zero
-neighborhood to zero -- which is why it must be asked for rather than inferred
-(`B[idx] = A[idx] + 1` and `Pad(1)` are both counterexamples, and a kernel sees
-`idx`, so probing it at one point proves nothing about the others).
-
-Falls back to [`DenseSweep`](@ref) whenever the candidate set cannot be
-established: an output whose storage has no sparse-aware sweep, a read variable
-that is dense (its stored entries are everywhere, so every index is a candidate),
-or operands that are not conformable with the output tile.
-"""
-struct SparseSweep end
+struct FullSweep end
 
 """
-    try_sparse_stencil_sweep!(processor, f, output, read_vars) -> Bool
+    ZeroPreservingSweep()
 
-Run a [`SparseSweep`](@ref) if this output's storage has one, returning whether it
-did. Sparse backends implement this (see `ext/SparseArraysExt.jl`); the fallback
-declines, and the caller runs a `DenseSweep` instead.
+Evaluate the stencil only where its result can be nonzero. Selected by
+`@stencil zero_preserving=true`.
+
+Sound only because the caller has asserted that the kernel is *zero-preserving*
+-- that it maps an all-zero neighborhood to zero. That cannot be inferred: a
+kernel receives `idx`, so probing it at one point proves nothing about the
+others, which is why it is asked for rather than detected. `B[idx] = A[idx] + 1`
+is the canonical counterexample. (A nonzero `Pad` is the one violation that *can*
+be caught, and is -- see [`validate_zero_preserving`](@ref).)
+
+Falls back to [`FullSweep`](@ref) whenever the candidate set cannot be
+established: a read variable that is dense (its stored entries could be anywhere,
+so every index is a candidate), or operands not conformable with the output tile.
 """
-try_sparse_stencil_sweep!(processor, f, output, read_vars) = false
+struct ZeroPreservingSweep end
+
+"""
+    try_sparse_output_sweep!(processor, style, f, output, read_vars) -> Bool
+
+Sweep into a sparse output, returning whether this output's storage had such a
+path.
+
+Assembles the result in a single pass -- appending nonzeros and building the
+index arrays once -- instead of inserting element by element, each insertion
+shifting the tail of the storage. That is worth doing for *any* `style`; it
+depends only on the output being sparse, not on any promise about the kernel.
+`style` chooses only which indices get visited.
+
+Sparse backends implement this (see `ext/SparseArraysExt.jl`); the fallback
+declines and the caller runs the ordinary per-processor sweep.
+"""
+try_sparse_output_sweep!(processor, style, f, output, read_vars) = false
+
+"""
+    validate_zero_preserving(boundary)
+
+Reject a boundary condition that is provably not zero-preserving, so that
+`@stencil zero_preserving=true` fails loudly instead of silently dropping a
+nonzero background.
+
+`Pad(v)` with `v != 0` is the only such boundary: every other condition merely
+copies or extrapolates existing values, so all-zero input gives all-zero output.
+Checked at submission, which catches a padding value that is not a literal.
+
+This cannot say anything about the *kernel*: `B[idx] = A[idx] + 1` is equally not
+zero-preserving and equally undetectable.
+"""
+validate_zero_preserving(@nospecialize(boundary)) = nothing
+validate_zero_preserving(boundary::Tuple) = foreach(validate_zero_preserving, boundary)
+function validate_zero_preserving(pad::Pad)
+    iszero(pad.padval) && return nothing
+    throw(ArgumentError("`@stencil zero_preserving=true` asserts that the kernel maps an \
+        all-zero neighborhood to zero, but `Pad($(pad.padval))` pads with a nonzero value, \
+        so it does not. Use `Pad($(zero(pad.padval)))`, or drop `zero_preserving=true`."))
+end
 
 function inner_stencil!(f, output, read_vars)
-    return inner_stencil!(DenseSweep(), f, output, read_vars)
+    return inner_stencil!(FullSweep(), f, output, read_vars)
 end
 function inner_stencil!(style, f, output, read_vars)
     processor = task_processor()
@@ -1203,28 +1240,19 @@ function device_csc_arrays(dense::AbstractMatrix{Tv}, ::Type{Ti}) where {Tv,Ti}
     return colptr, rowval, nzval
 end
 
-@inline function _inner_stencil!(::DenseSweep, processor, f, output, read_vars)
-    # See `stencil_storage`: unwrapping here is what makes `inner_stencil_proc!`
-    # a function barrier for wrapper tiles, and is the identity for every other.
-    storage = stencil_storage(output)
-    vars = map(stencil_storage, read_vars)
-    if stencil_kernel_writable(storage)
-        inner_stencil_proc!(processor, f, storage, vars)
-    else
-        stencil_unwritable_sweep!(DenseSweep(), processor, f, output, vars)
-    end
-    return
-end
-
-@inline function _inner_stencil!(::SparseSweep, processor, f, output, read_vars)
-    # N.B. `output` is passed still wrapped: a sparse sweep *replaces* the tile's
+@inline function _inner_stencil!(style, processor, f, output, read_vars)
+    # See `stencil_storage`: unwrapping here is what makes the sweeps below a
+    # function barrier for wrapper tiles, and is the identity for every other.
+    #
+    # N.B. the sparse paths get `output` still wrapped: they *replace* the tile's
     # storage rather than mutating its elements, which is precisely what the
     # wrapper exists to hide from Datadeps.
+    storage = stencil_storage(output)
     vars = map(stencil_storage, read_vars)
-    if !stencil_kernel_writable(stencil_storage(output))
-        stencil_unwritable_sweep!(SparseSweep(), processor, f, output, vars)
-    elseif !try_sparse_stencil_sweep!(processor, f, output, vars)
-        _inner_stencil!(DenseSweep(), processor, f, output, read_vars)
+    if !stencil_kernel_writable(storage)
+        stencil_unwritable_sweep!(style, processor, f, output, vars)
+    elseif !try_sparse_output_sweep!(processor, style, f, output, vars)
+        inner_stencil_proc!(processor, f, storage, vars)
     end
     return
 end
@@ -1430,44 +1458,49 @@ as that would currently cause race conditions and lead to undefined behavior.
 `@stencil` accepts leading `key=value` options, before the body:
 
 ```julia
-@stencil sparse=true B[idx] = sum(@neighbors(A[idx], 1, Wrap()))
+@stencil zero_preserving=true B[idx] = sum(@neighbors(A[idx], 1, Wrap()))
 ```
 
-- `sparse::Bool=false`: sweep only the indices where the result can be nonzero,
-  instead of every index of each tile, and build each output tile from those
-  values in one shot. For sparse `DArray`s this replaces a dense sweep and
-  `nnz` scalar insertions with work proportional to the stored entries.
+- `zero_preserving::Bool=false`: assert that the kernel maps an all-zero
+  neighborhood to zero.
 
-  This asserts that the kernel is **zero-preserving**: that it maps an all-zero
-  neighborhood to zero. `B[idx] = A[idx] + 1` is not, nor is any kernel using
-  `Pad(v)` with `v != 0`; using `sparse=true` for those silently drops the
-  nonzero background. It cannot be checked, which is why it is opt-in.
+  This is a statement about your kernel, not a request for a strategy. Given it,
+  an output element can only be nonzero if some stored entry of an operand lies
+  within `neigh_dist` of it, so the sweep may skip every other index. The
+  candidate set is the operands' nonzero pattern *dilated* by the neighborhood
+  distance, and each backend decides for itself whether restricting to it is
+  worth doing (on a GPU it is not -- the skipped evaluations run in parallel with
+  the rest and cost nothing).
 
-  The candidate set is the nonzero pattern of the operands *dilated* by the
-  neighborhood distance, so it is only a win while that dilated pattern stays
-  much smaller than the tile: roughly density < `(2*neigh_dist+1)^-ndims`, about
-  11% for a 3x3 2D stencil. Note that a stencil dilates its own output, so an
-  iterated stencil fills in and crosses that threshold after a few sweeps.
+  `B[idx] = A[idx] + 1` is **not** zero-preserving, and asserting otherwise
+  silently drops the nonzero background. Nothing can check that in general: a
+  kernel receives `idx`, so probing it at one point proves nothing about the
+  others. A nonzero `Pad` is the one violation that *is* caught, and raises.
 
-  The option is a no-op wherever the sparse sweep does not apply -- dense
-  arrays, a dense read variable, or a backend with no sparse-aware sweep -- and
-  those cases transparently run the dense sweep instead.
+  Restriction pays only while the dilated pattern stays much smaller than the
+  tile: roughly density < `(2*neigh_dist+1)^-ndims`, about 11% for a 3x3 2-D
+  stencil. A stencil dilates its own output, so an iterated one fills in and
+  crosses that threshold after a few sweeps.
+
+  Note that this option is **not** what makes a sparse output efficient. Building
+  an output tile in one pass, rather than by repeated insertion, happens for any
+  sparse output regardless of this flag -- it needs no promise about the kernel.
 """
 # Parse the leading `key=value` options of `@stencil`. Unambiguous against the
 # body: a stencil expression always writes to an *indexed* location, so a bare
 # `Symbol` on the left of `=` can only be an option.
 function parse_stencil_options(opts)
-    sweep_style = DenseSweep()
+    sweep_style = FullSweep()
     for opt in opts
         if !Meta.isexpr(opt, :(=)) || !(opt.args[1] isa Symbol)
             throw(ArgumentError("`@stencil` options must be `key=value`, got: $opt"))
         end
         key, value = opt.args[1], opt.args[2]
-        if key === :sparse
+        if key === :zero_preserving
             if !(value isa Bool)
-                throw(ArgumentError("`@stencil` option `sparse` must be the literal `true` or `false`, got: $value"))
+                throw(ArgumentError("`@stencil` option `zero_preserving` must be the literal `true` or `false`, got: $value"))
             end
-            sweep_style = value ? SparseSweep() : DenseSweep()
+            sweep_style = value ? ZeroPreservingSweep() : FullSweep()
         else
             throw(ArgumentError("Unknown `@stencil` option: $key"))
         end
@@ -1615,6 +1648,9 @@ macro stencil(args...)
                 @gensym region_info_table src_chunks region_meta neighbor_cks
                 neigh_sym_map[read_var] = (; region_info_table, src_chunks)
                 push!(final_ex.args, :($validate_neigh_dist($neigh_dist, ndims($read_var))))
+                if sweep_style isa ZeroPreservingSweep
+                    push!(final_ex.args, :($validate_zero_preserving($boundary)))
+                end
                 push!(final_ex.args, :($src_chunks = $stencil_source_chunks($chunks($read_var), $chunks($write_var))))
                 push!(final_ex.args, :($region_info_table = Array{Any}(undef, size($src_chunks))))
                 push!(final_ex.args, quote
