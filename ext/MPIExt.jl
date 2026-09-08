@@ -864,8 +864,52 @@ end
 
 const DEADLOCK_DETECT = TaskLocalValue{Bool}(()->true)
 
-const DEADLOCK_WARN_PERIOD = TaskLocalValue{Float64}(()->10.0)
-const DEADLOCK_TIMEOUT_PERIOD = TaskLocalValue{Float64}(()->120.0)
+const DEADLOCK_WARN_PERIOD = TaskLocalValue{Float64}(()->parse(Float64, get(ENV, "JULIA_DAGGER_MPI_WARN_PERIOD", "10.0")))
+const DEADLOCK_TIMEOUT_PERIOD = TaskLocalValue{Float64}(()->parse(Float64, get(ENV, "JULIA_DAGGER_MPI_TIMEOUT_PERIOD", "120.0")))
+
+# Monotonic count of cross-rank operations this rank has *completed*: every
+# finished `Isend`/`Irecv` request and every broadcast payload the relay hands
+# to a slot. Only the volume matters, never the value, so relaxed increments
+# from any thread are fine.
+#
+# This is what lets a wait tell "the job is moving and I am behind a peer" from
+# "nothing is moving anywhere". A per-wait stopwatch cannot: how long one rank
+# waits for another is bounded by the peer's *backlog*, not by any property of
+# the wait itself, and datadeps deliberately lets that backlog grow (a region's
+# tasks are submitted in one burst, so a non-owner can reach a task's metadata
+# wait long before the owner starts it). Add a first-call JIT of the task body
+# -- minutes, for a wide `@stencil` -- and a single legitimate wait runs well
+# past any fixed timeout. Timing that wait alone reports a deadlock that is not
+# there; timing it against this counter reports one only when the rank has
+# genuinely stopped doing cross-rank work.
+const MPI_PROGRESS = Threads.Atomic{UInt64}(0)
+@inline note_mpi_progress!() = (Threads.atomic_add!(MPI_PROGRESS, UInt64(1)); nothing)
+
+"""
+    DeadlockTimer()
+
+The stopwatch one cross-rank wait carries, rebuilt (not mutated) on each poll so
+it stays isbits and costs no allocation on the wait loops.
+
+`warn_period` is the live threshold and goes to `typemax` once this wait has
+warned, so it warns at most once; `base_warn` is the value to restore when the
+clock is reset. `last_progress` is the `MPI_PROGRESS` reading this wait was last
+judged against. See `mpi_deadlock_detect`.
+"""
+struct DeadlockTimer
+    detect::Bool
+    time_start::UInt64
+    warn_period::UInt64
+    base_warn::UInt64
+    timeout_period::UInt64
+    last_progress::UInt64
+end
+function DeadlockTimer()
+    warn_period = round(UInt64, DEADLOCK_WARN_PERIOD[] * 1e9)
+    return DeadlockTimer(DEADLOCK_DETECT[], time_ns(), warn_period, warn_period,
+                         round(UInt64, DEADLOCK_TIMEOUT_PERIOD[] * 1e9),
+                         MPI_PROGRESS[])
+end
 const RECV_WAITING = LockedObject(Dict{Tuple{MPI.Comm, Int, Int}, Base.Event}())
 
 # Envelope for the out-of-place raw-bytes MPI path: serialize a small
@@ -1052,10 +1096,7 @@ end
 recv_yield_inplace!(array::Array, comm, my_rank, their_rank, tag) =
     _recv_yield_inplace_raw!(array, comm, my_rank, their_rank, tag)
 function _recv_yield_inplace_raw!(array, comm, my_rank, their_rank, tag)
-    time_start = time_ns()
-    detect = DEADLOCK_DETECT[]
-    warn_period = round(UInt64, DEADLOCK_WARN_PERIOD[] * 1e9)
-    timeout_period = round(UInt64, DEADLOCK_TIMEOUT_PERIOD[] * 1e9)
+    timer = DeadlockTimer()
 
     while true
         (got, msg, stat) = MPI.Improbe(their_rank, tag, comm, MPI.Status)
@@ -1070,7 +1111,7 @@ function _recv_yield_inplace_raw!(array, comm, my_rank, their_rank, tag)
             __wait_for_request(req, comm, my_rank, their_rank, tag, "recv_yield", "recv")
             return array
         end
-        warn_period = mpi_deadlock_detect(detect, time_start, warn_period, timeout_period, my_rank, tag, "recv", their_rank)
+        timer = mpi_deadlock_detect(timer, my_rank, tag, "recv", their_rank)
         yield()
     end
 end
@@ -1083,10 +1124,7 @@ function recv_yield_inplace(_value::InplaceInfo, comm, my_rank, their_rank, tag)
 end
 
 function recv_yield_serialized(comm, my_rank, their_rank, tag)
-    time_start = time_ns()
-    detect = DEADLOCK_DETECT[]
-    warn_period = round(UInt64, DEADLOCK_WARN_PERIOD[] * 1e9)
-    timeout_period = round(UInt64, DEADLOCK_TIMEOUT_PERIOD[] * 1e9)
+    timer = DeadlockTimer()
 
     while true
         (got, msg, stat) = MPI.Improbe(their_rank, tag, comm, MPI.Status)
@@ -1100,7 +1138,7 @@ function recv_yield_serialized(comm, my_rank, their_rank, tag)
             __wait_for_request(req, comm, my_rank, their_rank, tag, "recv_yield", "recv")
             return MPI.deserialize(buf)
         end
-        warn_period = mpi_deadlock_detect(detect, time_start, warn_period, timeout_period, my_rank, tag, "recv", their_rank)
+        timer = mpi_deadlock_detect(timer, my_rank, tag, "recv", their_rank)
         yield()
     end
 end
@@ -1181,19 +1219,19 @@ function send_yield_serialized(value, comm, my_rank, their_rank, tag)
 end
 
 function __wait_for_request(req, comm, my_rank, their_rank, tag, fn::String, kind::String)
-    time_start = time_ns()
-    detect = DEADLOCK_DETECT[]
-    warn_period = round(UInt64, DEADLOCK_WARN_PERIOD[] * 1e9)
-    timeout_period = round(UInt64, DEADLOCK_TIMEOUT_PERIOD[] * 1e9)
+    timer = DeadlockTimer()
     while true
         finish, status = MPI.Test(req, MPI.Status)
         if finish
             if MPI.Get_error(status) != MPI.SUCCESS
                 error("$fn failed with error $(MPI.Get_error(status))")
             end
+            # Every completed request is this rank's proof of life for the
+            # waits running concurrently with it (see `MPI_PROGRESS`).
+            note_mpi_progress!()
             return
         end
-        warn_period = mpi_deadlock_detect(detect, time_start, warn_period, timeout_period, my_rank, tag, kind, their_rank)
+        timer = mpi_deadlock_detect(timer, my_rank, tag, kind, their_rank)
         yield()
     end
 end
@@ -1238,18 +1276,33 @@ function bcast_yield(comm, root::Integer, tag, value=nothing)
     return value
 end
 
-function mpi_deadlock_detect(detect, time_start, warn_period, timeout_period, rank, tag, kind, srcdest)
-    time_elapsed = (time_ns() - time_start)
-    if detect && time_elapsed > warn_period
+# Escalate a wait only while this rank is doing no cross-rank work at all.
+#
+# Waiting a long time is not evidence of a deadlock (see `MPI_PROGRESS`): it is
+# the normal cost of being behind a peer. What *is* evidence is waiting while
+# nothing else on this rank completes, so every poll that sees the counter move
+# restarts the clock, and the warn/timeout thresholds then measure a stall
+# rather than a wait. A real cycle still trips them, just once the work that
+# does not depend on it has drained.
+function mpi_deadlock_detect(timer::DeadlockTimer, rank, tag, kind, srcdest)
+    timer.detect || return timer
+    progress = MPI_PROGRESS[]
+    if progress != timer.last_progress
+        return DeadlockTimer(true, time_ns(), timer.base_warn, timer.base_warn,
+                             timer.timeout_period, progress)
+    end
+    time_elapsed = (time_ns() - timer.time_start)
+    if time_elapsed > timer.warn_period
         # A hang here is a wait cycle across ranks, so which call site is waiting
         # (and on whose behalf) is the whole diagnosis; a bare tag is not enough.
         @warn "[rank $rank][tag $tag] Hit probable hang on $kind (dest: $srcdest)" stacktrace=sprint(Base.show_backtrace, stacktrace())
-        return typemax(UInt64)
+        return DeadlockTimer(true, timer.time_start, typemax(UInt64), timer.base_warn,
+                             timer.timeout_period, progress)
     end
-    if detect && time_elapsed > timeout_period
+    if time_elapsed > timer.timeout_period
         error("[rank $rank][tag $tag] Hit hang on $kind (dest: $srcdest)")
     end
-    return warn_period
+    return timer
 end
 
 # ---------------------------------------------------------------------------
@@ -1350,6 +1403,9 @@ function bcast_deliver!(state::BcastState, root::Int, tag::UInt32, value)
         push!(get!(BcastSlot, state.slots, (root, tag)).values, value)
         notify(state.cond)
     end
+    # A delivered payload is cross-rank progress even when it is not the one a
+    # given consumer is waiting for (see `MPI_PROGRESS`).
+    note_mpi_progress!()
     return
 end
 
@@ -1374,16 +1430,13 @@ function bcast_slot_wait(state::BcastState, root::Int, tag::UInt32)
     # here forever with nothing to report -- a CI job exhausting its timeout
     # with no error to point at. Re-checks are driven by `bcast_heartbeat!`
     # rather than by polling, so a blocked consumer costs no CPU.
-    time_start = time_ns()
-    detect = DEADLOCK_DETECT[]
-    warn_period = round(UInt64, DEADLOCK_WARN_PERIOD[] * 1e9)
-    timeout_period = round(UInt64, DEADLOCK_TIMEOUT_PERIOD[] * 1e9)
+    timer = DeadlockTimer()
     rank = MPI.Comm_rank(state.bcast_comm)
     # `@lock`, not `lock(...) do`: the loop closes over enough of the enclosing
     # frame (`key`, the deadlock-timer state, `rank`) that the closure boxes
-    # them, and `warn_period` -- reassigned across iterations and captured --
-    # becomes a heap `Box`. Inlining the body keeps all of it on the stack; the
-    # `return` below still releases the lock, via `@lock`'s `finally`.
+    # them, and `timer` -- reassigned across iterations and captured -- becomes
+    # a heap `Box`. Inlining the body keeps all of it on the stack; the `return`
+    # below still releases the lock, via `@lock`'s `finally`.
     @lock state.cond begin
         while true
             slot = get(state.slots, key, nothing)
@@ -1392,8 +1445,7 @@ function bcast_slot_wait(state::BcastState, root::Int, tag::UInt32)
                 isempty(slot.values) && delete!(state.slots, key)
                 return value
             end
-            warn_period = mpi_deadlock_detect(detect, time_start, warn_period, timeout_period,
-                                              rank, tag, "bcast_meta delivery", root)
+            timer = mpi_deadlock_detect(timer, rank, tag, "bcast_meta delivery", root)
             wait(state.cond)
         end
     end
