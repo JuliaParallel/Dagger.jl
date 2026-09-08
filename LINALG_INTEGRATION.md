@@ -6,7 +6,7 @@ branches; they do **not** merge into this workspace branch, and they do **not**
 edit other agents' rows here. Report status in your final message so the
 coordinator can update the table.
 
-Last coordinator pass: 2026-09-07 (`linalg/near-nullspace` merged; remaining P0 leftover and other P1 workstreams still in progress on siblings).
+Last coordinator pass: 2026-09-07 (`linalg/graph-partition` merged; remaining P0 leftover and other P1 workstreams still in progress on siblings).
 
 ---
 
@@ -252,7 +252,7 @@ Priority: **P0 done** = merged onto `Dagger-linalg-ultra`. **P0 leftover** = fol
 | P0 leftover | ras-symmetric | done | `linalg/ras-symmetric` @ `a552987b` | `AdditiveSchwarzPreconditioner(; type=:restrict|:basic)`. Default restrict unchanged. `:basic` is PETSc `PC_ASM_BASIC` (SPD-preserving, for CG). AWS: iterativesolvers 419/419, full array/linalg pass. | 2026-09-07 |
 | P1 | stencil-gmg | done | `linalg/stencil-gmg` @ `f78eae25` | Matrix-based `GeometricMultigrid` (injection/full-weighting R, linear/bilinear P, Galerkin RAP, V-cycle `mul!`). **FLAG:** `jps/sparse-stencil` is same-idx halo only — not usable for restriction/prolongation; GMG is matrix-based. AWS: gmg 158/158, full array/linalg pass, GlobalAMG 113 unchanged. | 2026-09-07 |
 | P1 | csr-bsr | in progress | `linalg/csr-bsr` | CSR / BSR sparse tile formats alongside the existing CSC-backed `DSparseArray` path. | 2026-09-07 |
-| P1 | graph-partition | in progress | `linalg/graph-partition` | Graph / mesh partitioners as a `Blocks` alternative (or input to it) for sparse operators. | 2026-09-07 |
+| P1 | graph-partition | done | `linalg/graph-partition` @ `21fd1755` | `repartition` / `distribute` with `partitioner=Metis` or `perm=` (no `Dagger.metis`). Schur LU still uses `_nested_dissection_partition`. AWS: graph partition 295, sparsedirect 334. | 2026-09-07 |
 | P1 | sparse-eigen | in progress | `linalg/sparse-eigen` | Sparse / matrix-free eigensolvers on `DArray` via ecosystem generics (no novel `Dagger.xyz` unless unavoidable). | 2026-09-07 |
 | P1 | mixed-precision | in progress | `linalg/mixed-precision` | Mixed-precision Krylov / apply / residual paths that stay sparse and do not densify. | 2026-09-07 |
 | P1 | gpu-pc | done | `linalg/gpu-pc` @ `430aa1b2` | Device-side block-PC apply (Jacobi / ILU / AMG / RAS) keeps GPU Krylov vectors in VRAM (`memory_space_scope`, vendor LU / `DeviceILU0`). CPU `array/linalg/iterativesolvers` 404 passed; ROCm RX 6800 XT `gpu_pc_defs` 14/14. CUDA / MPI×GPU / Metal / OpenCL / oneAPI not device-validated. | 2026-09-07 |
@@ -281,6 +281,7 @@ Priority: **P0 done** = merged onto `Dagger-linalg-ultra`. **P0 leftover** = fol
 | 2026-09-07 | `3fddd5f6` `linalg/ras-symmetric` @ `a552987b` | Conflicts: `docs/src/index.md`, `docs/src/iterative-solving.md` (union: incoming `:restrict`/`:basic` plus HEAD GPU ILU / GMG wording). AGENTS/src/tests auto-merged (lesson 30 now documents `:basic`). Auto-merge also duplicated `DaggerSparseLU \ DVector`; kept the numeric-refactor `_solve_pinned_dvector` methods and dropped the incoming `invoke`. AWS: iterativesolvers 419/419, full array/linalg pass. |
 | 2026-09-07 | `f3128a64` `linalg/slicing` @ `48bc09d4` | Conflict: `AGENTS.md` (kept GPU-PC 35 + numeric-refactor 36 + GMG 37; slicing `view`/`SubArray` is 38). FEATURES_ROADMAP / `darray.md` / indexing / copy / tests auto-merged. **`view` stays `SubArray`** (intentional). StepRange `copyto!` still throws. No `DaggerSparseLU \ DVector` change. AWS: indexing 251, copyto 650. |
 | 2026-09-07 | `10a08071` `linalg/near-nullspace` @ `d2277c01` | Conflicts: `AGENTS.md` (kept GPU-PC 35 + numeric-refactor 36 + GMG 37 + slicing 38; near-nullspace is 39), `docs/src/iterative-solving.md` (union: HEAD GMG wording + incoming elasticity/`nullspace=`), `test/runtests.jl` (kept GMG + near-nullspace). Auto-merge also duplicated `DaggerSparseLU \ DVector`; kept the numeric-refactor `_solve_pinned_dvector` methods and dropped the incoming inline duplicate. Incoming lesson 36 was already lesson 36. AWS: near-nullspace 40, GlobalAMG 113, iterativesolvers 395. |
+| 2026-09-07 | `d94c971b` `linalg/graph-partition` @ `21fd1755` | Conflicts: `AGENTS.md` (kept GPU-PC 35 + numeric-refactor 36 + GMG 37 + slicing 38 + near-nullspace 39; incoming graph-partition lesson 35 is 40), `src/array/sparsedirect.jl` (kept ultra `_solve_pinned_dvector`; unioned the comment to mention GMG + Schur). `FEATURES_ROADMAP.md` unchanged (Performance-table / Indexing-Slicing row kept). Docs/`copy.jl`/`darray.jl`/`MetisExt`/`runtests` auto-merged. No `Dagger.metis`. Schur still `_nested_dissection_partition`. AWS: graph partition 295, sparsedirect 334. |
 
 ## Remaining follow-ups
 
@@ -292,7 +293,7 @@ Unassigned leftover from P0:
 
 - **`inv` on a sparse-backed `DMatrix`** uses the sparse factor (`factorize` + `ldiv!` into `I`) rather than a dedicated sparse inverse. The result is still a dense `I` solve.
 
-`AGENTS.md` lessons 27–39 are the union of the per-workstream lesson 27s (LinearSolve `DefaultLinearSolver`; ASM `:restrict` / `:basic`; GlobalAMG vs per-tile residual; qualify `cholesky!`/`mul!`; `SparseCOOBucket` not in datadeps; Projected orthonormalize / `Adjoint` `mul!`; `hvcat` is not `MatNest`; GPU block-PC `ProcessScope` gather; sparse `lu!(F, A)` / PureUMFPACK cannot cheap-refactor; `@stencil` cannot express GMG transfers; `view(::DArray)` stays `SubArray`; near-nullspace on the GlobalAMG constructor). Lesson 20 remains unused (pre-existing gap).
+`AGENTS.md` lessons 27–40 are the union of the per-workstream lesson 27s (LinearSolve `DefaultLinearSolver`; ASM `:restrict` / `:basic`; GlobalAMG vs per-tile residual; qualify `cholesky!`/`mul!`; `SparseCOOBucket` not in datadeps; Projected orthonormalize / `Adjoint` `mul!`; `hvcat` is not `MatNest`; GPU block-PC `ProcessScope` gather; sparse `lu!(F, A)` / PureUMFPACK cannot cheap-refactor; `@stencil` cannot express GMG transfers; `view(::DArray)` stays `SubArray`; near-nullspace on the GlobalAMG constructor; graph partition is `partitioner=`/`perm=` on geometric `Blocks`, not `Dagger.metis`). Lesson 20 remains unused (pre-existing gap).
 
 ---
 
