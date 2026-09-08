@@ -195,7 +195,8 @@ implementations, including:
 - **Matrix–matrix multiply** (`A * B`, `mul!`), sparse × sparse, producing a
   sparse result.
 - **Sparse matrix–vector multiply** (SpMV: `A * x`, `mul!(y, A, x)`) with a
-  sparse matrix and dense vectors — the workhorse of iterative solvers.
+  sparse matrix and dense vectors — the workhorse of iterative solvers and of
+  `eigen` / `eigvals` (LOBPCG; a few extreme pairs, never a densified geev).
 - **Transpose/adjoint**, **`collect`**, and elementwise/`norm` operations.
 
 ```julia

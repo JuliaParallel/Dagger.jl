@@ -347,6 +347,42 @@ Setup still gathers the current level to build `P`; RAP and the V-cycle do not.
   need neighbor coupling, `AdditiveSchwarzPreconditioner` (overlap 1–2) is
   the PETSc-default next step.
 
+## Eigenvalues (few pairs)
+
+`LinearAlgebra.eigen` / `eigvals` on a `DMatrix` compute a **few** extreme
+eigenpairs with LOBPCG, not a dense geev of the whole operator. The default is
+the smallest algebraic pair (`nev=1`, `which=:SR`) — the 1-D Laplacian ground
+state. A sparse-backed `DMatrix` is applied only through distributed `mul!`
+and is never densified.
+
+```julia
+using SparseArrays, LinearAlgebra
+
+n = 1000
+A = spdiagm(-1 => fill(-1.0, n-1), 0 => fill(2.0, n), 1 => fill(-1.0, n-1))
+DA = distribute(A, Blocks(250, 250))
+
+F = eigen(DA)                    # one smallest pair
+λ, x = F.values[1], collect(F.vectors)[:, 1]
+# true residual — do not treat a Ritz residual as ‖Ax-λx‖
+r = similar(distribute(x, Blocks(250)))
+# or, after you have a DVector `dx`:
+# mul!(r, DA, dx); axpy!(-λ, dx, r)
+
+F3 = eigen(DA; nev=3, which=:SR) # three smallest
+λmax = eigvals(DA; which=:LR)    # largest algebraic
+```
+
+`which` is `:SR` / `:SA` (smallest algebraic), `:LR` / `:LA` (largest), or
+`:SM` / `:LM` (by magnitude). `P` (alias `M`) is an optional preconditioner
+applied as `mul!(y, P, r)` (`y ← M⁻¹ r`), the same convention as Krylov
+`ldiv=false` — `JacobiPreconditioner` is a cheap first try.
+
+The same path works for matrix-free operators that already have `mul!` over
+`DVector`s: [`Projected`](@ref) infers a trial-vector layout from its
+nullspace basis; [`BlockOperator`](@ref) needs `v0::DVector`. This is not
+ScaLAPACK dense geev and does not return the full spectrum.
+
 ## Sparse direct solvers
 
 A sparse-backed `DMatrix` used as `A \ b` (or `ldiv!` / `lu` / `factorize`)

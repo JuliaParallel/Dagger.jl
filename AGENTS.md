@@ -399,3 +399,13 @@ lesson.
    type (`BlockOperator`) and cannot reuse `hvcat`. `BlockArrays.mortar`
    is the ecosystem name for the assembled case, but adding that dependency
    does not give you matrix-free blocks or field-split `mul!`.
+
+35. **`eigen(::DMatrix)` is LOBPCG for a few pairs, not dense geev.**
+   LinearAlgebra's generic `eigen` would collect and run LAPACK. The `DMatrix`
+   method computes `nev` extreme eigenpairs (default 1, `which=:SR`) via
+   LOBPCG over `DVector`s — a sparse-backed operator stays sparse. Keep the
+   trial block as a `Vector{DVector}`: column `getindex` of a tall-skinny
+   `DMatrix` is a nested `DArray` (lesson 33). Check `‖Ax-λx‖`, not only the
+   Ritz residual. This is not ScaLAPACK geev and does not return the full
+   spectrum. `Hermitian{<:DMatrix}` / `Symmetric{<:DMatrix}` must be hooked
+   too, or they steal the dense `Hermitian` method.

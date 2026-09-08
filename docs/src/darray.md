@@ -709,6 +709,7 @@ From `LinearAlgebra`:
 - `\`/`ldiv!` (In-place/Out-of-place Linear solving with LU, Cholesky, QR, and SVD factorizations)
 - `inv` (Out-of-place matrix inversion, including via SVD)
 - `svd`/`svd!`/`svdvals!` (In-place/Out-of-place Singular Value Decomposition)
+- `eigen`/`eigvals` (iterative LOBPCG; a few extreme eigenpairs, not dense geev)
 
 From `AbstractFFTs`:
 - `fft`/`fft!`
