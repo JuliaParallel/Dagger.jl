@@ -284,7 +284,7 @@ function _direct_solve(fact, bparts...)
     return fact \ b
 end
 
-function Base.:\(F::_PinnedSparseFactor, b::DVector)
+function _pinned_factor_solve(F::_PinnedSparseFactor, b::DVector)
     length(b) == F.n || throw(DimensionMismatch(
         "factorization is $(F.n)×$(F.n) but b has length $(length(b))"))
     # Solve on the factor's worker (factor stays pinned); only the O(n) solution
@@ -292,6 +292,16 @@ function Base.:\(F::_PinnedSparseFactor, b::DVector)
     x = fetch(spawn(_direct_solve, Options(; compute_scope=F.scope),
                     F.fact, b.chunks...))
     return distribute(x, b.partitioning)
+end
+
+function Base.:\(F::_PinnedSparseFactor, b::DVector)
+    return _pinned_factor_solve(F, b)
+end
+# More specific than both `_PinnedSparseFactor \ DVector` and
+# `DaggerSparseLU \ AbstractVector` (the latter wraps a host vector). Without
+# this, `M.coarse \ b` in GlobalAMG is ambiguous.
+function Base.:\(F::DaggerSparseLU, b::DVector)
+    return _pinned_factor_solve(F, b)
 end
 
 function LinearAlgebra.ldiv!(x::DVector, F::_PinnedSparseFactor, b::DVector)

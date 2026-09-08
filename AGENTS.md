@@ -413,3 +413,12 @@ lesson.
    `_apply_inverse!` (so KLU/UMFPACK/ILU methods still see matching types)
    and copies back. Jacobi broadcast already promotes. Do not treat
    `stats.solved` as `Ax≈b` (lesson 19).
+
+36. **A Union `\` method plus `F::Concrete, b::AbstractVector` is ambiguous on `DVector`.**
+   `_PinnedSparseFactor = Union{DaggerSparseLU, DaggerSparseCholesky}` with
+   `\(F::_PinnedSparseFactor, b::DVector)` and
+   `\(F::DaggerSparseLU, b::AbstractVector)` both match `LU \ DVector` —
+   neither is more specific. GlobalAMG's coarse solve (`M.coarse \ b`) hits
+   it. Define the concrete `\(F::DaggerSparseLU, b::DVector)` (Julia's own
+   suggestion). The AbstractVector method is only for wrapping a host
+   vector.
