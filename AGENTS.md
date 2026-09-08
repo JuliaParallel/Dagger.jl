@@ -625,6 +625,8 @@ lesson.
    `qr!(copy(...))`, but an explicit method keeps pivot strategies off the
    dense path). Gather-then-SPQR, pin like `DaggerSparseLU`. Do not add
    `Dagger.spqr`. Do not fold `DaggerSparseQR` into `_PinnedSparseFactor`:
-   least-squares `b` has length `m` and `x` has length `n`. Dense `ib` /
-   `p` keywords throw on sparse tiles. Check `‖Ax−b‖` against host
-   `qr(A)\\b`.
+   least-squares `b` has length `m` and `x` has length `n`. Do not reuse
+   `_direct_solve_matrix` for `F \\ B`: that helper does `similar(B)` and
+   writes column solutions of length `n` into an `m×p` dest. Use
+   `_direct_solve` (`fact \\ B`). Dense `ib` / `p` keywords throw on
+   sparse tiles. Check `‖Ax−b‖` against host `qr(A)\\b`.

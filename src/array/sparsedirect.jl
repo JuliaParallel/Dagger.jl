@@ -275,7 +275,8 @@ end
 function Base.:\(F::DaggerSparseQR, B::DMatrix)
     size(B, 1) == F.m || throw(DimensionMismatch(
         "QR is $(F.m)×$(F.n) but B has $(size(B, 1)) rows"))
-    X = fetch(spawn(_direct_solve_matrix, Options(; compute_scope=F.scope),
+    # `_direct_solve_matrix` is square (`similar(B)`). Tall SPQR returns n×p.
+    X = fetch(spawn(_direct_solve, Options(; compute_scope=F.scope),
                     F.fact, collect(B)))
     nb = F.part.blocksize[1]
     kb = B.partitioning.blocksize[min(2, ndims(B))]

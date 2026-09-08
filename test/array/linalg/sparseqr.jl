@@ -82,6 +82,7 @@ end
         DA = distribute(Ah, Blocks(k, k))
         DB = distribute(Bh, Blocks(k, p))
         X = qr(DA) \ DB
+        @test size(X) == (n, p)
         @test collect(X) ≈ Xref
         @test norm(Ah * collect(X) - Bh) ≈ norm(Ah * Xref - Bh) atol=1e-10
     end
