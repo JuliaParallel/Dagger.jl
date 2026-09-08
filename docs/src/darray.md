@@ -702,7 +702,7 @@ From `LinearAlgebra`:
 - `norm`
 - `transpose`/`adjoint` (Out-of-place transpose)
 - `*` (Out-of-place Matrix-(Matrix/Vector) multiply)
-- `mul!` (In-place Matrix-Matrix and Matrix-Vector multiply)
+- `mul!` (In-place Matrix-Matrix and Matrix-Vector multiply; mixed eltypes promote like LinearAlgebra)
 - `cholesky`/`cholesky!` (In-place/Out-of-place Cholesky factorization)
 - `lu`/`lu!` (In-place/Out-of-place LU factorization (`NoPivot` and `RowMaximum`))
 - `qr`/`qr!` (In-place/Out-of-place tiled Compact-WY QR; keywords `ib` and `p` for inner block size and CAQR domains)

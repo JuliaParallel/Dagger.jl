@@ -399,3 +399,17 @@ lesson.
    type (`BlockOperator`) and cannot reuse `hvcat`. `BlockArrays.mortar`
    is the ecosystem name for the assembled case, but adding that dependency
    does not give you matrix-free blocks or field-split `mul!`.
+
+35. **Mixed-eltype `mul!` needs a DArray method; FP32 PC apply converts tile-locally.**
+   LinearAlgebra's `generic_matvecmul!` / `generic_matmatmul!` for
+   `AbstractArray` scalar-indexes. Same-`T` Dagger methods left
+   `DMatrix{Float32} * DVector{Float64}` on that path. Relax the DArray
+   methods (scale `alpha`/`beta` from `eltype(C)`); keep the `Matrix{T}`
+   `BLAS.gemm!` specialization — do not widen it to `StridedMatrix` (that
+   steals GPU tiles onto host BLAS). Tile `matvecmul!` keeps `BLAS.gemv!`
+   when eltypes match (GPU backends overload it) and otherwise calls
+   LinearAlgebra's mixed generic. A Float32 preconditioner with Float64
+   Krylov vectors converts each tile to `eltype(op)` *before*
+   `_apply_inverse!` (so KLU/UMFPACK/ILU methods still see matching types)
+   and copies back. Jacobi broadcast already promotes. Do not treat
+   `stats.solved` as `Ax≈b` (lesson 19).

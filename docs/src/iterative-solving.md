@@ -393,6 +393,30 @@ usable like the other block preconditioners. With a single tile they are exact
 whole-matrix solves; with many tiles they are exact-block-Jacobi preconditioners
 for the iterative solvers.
 
+## Mixed precision
+
+`mul!` and `*` on `DArray`s accept mixed element types the same way
+LinearAlgebra does on host arrays. The usual PETSc/HYPRE pattern is an FP32
+operator or preconditioner with FP64 Krylov vectors:
+
+```julia
+A32 = distribute(Float32.(A), Blocks(k, k))
+A64 = distribute(Float64.(A), Blocks(k, k))
+b64 = distribute(Float64.(b), Blocks(k))
+
+y = A32 * b64   # DVector{Float64}; no convert-everything-first
+P = Dagger.JacobiPreconditioner(A32)
+x, stats = Krylov.gmres(A64, b64; M = P)
+```
+
+Same-type GEMM/GEMV still use BLAS on each tile. Mixed tiles call
+LinearAlgebra's mixed `generic_matmatmul!` / `generic_matvecmul!`. A
+preconditioner built from an FP32 `DMatrix` applies tile-locally in that
+precision and writes back the Krylov vector's eltype.
+
+Check the un-preconditioned residual (see the AMG warning above), not only
+`stats.solved`.
+
 ## A worked example: implicit time stepping
 
 Implicit ODE/PDE integrators repeatedly solve systems with the same operator
