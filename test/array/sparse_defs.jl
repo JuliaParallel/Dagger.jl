@@ -96,9 +96,11 @@ end
 
 # Krylov solvers over sparse tiles, plus the Jacobi preconditioner.
 #
-# Block-Jacobi/ILU/AMG build host factorizations that Datadeps cannot place
-# under a GPU-only compute scope, so they are covered on CPU only, in
-# `array/linalg/iterativesolvers.jl`.
+# Dense block-Jacobi (vendor getrf) and vendor ILU0 apply on-device; see
+# `array/gpu_pc_defs.jl`. Sparse block-Jacobi / AMG / IncompleteLU still
+# factor on the host and gather a temporary RHS inside the GPU-scoped
+# apply — the DArray chunk stays on-device. Those host-factor numerics
+# are also covered on CPU in `array/linalg/iterativesolvers.jl`.
 function test_sparse_solvers(; scope=nothing, check_tile=nothing, T=Float32)
     n, k = 32, 8
     A_part, b_part = Blocks(k, k), Blocks(k)
