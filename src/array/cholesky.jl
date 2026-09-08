@@ -106,3 +106,47 @@ function LinearAlgebra._chol!(A::DArray{T,2}, ::Type{LowerTriangular}) where T
 
     return LowerTriangular(A), info[1]
 end
+
+# ---- Sparse-backed `cholesky` -----------------------------------------------
+# LinearAlgebra's generic `cholesky(A)` is `_cholesky(cholcopy(A))`, and
+# `_cholesky` defaults to `cholesky!` → `_chol!`. `_chol!` is the dense tiled
+# potrf path: a sparse-backed `DMatrix` that reaches it is silently densified.
+# SparseArrays hooks `_cholesky` for the same reason. Tile type is not a
+# `DMatrix` type parameter (see `darray_tiletype`); we branch on it here and
+# leave `_chol!` itself unchanged.
+
+function _sparse_backed_dmatrix(A::DMatrix)
+    return darray_tiletype(A) <: DSparseArray
+end
+
+function _sparse_cholesky(A::DMatrix{T}; check::Bool=true, kwargs...) where T
+    F = _spawn_direct_factorization(A, S -> LinearAlgebra.cholesky(S; check, kwargs...))
+    return DaggerSparseCholesky{T}(F.fact, F.scope, F.n, F.part)
+end
+
+function LinearAlgebra._cholesky(A::DMatrix; kwargs...)
+    if _sparse_backed_dmatrix(A)
+        return _sparse_cholesky(A; kwargs...)
+    end
+    # Qualify: a bare `cholesky!` would resolve in Dagger, not LinearAlgebra.
+    return LinearAlgebra.cholesky!(A; kwargs...)
+end
+
+function LinearAlgebra._cholesky(A::DMatrix, pivot; kwargs...)
+    if _sparse_backed_dmatrix(A)
+        pivot isa LinearAlgebra.NoPivot || throw(ArgumentError(
+            "Pivoting strategies are not supported for sparse DMatrix cholesky"))
+        return _sparse_cholesky(A; kwargs...)
+    end
+    return LinearAlgebra.cholesky!(A, pivot; kwargs...)
+end
+
+function LinearAlgebra.cholesky!(A::DMatrix, ::LinearAlgebra.NoPivot=LinearAlgebra.NoPivot();
+                                check::Bool=true, kwargs...)
+    if _sparse_backed_dmatrix(A)
+        return _sparse_cholesky(A; check, kwargs...)
+    end
+    # Dense: identical to LinearAlgebra.cholesky!(::AbstractMatrix, NoPivot).
+    return invoke(LinearAlgebra.cholesky!, Tuple{AbstractMatrix, LinearAlgebra.NoPivot},
+                  A, LinearAlgebra.NoPivot(); check)
+end

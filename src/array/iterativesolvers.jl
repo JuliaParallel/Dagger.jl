@@ -181,6 +181,7 @@ _jacobi_apply!(y, dinv, x) = (y .= dinv .* x; return nothing)
 #
 #   - BlockJacobiPreconditioner: exact tile solve via `lu` (dense or sparse).
 #   - BlockILUPreconditioner:    incomplete LU per tile (needs IncompleteLU.jl).
+#   - BlockICPreconditioner:     incomplete Cholesky (IC(0)) per tile.
 #   - AMGPreconditioner:         an AMG hierarchy per tile (needs AlgebraicMultigrid.jl).
 #
 # Building per tile is embarrassingly parallel and a natural fit for the tiled
@@ -205,7 +206,8 @@ _jacobi_apply!(y, dinv, x) = (y .= dinv .* x; return nothing)
 Block-diagonal preconditioner: holds one per-diagonal-tile operator `opⱼ`
 (`y ← opⱼ⁻¹ x`), pinned to its tile's worker, and applies them independently per
 block. Concrete subtypes (`BlockJacobiPreconditioner`, `BlockILUPreconditioner`,
-`AMGPreconditioner`) share these fields: `ops`, `scopes`, `part`, `n`.
+`BlockICPreconditioner`, `AMGPreconditioner`) share these fields: `ops`,
+`scopes`, `part`, `n`.
 """
 abstract type AbstractBlockPreconditioner <: AbstractDaggerPreconditioner end
 
@@ -345,9 +347,9 @@ x, stats = Krylov.gmres(DA, b; M = P)
 `build` receives the raw tile, so unwrap it with `Dagger._tile_matrix` when the
 factory wants the backing `SparseMatrixCSC` rather than Dagger's tile
 container. The bundled
-[`BlockJacobiPreconditioner`](@ref), [`BlockILUPreconditioner`](@ref), and
-[`AMGPreconditioner`](@ref) are exactly this with a fixed `build`. See
-[`AbstractBlockPreconditioner`](@ref).
+[`BlockJacobiPreconditioner`](@ref), [`BlockILUPreconditioner`](@ref),
+[`BlockICPreconditioner`](@ref), and [`AMGPreconditioner`](@ref) are exactly
+this with a fixed `build`. See [`AbstractBlockPreconditioner`](@ref).
 """
 struct BlockPreconditioner{F,S} <: AbstractBlockPreconditioner
     ops::F
@@ -377,6 +379,44 @@ end
 BlockILUPreconditioner(A; kwargs...) = throw(ArgumentError(
     "Dagger.BlockILUPreconditioner requires IncompleteLU.jl. Run `using IncompleteLU` \
     to enable block incomplete-LU preconditioning."))
+
+"""
+    BlockICPreconditioner(A::DMatrix)
+
+Block incomplete-Cholesky preconditioner: an IC(0) factorization of each
+diagonal tile (no fill beyond the tile's existing pattern), applied per block.
+This is the SPD counterpart of [`BlockILUPreconditioner`](@ref). Requires
+`SparseArrays` to be loaded. A single tile (`Blocks(n, n)`) is IC(0) of the
+whole matrix; many tiles make it a block-Jacobi / additive-Schwarz IC(0).
+
+See also [`ichol`](@ref) and [`AbstractBlockPreconditioner`](@ref).
+"""
+struct BlockICPreconditioner{F,S} <: AbstractBlockPreconditioner
+    ops::F
+    scopes::S
+    part::Blocks{1}
+    n::Int
+end
+# Friendly fallback (shadowed by the `::DMatrix` method added in `ext/SparseArraysExt.jl`).
+BlockICPreconditioner(A; kwargs...) = throw(ArgumentError(
+    "Dagger.BlockICPreconditioner requires SparseArrays.jl. Run `using SparseArrays` \
+    to enable block incomplete-Cholesky preconditioning."))
+
+"""
+    ichol(A::DMatrix) -> BlockICPreconditioner
+
+Incomplete Cholesky (IC(0)) preconditioner of a `DMatrix`, for use as Krylov
+`M` via `mul!` (`ldiv=false`). There is no `LinearAlgebra.ichol`; this is the
+MATLAB / SciPy name for the same operation.
+
+The first implementation is block-diagonal IC(0) of each square diagonal tile
+(see [`BlockICPreconditioner`](@ref)). A global (gathered) IC can follow
+without changing this name. Requires `SparseArrays`.
+"""
+function ichol end
+ichol(A; kwargs...) = throw(ArgumentError(
+    "Dagger.ichol requires SparseArrays.jl. Run `using SparseArrays` to enable \
+    incomplete-Cholesky preconditioning."))
 
 """
     AMGPreconditioner(A::DMatrix; method=:ruge_stuben, kwargs...)

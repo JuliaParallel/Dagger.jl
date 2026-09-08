@@ -503,4 +503,107 @@ function _sparse_from_tiles(A::Dagger.DMatrix{T}) where T
                               T, row_offsets, col_offsets, m, n, tiles...))
 end
 
+# ---- Incomplete Cholesky (IC(0)) --------------------------------------------
+# Right-looking no-fill Cholesky on the Hermitian lower triangle. The apply is
+# `y ← (L L')⁻¹ x` via CSC forward / back substitution. Used as the per-tile
+# operator for `BlockICPreconditioner` / `ichol`.
+
+struct IC0Factor{Tv,Ti}
+    L::SparseMatrixCSC{Tv,Ti}
+end
+
+_ic_as_sparse(A::SparseMatrixCSC) = A
+_ic_as_sparse(A::AbstractMatrix) = SparseArrays.sparse(A)
+
+function _hermitian_tril(A::SparseMatrixCSC{T}) where T
+    LinearAlgebra.checksquare(A)
+    H = T <: Complex ? (A + adjoint(A)) / 2 : (A + SparseArrays.transpose(A)) / 2
+    return SparseArrays.tril(H)
+end
+
+function _ic0_factorize!(L::SparseMatrixCSC{T}) where T
+    n = size(L, 1)
+    colptr, rowval, nzval = L.colptr, L.rowval, L.nzval
+    @inbounds for j in 1:n
+        p0 = colptr[j]
+        p1 = colptr[j+1] - 1
+        (p0 <= p1 && rowval[p0] == j) || throw(LinearAlgebra.PosDefException(j))
+        d = real(nzval[p0])
+        d > 0 || throw(LinearAlgebra.PosDefException(j))
+        s = sqrt(d)
+        nzval[p0] = convert(T, s)
+        for p in (p0 + 1):p1
+            nzval[p] /= s
+        end
+        for p in (p0 + 1):p1
+            k = rowval[p]
+            lkj = nzval[p]
+            pk = colptr[k]
+            pk_end = colptr[k + 1] - 1
+            for q in p:p1
+                i = rowval[q]
+                lij = nzval[q]
+                while pk <= pk_end && rowval[pk] < i
+                    pk += 1
+                end
+                if pk <= pk_end && rowval[pk] == i
+                    nzval[pk] -= lij * conj(lkj)
+                end
+            end
+        end
+    end
+    return L
+end
+
+function _ic0_forward!(y, L::SparseMatrixCSC)
+    colptr, rowval, nzval = L.colptr, L.rowval, L.nzval
+    n = size(L, 1)
+    @inbounds for j in 1:n
+        p0 = colptr[j]
+        p1 = colptr[j+1] - 1
+        y[j] /= nzval[p0]
+        yj = y[j]
+        for p in (p0 + 1):p1
+            y[rowval[p]] -= nzval[p] * yj
+        end
+    end
+    return y
+end
+
+function _ic0_backward!(y, L::SparseMatrixCSC)
+    colptr, rowval, nzval = L.colptr, L.rowval, L.nzval
+    n = size(L, 1)
+    @inbounds for j in n:-1:1
+        p0 = colptr[j]
+        p1 = colptr[j+1] - 1
+        acc = y[j]
+        for p in (p0 + 1):p1
+            acc -= conj(nzval[p]) * y[rowval[p]]
+        end
+        y[j] = acc / conj(nzval[p0])
+    end
+    return y
+end
+
+function LinearAlgebra.ldiv!(y::AbstractVector, F::IC0Factor, x::AbstractVector)
+    copyto!(y, x)
+    _ic0_forward!(y, F.L)
+    _ic0_backward!(y, F.L)
+    return y
+end
+
+function _ic0_operator(tile)
+    S = _ic_as_sparse(Dagger._tile_matrix(tile))
+    return IC0Factor(_ic0_factorize!(_hermitian_tril(S)))
+end
+
+function Dagger.BlockICPreconditioner(A::Dagger.DMatrix)
+    return Dagger._build_block_preconditioner(Dagger.BlockICPreconditioner, A, _ic0_operator)
+end
+
+Dagger.ichol(A::Dagger.DMatrix) = Dagger.BlockICPreconditioner(A)
+
+# Prefer in-place `ldiv!` over the generic Factorization `\` path.
+Dagger._apply_inverse!(y, F::IC0Factor, x) = LinearAlgebra.ldiv!(y, F, x)
+
 end # module SparseArraysExt

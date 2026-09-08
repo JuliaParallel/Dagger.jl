@@ -345,3 +345,14 @@ lesson.
    GMRES `niter` on a well-conditioned 1-D Laplacian with a handful of
    large tiles (n=64, 8 tiles of 8: 15=15). The iteration drop needs
    smaller subdomains (n=48, tiles of 3: 31→17) or stronger convection.
+
+31. **Sparse `cholesky` must hook `_cholesky` / `cholesky!`, never `_chol!`.**
+   `_chol!` on a `DArray` is tiled potrf and will densify a sparse-backed
+   `DMatrix`. LinearAlgebra's generic `cholesky` is `_cholesky(cholcopy(A))`,
+   and SparseArrays already redirects `_cholesky` for `SparseMatrixCSC` for
+   the same reason. Tile type is not a `DMatrix` type parameter — read it
+   with `darray_tiletype` (lesson 22) and gather-then-factor (CHOLMOD is
+   process-local, so pin like `DaggerSparseLU`). Do not add `Dagger.spchol`.
+   Qualify `cholesky!` / `mul!` as `LinearAlgebra.cholesky!` /
+   `LinearAlgebra.mul!` on the dense fallback: a bare `cholesky!` would
+   resolve in Dagger and recurse into `_cholesky` instead of tiled potrf.

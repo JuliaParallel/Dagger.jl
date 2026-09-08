@@ -160,6 +160,33 @@ Base.size(F::DaggerSparseLU) = (F.n, F.n)
 Base.size(F::DaggerSparseLU, i::Integer) = i <= 2 ? F.n : 1
 
 """
+    DaggerSparseCholesky
+
+A sparse Cholesky factorization of a sparse-backed SPD `DMatrix`, produced by
+`cholesky(A)` / `cholesky!(A)`. Tiles are gathered onto one worker and factored
+with `LinearAlgebra.cholesky` (CHOLMOD when `SparseArrays` is loaded); the
+factor is pinned there. Solve with `F \\ b` or `ldiv!(x, F, b)` over `DVector`s.
+
+This is the sparse analogue of `LinearAlgebra.Cholesky` / `CHOLMOD.Factor`: the
+public name is still `cholesky`, not a `Dagger.spchol` entry point. The wrapper
+exists because a CHOLMOD factor is process-local (C pointers) and cannot move
+between workers — the same gather-then-pin contract as [`DaggerSparseLU`](@ref).
+"""
+struct DaggerSparseCholesky{T,F,S,P} <: LinearAlgebra.Factorization{T}
+    fact::F
+    scope::S
+    n::Int
+    part::P
+end
+DaggerSparseCholesky{T}(fact, scope, n, part) where T =
+    DaggerSparseCholesky{T,typeof(fact),typeof(scope),typeof(part)}(fact, scope, n, part)
+
+Base.size(F::DaggerSparseCholesky) = (F.n, F.n)
+Base.size(F::DaggerSparseCholesky, i::Integer) = i <= 2 ? F.n : 1
+
+const _PinnedSparseFactor = Union{DaggerSparseLU, DaggerSparseCholesky}
+
+"""
     DistributedSparseLU
 
 A sparse LU factorization with triangular factors stored as sparse `DMatrix`es,
@@ -257,7 +284,7 @@ function _direct_solve(fact, bparts...)
     return fact \ b
 end
 
-function Base.:\(F::DaggerSparseLU, b::DVector)
+function Base.:\(F::_PinnedSparseFactor, b::DVector)
     length(b) == F.n || throw(DimensionMismatch(
         "factorization is $(F.n)×$(F.n) but b has length $(length(b))"))
     # Solve on the factor's worker (factor stays pinned); only the O(n) solution
@@ -267,7 +294,7 @@ function Base.:\(F::DaggerSparseLU, b::DVector)
     return distribute(x, b.partitioning)
 end
 
-function LinearAlgebra.ldiv!(x::DVector, F::DaggerSparseLU, b::DVector)
+function LinearAlgebra.ldiv!(x::DVector, F::_PinnedSparseFactor, b::DVector)
     return copyto!(x, F \ b)
 end
 
