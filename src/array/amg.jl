@@ -5,9 +5,9 @@
 # `Ac = R A P` as a distributed product, and apply a V-cycle over that
 # hierarchy. That is what [`GlobalAMG`](@ref) does.
 #
-# First-cut limitations (honest): aggregation / classical interpolation still
-# gather the current level to build `P` (those algorithms are sequential in
-# AlgebraicMultigrid.jl). The Galerkin product and the V-cycle apply are
+# `P` is built from tiled data: per-tile aggregation / classical interpolation
+# plus a lightweight matching of unaggregated interface nodes. That does not
+# assemble a global CSC of `A`. The Galerkin product and the V-cycle apply are
 # distributed `DMatrix` / `DVector` operations. The coarsest solve is a
 # gathered LU, same as `Dagger.klu` / `Dagger.splu`. Do not treat Krylov
 # `stats.solved` as `Ax ≈ b`; check the un-preconditioned residual.
@@ -36,9 +36,12 @@ tile), this coarsens across tiles, forms each Galerkin coarse operator
 `Ac = P' A P` by distributed sparse matmul, and applies a V-cycle via
 `mul!(y, M, x)` (`y ← M⁻¹ x`, Krylov `ldiv=false`).
 
-`method` is `:smoothed_aggregation` (default) or `:ruge_stuben`. Both reuse
-AlgebraicMultigrid.jl for *setup* of `P` (strength + aggregation, or classical
-interpolation). The expensive RAP and the apply are Dagger-distributed.
+`method` is `:smoothed_aggregation` (default) or `:ruge_stuben`. Setup of `P`
+is tiled: AlgebraicMultigrid.jl runs per diagonal tile (strength +
+aggregation, or classical interpolation), then a lightweight matching
+assigns unaggregated interface nodes (off-tile entries in the same row).
+Jacobi smoothing of a tentative `P` is `P ← T − ω D⁻¹ A T` via distributed
+SpGEMM. The expensive RAP and the apply are Dagger-distributed.
 
 Keyword arguments:
 
@@ -49,8 +52,9 @@ Keyword arguments:
   One sweep each side is not enough for the coarse correction to beat
   Jacobi-only on 1-D Poisson; two is the smallest count that does.
 
-Requires `AlgebraicMultigrid.jl`. A first cut: 1–2 coarse levels is enough
-for a real coarse grid; this is not HYPRE BoomerAMG.
+Requires `AlgebraicMultigrid.jl`. A first cut: per-tile coarsening (aggregates
+do not yet use a distributed MIS), 1–2 coarse levels, gathered LU on the
+coarsest grid. This is not HYPRE BoomerAMG.
 
 See also [`SmoothedAggregationPreconditioner`](@ref),
 [`RugeStubenPreconditioner`](@ref).
@@ -95,6 +99,32 @@ function Base.show(io::IO, M::GlobalAMG)
           ", levels=", length(M.levels) + 1,
           ", n=", M.n, ")")
 end
+
+# Per-tile interpolation payload (lives on the tile's worker). The caller
+# fetches only `AMGTileHeader` (`nagg` + interface pairs), not `A`.
+struct AMGTileInterp{T}
+    I::Vector{Int}
+    J::Vector{Int}
+    V::Vector{T}
+    nagg::Int
+    iface_local::Vector{Int}
+    iface_nbr::Vector{Int}
+end
+
+struct AMGTileHeader
+    nagg::Int
+    iface_local::Vector{Int}
+    iface_nbr::Vector{Int}
+end
+
+_amg_interp_header(p::AMGTileInterp) =
+    AMGTileHeader(p.nagg, p.iface_local, p.iface_nbr)
+
+# Implemented in AlgebraicMultigridExt (named so workers resolve them).
+function _amg_row_coarsen end
+function _amg_fill_p_tile end
+function _amg_row_abs_inv_chunk end
+function _amg_smooth_p_tile end
 
 # Per-tile kernels (named, so workers resolve them without closure capture).
 _amg_residual!(r, b) = (r .= b .- r; nothing)

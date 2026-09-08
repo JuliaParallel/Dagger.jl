@@ -515,7 +515,20 @@ _nested_dissection_partition(A, nparts) = throw(ArgumentError(
 
 # Gather a sparse `DMatrix` into one `SparseMatrixCSC` on the caller (pattern
 # assembly for the partitioner; no densification).
+#
+# Tests can set `COLLECT_SPARSE_DMATRIX_MAXSIZE[]` to a finite bound so an
+# unexpected gather of a large operator (e.g. GlobalAMG building `P` from a
+# collected `A`) fails loudly. The coarsest-grid LU uses `_gather_sparse`
+# directly and is not this hook.
+const COLLECT_SPARSE_DMATRIX_MAXSIZE = Ref(typemax(Int))
+
 function _collect_sparse_dmatrix(A::DMatrix{T}) where T
+    nA = size(A, 1)
+    if nA > COLLECT_SPARSE_DMATRIX_MAXSIZE[]
+        throw(ErrorException(
+            "unexpected gather of a $(nA)×$(size(A, 2)) DMatrix \
+             (COLLECT_SPARSE_DMATRIX_MAXSIZE=$(COLLECT_SPARSE_DMATRIX_MAXSIZE[]))"))
+    end
     Ac = A.chunks
     mt, nt = size(Ac)
     ntiles = mt * nt
