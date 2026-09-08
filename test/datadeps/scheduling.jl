@@ -2,7 +2,8 @@ import Dagger: DAGSpec, DatadepsArgSpec, dag_add_task!,
                equivalent_structure,
                datadeps_dag_equivalent, datadeps_argspec_equivalent,
                datadeps_ainfo_equivalent, datadeps_schedule_cache,
-               LayeredScheduler, RoundRobinScheduler, DataDepsScheduler,
+               LayeredScheduler, RoundRobinScheduler, GreedyScheduler, DataDepsScheduler,
+               ScheduleState, cost_of_schedule, greedy_assign_task!, greedy_schedule!,
                NoAliasing, UnknownAliasing, ContiguousAliasing,
                StridedAliasing, TriangularAliasing, DiagonalAliasing,
                ObjectAliasing, CombinedAliasing, AliasingWrapper,
@@ -115,6 +116,13 @@ end
 
 # ---------- Helpers for DAG capture via the schedule cache ----------
 
+# N.B. These tests exercise the *flat* AOT DAG-scheduling/caching path
+# (`distribute_tasks!` + `datadeps_build_schedule!`), so every `spawn_datadeps`
+# call here runs with `hierarchical=false`. Hierarchical scheduling intentionally
+# computes a separate, partition-local AOT schedule on each partition's own task
+# (no global schedule cache on the calling task), so the caller-visible cache
+# these tests inspect is only populated by the flat path.
+
 """
 Run `f()` inside `spawn_datadeps` with `scheduler`, returning the resulting
 schedule cache snapshot (a Vector). The cache is cleared before the run so
@@ -123,7 +131,7 @@ each call starts from a known state.
 function run_with_fresh_cache(f, scheduler::DataDepsScheduler = LayeredScheduler())
     cache = datadeps_schedule_cache(scheduler)
     empty!(cache)
-    Base.ScopedValues.with(DATADEPS_SCHEDULER => scheduler) do
+    Base.ScopedValues.with(Dagger.DATADEPS_HIERARCHICAL => false, DATADEPS_SCHEDULER => scheduler) do
         Dagger.spawn_datadeps(f)
     end
     return cache
@@ -136,7 +144,7 @@ cache. Useful for asserting cache size after repeated runs.
 function run_n_times(f, n::Int; scheduler::DataDepsScheduler = LayeredScheduler())
     cache = datadeps_schedule_cache(scheduler)
     empty!(cache)
-    Base.ScopedValues.with(DATADEPS_SCHEDULER => scheduler) do
+    Base.ScopedValues.with(Dagger.DATADEPS_HIERARCHICAL => false, DATADEPS_SCHEDULER => scheduler) do
         for _ in 1:n
             Dagger.spawn_datadeps(f)
         end
@@ -231,7 +239,7 @@ end
     @testset "Different array sizes → cache miss" begin
         cache = datadeps_schedule_cache(LayeredScheduler())
         empty!(cache)
-        Base.ScopedValues.with(DATADEPS_SCHEDULER => LayeredScheduler()) do
+        Base.ScopedValues.with(Dagger.DATADEPS_HIERARCHICAL => false, DATADEPS_SCHEDULER => LayeredScheduler()) do
             for sz in (64, 128, 256)
                 A = rand(sz); B = rand(sz)
                 Dagger.spawn_datadeps() do
@@ -245,7 +253,7 @@ end
     @testset "Different element types → cache miss" begin
         cache = datadeps_schedule_cache(LayeredScheduler())
         empty!(cache)
-        Base.ScopedValues.with(DATADEPS_SCHEDULER => LayeredScheduler()) do
+        Base.ScopedValues.with(Dagger.DATADEPS_HIERARCHICAL => false, DATADEPS_SCHEDULER => LayeredScheduler()) do
             for T in (Float64, Float32, Int)
                 A = T <: AbstractFloat ? rand(T, 64) : T.(rand(1:100, 64))
                 B = T <: AbstractFloat ? rand(T, 64) : T.(rand(1:100, 64))
@@ -260,7 +268,7 @@ end
     @testset "Different task counts → cache miss" begin
         cache = datadeps_schedule_cache(LayeredScheduler())
         empty!(cache)
-        Base.ScopedValues.with(DATADEPS_SCHEDULER => LayeredScheduler()) do
+        Base.ScopedValues.with(Dagger.DATADEPS_HIERARCHICAL => false, DATADEPS_SCHEDULER => LayeredScheduler()) do
             for ntasks in (1, 2, 4)
                 A = rand(64); B = rand(64)
                 Dagger.spawn_datadeps() do
@@ -278,7 +286,7 @@ end
         empty!(cache)
         scopes = [Dagger.DefaultScope(),
                   Dagger.ExactScope(Dagger.ThreadProc(1, 1))]
-        Base.ScopedValues.with(DATADEPS_SCHEDULER => LayeredScheduler()) do
+        Base.ScopedValues.with(Dagger.DATADEPS_HIERARCHICAL => false, DATADEPS_SCHEDULER => LayeredScheduler()) do
             for scp in scopes
                 A = rand(64); B = rand(64)
                 Dagger.spawn_datadeps() do
@@ -296,7 +304,7 @@ end
         end
         @test length(cache) == 1
         # Repeat with the other function
-        Base.ScopedValues.with(DATADEPS_SCHEDULER => LayeredScheduler()) do
+        Base.ScopedValues.with(Dagger.DATADEPS_HIERARCHICAL => false, DATADEPS_SCHEDULER => LayeredScheduler()) do
             A = rand(64)
             Dagger.spawn_datadeps() do
                 Dagger.@spawn scale!(InOut(A), 2.0)
@@ -311,7 +319,7 @@ end
 @testset "Cache partitioning between schedulers" begin
     ls_cache = datadeps_schedule_cache(LayeredScheduler())
     empty!(ls_cache)
-    Base.ScopedValues.with(DATADEPS_SCHEDULER => LayeredScheduler()) do
+    Base.ScopedValues.with(Dagger.DATADEPS_HIERARCHICAL => false, DATADEPS_SCHEDULER => LayeredScheduler()) do
         A = rand(64); B = rand(64)
         Dagger.spawn_datadeps() do
             Dagger.@spawn add!(InOut(A), In(B))
@@ -323,7 +331,7 @@ end
     # cache, and it must NOT see LayeredScheduler's entry.
     rr_cache = datadeps_schedule_cache(RoundRobinScheduler())
     @test rr_cache !== ls_cache
-    Base.ScopedValues.with(DATADEPS_SCHEDULER => RoundRobinScheduler()) do
+    Base.ScopedValues.with(Dagger.DATADEPS_HIERARCHICAL => false, DATADEPS_SCHEDULER => RoundRobinScheduler()) do
         A = rand(64); B = rand(64)
         Dagger.spawn_datadeps() do
             Dagger.@spawn add!(InOut(A), In(B))
@@ -370,7 +378,7 @@ end
     @testset "Repeated runs, fresh allocations → 1 cache entry" begin
         cache = datadeps_schedule_cache(LayeredScheduler())
         empty!(cache)
-        Base.ScopedValues.with(DATADEPS_SCHEDULER => LayeredScheduler()) do
+        Base.ScopedValues.with(Dagger.DATADEPS_HIERARCHICAL => false, DATADEPS_SCHEDULER => LayeredScheduler()) do
             for _ in 1:3
                 M = make_spd_blocks(64, 16)
                 Dagger.spawn_datadeps() do
@@ -389,7 +397,7 @@ end
     @testset "Different block-grid sizes → distinct cache entries" begin
         cache = datadeps_schedule_cache(LayeredScheduler())
         empty!(cache)
-        Base.ScopedValues.with(DATADEPS_SCHEDULER => LayeredScheduler()) do
+        Base.ScopedValues.with(Dagger.DATADEPS_HIERARCHICAL => false, DATADEPS_SCHEDULER => LayeredScheduler()) do
             # 2x2 grid (sz=32, nb=16) vs 4x4 grid (sz=64, nb=16) → different task counts
             for (sz, nb) in ((32, 16), (64, 16))
                 M = make_spd_blocks(sz, nb)
@@ -404,7 +412,7 @@ end
     @testset "Same block-grid shape, different block size → distinct entries" begin
         cache = datadeps_schedule_cache(LayeredScheduler())
         empty!(cache)
-        Base.ScopedValues.with(DATADEPS_SCHEDULER => LayeredScheduler()) do
+        Base.ScopedValues.with(Dagger.DATADEPS_HIERARCHICAL => false, DATADEPS_SCHEDULER => LayeredScheduler()) do
             # Both 2x2 grids; block size 16 vs 32 → same task count, different ContiguousAliasing length
             for (sz, nb) in ((32, 16), (64, 32))
                 M = make_spd_blocks(sz, nb)
@@ -437,7 +445,7 @@ end
     @testset "Repeated runs → 1 cache entry" begin
         cache = datadeps_schedule_cache(LayeredScheduler())
         empty!(cache)
-        Base.ScopedValues.with(DATADEPS_SCHEDULER => LayeredScheduler()) do
+        Base.ScopedValues.with(Dagger.DATADEPS_HIERARCHICAL => false, DATADEPS_SCHEDULER => LayeredScheduler()) do
             for _ in 1:3
                 As = [rand(64) for _ in 1:8]
                 Dagger.spawn_datadeps() do
@@ -451,7 +459,7 @@ end
     @testset "Different reduction widths → distinct entries" begin
         cache = datadeps_schedule_cache(LayeredScheduler())
         empty!(cache)
-        Base.ScopedValues.with(DATADEPS_SCHEDULER => LayeredScheduler()) do
+        Base.ScopedValues.with(Dagger.DATADEPS_HIERARCHICAL => false, DATADEPS_SCHEDULER => LayeredScheduler()) do
             for n in (4, 8, 16)
                 As = [rand(64) for _ in 1:n]
                 Dagger.spawn_datadeps() do
@@ -471,7 +479,7 @@ end
     # Build two DAGSpecs from equivalent-but-freshly-allocated workloads.
     cache = datadeps_schedule_cache(LS)
     empty!(cache)
-    Base.ScopedValues.with(DATADEPS_SCHEDULER => LS) do
+    Base.ScopedValues.with(Dagger.DATADEPS_HIERARCHICAL => false, DATADEPS_SCHEDULER => LS) do
         for _ in 1:2
             A = rand(64); B = rand(64)
             Dagger.spawn_datadeps() do
@@ -486,7 +494,7 @@ end
 
     # Now build a structurally-different spec.
     empty!(cache)
-    Base.ScopedValues.with(DATADEPS_SCHEDULER => LS) do
+    Base.ScopedValues.with(Dagger.DATADEPS_HIERARCHICAL => false, DATADEPS_SCHEDULER => LS) do
         A = rand(128); B = rand(128)  # different size
         Dagger.spawn_datadeps() do
             Dagger.@spawn add!(InOut(A), In(B))
@@ -519,7 +527,7 @@ Dagger.datadeps_schedule_task(::NoCacheScheduler, state, all_procs, all_scope, t
         nc = NoCacheScheduler()
         cache = datadeps_schedule_cache(nc)
         empty!(cache)
-        Base.ScopedValues.with(DATADEPS_SCHEDULER => nc) do
+        Base.ScopedValues.with(Dagger.DATADEPS_HIERARCHICAL => false, DATADEPS_SCHEDULER => nc) do
             for _ in 1:3
                 A = rand(64); B = rand(64)
                 Dagger.spawn_datadeps() do
@@ -553,7 +561,7 @@ Dagger.datadeps_schedule_task(::PtrStrictScheduler, state, all_procs, all_scope,
 
     # Fresh allocations each run → pointer hash differs → all miss.
     empty!(cache)
-    Base.ScopedValues.with(DATADEPS_SCHEDULER => ps) do
+    Base.ScopedValues.with(Dagger.DATADEPS_HIERARCHICAL => false, DATADEPS_SCHEDULER => ps) do
         for _ in 1:3
             A = rand(64); B = rand(64)
             Dagger.spawn_datadeps() do
@@ -566,7 +574,7 @@ Dagger.datadeps_schedule_task(::PtrStrictScheduler, state, all_procs, all_scope,
     # Same allocation reused each run → pointer hash matches → cache hits.
     empty!(cache)
     A = rand(64); B = rand(64)
-    Base.ScopedValues.with(DATADEPS_SCHEDULER => ps) do
+    Base.ScopedValues.with(Dagger.DATADEPS_HIERARCHICAL => false, DATADEPS_SCHEDULER => ps) do
         for _ in 1:3
             Dagger.spawn_datadeps() do
                 Dagger.@spawn add!(InOut(A), In(B))
@@ -574,4 +582,349 @@ Dagger.datadeps_schedule_task(::PtrStrictScheduler, state, all_procs, all_scope,
         end
     end
     @test length(cache) == 1
+end
+
+@testset "GreedyScheduler" begin
+    @testset "Type registration and structure" begin
+        @test GreedyScheduler() isa DataDepsScheduler
+        @test fieldcount(GreedyScheduler) == 0
+    end
+
+    @testset "Empty DAGSpec yields empty ScheduleState (direct primitive)" begin
+        empty_dag = DAGSpec()
+        all_procs = collect(Dagger.all_processors())
+        snap = Dagger.MT.snapshot(Dagger.MT.global_metrics_cache())
+
+        state = ScheduleState()
+        greedy_schedule!(state, snap, empty_dag, all_procs)
+
+        @test isempty(state)
+        @test length(state) == 0
+        @test isempty(state.task_proc)
+        @test isempty(state.task_finish_ns)
+        @test cost_of_schedule(state) == 0.0
+
+        Base.ScopedValues.with(DATADEPS_SCHEDULER => GreedyScheduler()) do
+            cache = datadeps_schedule_cache(GreedyScheduler())
+            empty!(cache)
+            Dagger.spawn_datadeps() do
+            end
+            @test isempty(cache)
+        end
+    end
+
+    @testset "Single task schedules and completes" begin
+        A = rand(64)
+        B = rand(64)
+        A_copy = copy(A)
+        B_copy = copy(B)
+        Base.ScopedValues.with(DATADEPS_SCHEDULER => GreedyScheduler()) do
+            Dagger.spawn_datadeps() do
+                Dagger.@spawn add!(InOut(A), In(B))
+            end
+        end
+        @test A ≈ A_copy .+ B_copy
+    end
+
+    @testset "Respects per-task scope (direct primitive, scope is the only constraint)" begin
+        A = rand(64); B = rand(64)
+        target_proc = Dagger.ThreadProc(1, 1)
+
+        spec_pair = nothing
+        Base.ScopedValues.with(DATADEPS_SCHEDULER => GreedyScheduler()) do
+            cache = datadeps_schedule_cache(GreedyScheduler())
+            empty!(cache)
+            Dagger.spawn_datadeps() do
+                Dagger.@spawn scope=Dagger.ExactScope(target_proc) add!(InOut(A), In(B))
+            end
+            spec_pair = first(cache)
+        end
+        dag_spec = spec_pair.first
+
+        candidate_procs = Dagger.Processor[
+            Dagger.ThreadProc(1, 2),
+            Dagger.ThreadProc(1, 3),
+            target_proc,
+            Dagger.ThreadProc(1, 4),
+            Dagger.ThreadProc(1, 5),
+        ]
+        snap = Dagger.MT.snapshot(Dagger.MT.global_metrics_cache())
+
+        for trial in 1:5
+            state = ScheduleState()
+            greedy_schedule!(state, snap, dag_spec, candidate_procs)
+            @test state.task_proc[1] === target_proc
+        end
+    end
+
+    @testset "Throws SchedulingException when no compatible processor exists" begin
+        A = rand(64); B = rand(64)
+        target_proc = Dagger.ThreadProc(1, 1)
+
+        spec_pair = nothing
+        Base.ScopedValues.with(DATADEPS_SCHEDULER => GreedyScheduler()) do
+            cache = datadeps_schedule_cache(GreedyScheduler())
+            empty!(cache)
+            Dagger.spawn_datadeps() do
+                Dagger.@spawn scope=Dagger.ExactScope(target_proc) add!(InOut(A), In(B))
+            end
+            spec_pair = first(cache)
+        end
+        dag_spec = spec_pair.first
+
+        incompatible_procs = Dagger.Processor[
+            Dagger.ThreadProc(1, 2),
+            Dagger.ThreadProc(2, 1),
+        ]
+        snap = Dagger.MT.snapshot(Dagger.MT.global_metrics_cache())
+        state = ScheduleState()
+        @test_throws Dagger.Sch.SchedulingException greedy_schedule!(state, snap, dag_spec, incompatible_procs)
+    end
+
+    @testset "Schedule output is complete (every task assigned)" begin
+        cache = datadeps_schedule_cache(GreedyScheduler())
+        empty!(cache)
+        Base.ScopedValues.with(DATADEPS_SCHEDULER => GreedyScheduler()) do
+            A = rand(64); B = rand(64)
+            Dagger.spawn_datadeps() do
+                Dagger.@spawn scope=Dagger.ExactScope(Dagger.ThreadProc(1, 1)) add!(InOut(A), In(B))
+            end
+        end
+        @test length(cache) == 1
+        dag_spec, dag_schedule = first(cache)
+        @test length(dag_schedule.id_to_proc) == Dagger.nv(dag_spec.g)
+        for idx in 1:Dagger.nv(dag_spec.g)
+            @test haskey(dag_schedule.id_to_proc, idx)
+            @test dag_schedule.id_to_proc[idx] isa Dagger.Processor
+        end
+    end
+
+    @testset "Schedule cache reuses across identical runs" begin
+        cache = datadeps_schedule_cache(GreedyScheduler())
+        empty!(cache)
+        Base.ScopedValues.with(DATADEPS_SCHEDULER => GreedyScheduler()) do
+            for _ in 1:3
+                A = rand(64); B = rand(64)
+                Dagger.spawn_datadeps() do
+                    Dagger.@spawn add!(InOut(A), In(B))
+                end
+            end
+        end
+        @test length(cache) == 1
+    end
+
+    @testset "Schedule cache misses on different DAG shapes" begin
+        cache = datadeps_schedule_cache(GreedyScheduler())
+        empty!(cache)
+        Base.ScopedValues.with(DATADEPS_SCHEDULER => GreedyScheduler()) do
+            for ntasks in (1, 2, 4)
+                A = rand(64); B = rand(64)
+                Dagger.spawn_datadeps() do
+                    for _ in 1:ntasks
+                        Dagger.@spawn scope=Dagger.ExactScope(Dagger.ThreadProc(1, 1)) add!(InOut(A), In(B))
+                    end
+                end
+            end
+        end
+        @test length(cache) == 3
+    end
+
+    @testset "Cache partitioning vs LayeredScheduler" begin
+        gs_cache = datadeps_schedule_cache(GreedyScheduler())
+        ls_cache = datadeps_schedule_cache(LayeredScheduler())
+        empty!(gs_cache)
+        empty!(ls_cache)
+        @test gs_cache !== ls_cache
+        Base.ScopedValues.with(DATADEPS_SCHEDULER => GreedyScheduler()) do
+            A = rand(64); B = rand(64)
+            Dagger.spawn_datadeps() do
+                Dagger.@spawn scope=Dagger.ExactScope(Dagger.ThreadProc(1, 1)) add!(InOut(A), In(B))
+            end
+        end
+        @test length(gs_cache) == 1
+        @test isempty(ls_cache)
+    end
+
+    @testset "Greedy ready-time helper: Chunk on same space → 0" begin
+        empty_dag = DAGSpec()
+        empty_state = ScheduleState()
+        snap = Dagger.MT.snapshot(Dagger.MT.global_metrics_cache())
+        data = rand(1024)
+        c = Dagger.tochunk(data)
+        chunk_space = Dagger.memory_space(c)
+        ready = Dagger._greedy_arg_ready_time_ns(c, snap, empty_dag, chunk_space, empty_state)
+        @test ready == 0.0
+    end
+
+    @testset "Greedy ready-time helper: non-Chunk non-DTask → 0" begin
+        empty_dag = DAGSpec()
+        empty_state = ScheduleState()
+        snap = Dagger.MT.snapshot(Dagger.MT.global_metrics_cache())
+        proc = first(Dagger.all_processors())
+        target_space = only(Dagger.memory_spaces(proc))
+        ready = Dagger._greedy_arg_ready_time_ns(42, snap, empty_dag, target_space, empty_state)
+        @test ready == 0.0
+    end
+
+    @testset "ScheduleState lifecycle" begin
+        state = ScheduleState()
+        @test isempty(state)
+        @test length(state) == 0
+        @test cost_of_schedule(state) == 0.0
+
+        proc = first(Dagger.all_processors())
+        state.task_proc[1] = proc
+        state.task_finish_ns[1] = 5.0e8
+        state.proc_ready_ns[proc] = 5.0e8
+        @test !isempty(state)
+        @test length(state) == 1
+        @test cost_of_schedule(state) == 5.0e8
+
+        state.task_finish_ns[2] = 9.0e8
+        @test cost_of_schedule(state) == 9.0e8
+
+        snapshot = copy(state)
+        @test snapshot.task_finish_ns == state.task_finish_ns
+        snapshot.task_finish_ns[1] = 1.0e10
+        @test state.task_finish_ns[1] == 5.0e8
+        @test cost_of_schedule(state) == 9.0e8
+
+        empty!(state)
+        @test isempty(state)
+        @test cost_of_schedule(state) == 0.0
+    end
+
+    @testset "cost_of_schedule with multiple finish times" begin
+        state = ScheduleState()
+        state.task_finish_ns[1] = 100.0
+        state.task_finish_ns[2] = 500.0
+        state.task_finish_ns[3] = 250.0
+        @test cost_of_schedule(state) == 500.0
+    end
+
+    @testset "Validation flow: greedy_schedule! called outside spawn_datadeps" begin
+        A = rand(64); B = rand(64)
+        spec_pair = nothing
+        Base.ScopedValues.with(DATADEPS_SCHEDULER => GreedyScheduler()) do
+            cache = datadeps_schedule_cache(GreedyScheduler())
+            empty!(cache)
+            Dagger.spawn_datadeps() do
+                Dagger.@spawn scope=Dagger.ExactScope(Dagger.ThreadProc(1, 1)) add!(InOut(A), In(B))
+            end
+            spec_pair = first(cache)
+        end
+        dag_spec = spec_pair.first
+
+        snap = Dagger.MT.snapshot(Dagger.MT.global_metrics_cache())
+        all_procs = collect(Dagger.all_processors())
+        state = ScheduleState()
+        greedy_schedule!(state, snap, dag_spec, all_procs)
+
+        @test length(state.task_proc) == Dagger.nv(dag_spec.g)
+        for idx in 1:Dagger.nv(dag_spec.g)
+            @test haskey(state.task_proc, idx)
+            @test state.task_proc[idx] isa Dagger.Processor
+            @test haskey(state.task_finish_ns, idx)
+            @test state.task_finish_ns[idx] > 0
+        end
+        @test cost_of_schedule(state) > 0
+    end
+
+    @testset "greedy_assign_task! one task at a time" begin
+        A = rand(64); B = rand(64)
+        spec_pair = nothing
+        Base.ScopedValues.with(DATADEPS_SCHEDULER => GreedyScheduler()) do
+            cache = datadeps_schedule_cache(GreedyScheduler())
+            empty!(cache)
+            Dagger.spawn_datadeps() do
+                Dagger.@spawn scope=Dagger.ExactScope(Dagger.ThreadProc(1, 1)) add!(InOut(A), In(B))
+                Dagger.@spawn scope=Dagger.ExactScope(Dagger.ThreadProc(1, 1)) scale!(InOut(A), 2.0)
+            end
+            spec_pair = first(cache)
+        end
+        dag_spec = spec_pair.first
+
+        snap = Dagger.MT.snapshot(Dagger.MT.global_metrics_cache())
+        all_procs = collect(Dagger.all_processors())
+        state = ScheduleState()
+
+        proc1 = greedy_assign_task!(state, snap, dag_spec, all_procs, 1)
+        @test proc1 isa Dagger.Processor
+        @test state.task_proc[1] === proc1
+        @test length(state.task_proc) == 1
+
+        proc2 = greedy_assign_task!(state, snap, dag_spec, all_procs, 2)
+        @test proc2 isa Dagger.Processor
+        @test state.task_proc[2] === proc2
+        @test state.task_finish_ns[2] >= state.task_finish_ns[1]
+    end
+
+    @testset "greedy_schedule! with custom task_order" begin
+        A = rand(64); B = rand(64)
+        spec_pair = nothing
+        Base.ScopedValues.with(DATADEPS_SCHEDULER => GreedyScheduler()) do
+            cache = datadeps_schedule_cache(GreedyScheduler())
+            empty!(cache)
+            Dagger.spawn_datadeps() do
+                Dagger.@spawn scope=Dagger.ExactScope(Dagger.ThreadProc(1, 1)) scale!(InOut(A), 2.0)
+                Dagger.@spawn scope=Dagger.ExactScope(Dagger.ThreadProc(1, 1)) scale!(InOut(B), 3.0)
+            end
+            spec_pair = first(cache)
+        end
+        dag_spec = spec_pair.first
+
+        snap = Dagger.MT.snapshot(Dagger.MT.global_metrics_cache())
+        all_procs = collect(Dagger.all_processors())
+
+        state_default = ScheduleState()
+        greedy_schedule!(state_default, snap, dag_spec, all_procs)
+        state_reversed = ScheduleState()
+        greedy_schedule!(state_reversed, snap, dag_spec, all_procs; task_order=[2, 1])
+
+        @test length(state_default.task_proc) == 2
+        @test length(state_reversed.task_proc) == 2
+    end
+
+    @testset "Algorithm correctness: Chunk ready time = transfer_time when cross-space" begin
+        empty_dag = DAGSpec()
+        empty_state = ScheduleState()
+        snap = Dagger.MT.snapshot(Dagger.MT.global_metrics_cache())
+        data = rand(Float64, 128)
+        c = Dagger.tochunk(data)
+        chunk_space = Dagger.memory_space(c)
+
+        same_space_ready = Dagger._greedy_arg_ready_time_ns(c, snap, empty_dag, chunk_space, empty_state)
+        @test same_space_ready == 0.0
+
+        @test typeof(chunk_space) === Dagger.CPURAMMemorySpace
+        cross_space = Dagger.CPURAMMemorySpace(chunk_space.owner + 999)
+        cross_ready = Dagger._greedy_arg_ready_time_ns(c, snap, empty_dag, cross_space, empty_state)
+        @test cross_ready > 0.0
+        size_bytes = c.handle.size === nothing ? Dagger.GREEDY_DEFAULT_OUTPUT_SIZE : UInt64(c.handle.size)
+        expected = Float64(size_bytes) / Float64(Dagger.GREEDY_DEFAULT_TRANSFER_RATE) * 1e9
+        @test cross_ready ≈ expected
+    end
+
+    @testset "Validation: greedy_schedule! is deterministic given same metrics + DAG" begin
+        A = rand(64); B = rand(64)
+        spec_pair = nothing
+        Base.ScopedValues.with(DATADEPS_SCHEDULER => GreedyScheduler()) do
+            cache = datadeps_schedule_cache(GreedyScheduler())
+            empty!(cache)
+            Dagger.spawn_datadeps() do
+                Dagger.@spawn scope=Dagger.ExactScope(Dagger.ThreadProc(1, 1)) add!(InOut(A), In(B))
+            end
+            spec_pair = first(cache)
+        end
+        dag_spec = spec_pair.first
+
+        snap = Dagger.MT.snapshot(Dagger.MT.global_metrics_cache())
+        all_procs = collect(Dagger.all_processors())
+
+        s1 = ScheduleState(); greedy_schedule!(s1, snap, dag_spec, all_procs)
+        s2 = ScheduleState(); greedy_schedule!(s2, snap, dag_spec, all_procs)
+        @test s1.task_proc == s2.task_proc
+        @test s1.task_finish_ns == s2.task_finish_ns
+        @test cost_of_schedule(s1) == cost_of_schedule(s2)
+    end
 end
