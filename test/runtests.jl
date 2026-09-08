@@ -52,6 +52,7 @@ tests = [
     ("Array - LinearAlgebra - QR", "array/linalg/qr.jl"),
     ("Array - LinearAlgebra - SVD", "array/linalg/svd.jl"),
     ("Array - LinearAlgebra - Eigen", "array/linalg/eigen.jl"),
+    ("Array - LinearAlgebra - Schur", "array/linalg/schur.jl"),
     ("Array - LinearAlgebra - Iterative Solvers", "array/linalg/iterativesolvers.jl"),
     ("Array - LinearAlgebra - Global AMG", "array/linalg/global_amg.jl"),
     ("Array - LinearAlgebra - Geometric MG", "array/linalg/gmg.jl"),
