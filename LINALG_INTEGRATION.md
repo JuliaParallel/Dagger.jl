@@ -6,7 +6,7 @@ branches; they do **not** merge into this workspace branch, and they do **not**
 edit other agents' rows here. Report status in your final message so the
 coordinator can update the table.
 
-Last coordinator pass: 2026-09-07 (`linalg/block-krylov` merged; sparse `A \\ B` uses `block_gmres`; LinearSolve GMRES/MINRES accept a `DMatrix` RHS). All assigned P1 workstreams are now merged.
+Last coordinator pass: 2026-09-08 (P2 backlog accepted; completeness workstreams in flight). All assigned P0/P1 workstreams are merged. Performance / Bottlenecks P0 is **out of scope** this pass.
 
 ---
 
@@ -236,7 +236,7 @@ anyone else's `linalg/*`) destructively.
 
 Status values: `not started` | `in progress` | `blocked` | `done` | `failed`.
 
-Priority: **P0 done** = merged onto `Dagger-linalg-ultra`. **P0 leftover** = follow-up from a merged P0, now in progress on a sibling. **P1** = next-wave work, in progress on a sibling.
+Priority: **P0 done** / **P1 done** = merged onto `Dagger-linalg-ultra`. **P2** = completeness (API holes vs PETSc/HYPRE/LinearAlgebra), not performance.
 
 | Pri | Workstream | Status | Branch | Owner notes | Last update |
 |---|---|---|---|---|---|
@@ -259,6 +259,15 @@ Priority: **P0 done** = merged onto `Dagger-linalg-ultra`. **P0 leftover** = fol
 | P1 | near-nullspace | done | `linalg/near-nullspace` @ `d2277c01` | `SmoothedAggregationPreconditioner(A; nullspace=N)` and `GlobalAMG(Projected(A, N))`. `AMGPreconditioner` unchanged. Default SA setup is now tiled (`global-amg-distributed-P`); `nullspace=N` still gathers `A`+`N` so coarse levels get `R`. AWS: near-nullspace 40, GlobalAMG 113, iterativesolvers 395. | 2026-09-07 |
 | P1 | block-krylov | done | `linalg/block-krylov` @ `22cc9ae0` | Sparse `A \\ B` / `ldiv!` uses Krylov `block_gmres` (not a column loop). LinearSolve GMRES/MINRES accept `DMatrix` RHS. Kept ultra `_solve_pinned_dvector`; incoming lesson 35 is 45. AWS: iterativesolvers 421, LinearSolve 34. | 2026-09-07 |
 | P1 | slicing | done | `linalg/slicing` @ `48bc09d4` | Range `getindex` / `view` / `setindex!` match Base and stay tiled (one task per tile pair). **`view` remains `SubArray`** (intentional; not a DArray-valued view). StepRange `copyto!` still throws. AWS: indexing 251, copyto 650. | 2026-09-07 |
+| P2 | symm-hemm | in progress | `linalg/symm-hemm` | Dense `BLAS.symm!` / `BLAS.hemm!` and `mul!` of `Symmetric`/`Hermitian` `DMatrix` (the FIXME in `mul.jl`). Not a performance pass. | 2026-09-08 |
+| P2 | sparse-qr | in progress | `linalg/sparse-qr` | Sparse-backed `qr` / `qr!` must gather-then-SPQR (same densify footgun as sparse `lu` / `cholesky`). Public API stays `qr`; wrapper is `DaggerSparseQR` only because SPQR is process-local. | 2026-09-08 |
+| P2 | matrix-io | in progress | `linalg/matrix-io` | `MatrixMarket.mmread` / `mmwrite` and `DelimitedFiles.readdlm` / `writedlm` hooks on `DArray` / `Blocks`. No Dagger-only format. Sparse write gathers CSC, not `collect`. | 2026-09-08 |
+| P2 | dense-schur | in progress | `linalg/dense-schur` | `schur(::DMatrix)` for dense tiles (`collect` then LAPACK). Sparse-backed throws (would densify). Does **not** replace LOBPCG `eigen`. No ScaLAPACK geev. | 2026-09-08 |
+| P2 | einsum | skipped | — | **FLAG:** TensorOperations / OMEinsum / Tullio have no honest `DArray` hook (they need a tensor backend). FEATURES_ROADMAP "Einsum" would be a novel `Dagger.einsum`. Skip rather than invent. | 2026-09-08 |
+| P2 | mpi-vecghost | skipped | — | **FLAG:** MPI chunks are already rank-owned; `HaloArray` / `@stencil` already express ghosts. A public `Dagger.VecGhost` would be a new type. Discuss only — do not ship. | 2026-09-08 |
+| P2 | sparse-inv | skipped | — | Already `factorize` + `ldiv!` into `I`. Result is a dense inverse; that is LinearAlgebra's `inv`, not an API hole. | 2026-09-08 |
+| P2 | bsr-tiles | skipped | — | No host ecosystem BSR type. Do not invent `Dagger.BSR`. | 2026-09-08 |
+| P2 | stencil-gmg-xfer | skipped | — | **FLAG:** `jps/sparse-stencil` cannot express restriction/prolongation (lesson 37). Matrix `GeometricMultigrid` already landed. Do not grow the stencil stack. | 2026-09-08 |
 
 ---
 
@@ -288,6 +297,7 @@ Priority: **P0 done** = merged onto `Dagger-linalg-ultra`. **P0 leftover** = fol
 | 2026-09-07 | `d266fe02` `linalg/csr-bsr` @ `775d4d4a` | Conflicts: `AGENTS.md` (kept 35–43 after sparse-eigen; incoming CSR lesson 35 is 44; incoming lesson 36 already lesson 36). Auto-merge also duplicated `DaggerSparseLU \ DVector`; kept ultra `_solve_pinned_dvector` (incoming method dropped; `sparsedirect.jl` therefore unchanged vs HEAD). `FEATURES_ROADMAP.md` unchanged (Performance-table / Indexing-Slicing row kept). Docs/`sparse.jl`/`Project.toml`/`runtests` auto-merged; new `SparseMatricesCSRExt` + `matmul_csr.jl`. CSC path in `SparseArraysExt` unchanged. **BSR deferred** (no host ecosystem type). AWS CSR 83, full array/linalg green. |
 | 2026-09-07 | `c835b8ab` `linalg/block-krylov` @ `22cc9ae0` | Conflicts: `AGENTS.md` (kept 35–44; incoming block-krylov lesson 35 is 45), `ext/LinearSolveExt.jl` (union: incoming `_require_darray_rhs` / `DMatrix` RHS plus HEAD `lu!` reuse), `src/array/mul.jl` (kept HEAD mixed-eltype GEMM; took incoming host×`DMatrix` GEMM), `test/array/linalg/linearsolve.jl` (kept both `lu!` reuse and multi-RHS testsets). Auto-merge also duplicated `DaggerSparseLU \\ DVector`; kept ultra `_solve_pinned_dvector` and dropped the incoming `invoke`. `FEATURES_ROADMAP.md` / Performance tables unchanged. AWS: iterativesolvers 421, LinearSolve 34. |
 | 2026-09-08 | tracking doc + profile harness | `linalg_profile.jl` (`LINALG_BENCH_PROFILE=…`) and a Bottlenecks section from AWS MT profiles at `862841e5`. No Dagger API changes. |
+| 2026-09-08 | tracking doc only | P2 backlog: accept `symm-hemm`, `sparse-qr`, `matrix-io`, `dense-schur`. Flag/skip einsum, VecGhost, sparse `inv`, BSR, stencil GMG transfers. No feature-branch merges yet. |
 
 ## Remaining follow-ups
 
@@ -301,11 +311,18 @@ P0 leftovers are all merged. Honest remaining gathers on GlobalAMG setup (do not
 
 Unassigned leftover from P0:
 
-- **`inv` on a sparse-backed `DMatrix`** uses the sparse factor (`factorize` + `ldiv!` into `I`) rather than a dedicated sparse inverse. The result is still a dense `I` solve.
+- **`inv` on a sparse-backed `DMatrix`** uses the sparse factor (`factorize` + `ldiv!` into `I`) rather than a dedicated sparse inverse. The result is still a dense `I` solve. **P2: skipped** — not an API hole.
 
 Unassigned leftover from `csr-bsr`:
 
-- **BSR tiles** — no host ecosystem type (`BlockArrays` is dense mortar; `CuSparseMatrixBSR` is device-only). Do not invent `Dagger.BSR`. Host CSR is done; GPU stays CSC.
+- **BSR tiles** — no host ecosystem type (`BlockArrays` is dense mortar; `CuSparseMatrixBSR` is device-only). Do not invent `Dagger.BSR`. Host CSR is done; GPU stays CSC. **P2: skipped.**
+
+P2 flags (completeness, not scheduled):
+
+- **Einsum / tensor contractions** — no ecosystem generic that can dispatch on `DArray` without a new tensor backend. Do not invent `Dagger.einsum`.
+- **MPI owned+ghost / `VecGhost`** — rank-owned `Chunk` + `HaloArray` / `@stencil` already cover this. A new public vector type is out of scope.
+- **`@stencil` restriction/prolongation** — not usable for GMG (lesson 37). Matrix `GeometricMultigrid` is the transfer path.
+- **Full dense geev / ScaLAPACK Schur** — not required. `eigen` stays LOBPCG; P2 `schur` is gather-then-LAPACK for dense tiles only.
 
 `AGENTS.md` lessons 27–45 are the union of the per-workstream lesson 27s (LinearSolve `DefaultLinearSolver`; ASM `:restrict` / `:basic`; GlobalAMG vs per-tile residual; qualify `cholesky!`/`mul!`; `SparseCOOBucket` not in datadeps; Projected orthonormalize / `Adjoint` `mul!`; `hvcat` is not `MatNest`; GPU block-PC `ProcessScope` gather; sparse `lu!(F, A)` / PureUMFPACK cannot cheap-refactor; `@stencil` cannot express GMG transfers; `view(::DArray)` stays `SubArray`; near-nullspace on the GlobalAMG constructor; graph partition is `partitioner=`/`perm=` on geometric `Blocks`, not `Dagger.metis`; mixed-eltype `mul!` / FP32 PC apply; tiled GlobalAMG `P` does not collect `A`; `eigen(::DMatrix)` is LOBPCG, not dense geev; host CSR tiles need range `getindex` / rebuild `copyto_view`; block Krylov cannot use one `SM` for both the tall basis and the Hessenberg). Lesson 20 remains unused (pre-existing gap).
 
