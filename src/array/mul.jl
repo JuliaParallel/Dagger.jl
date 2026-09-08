@@ -607,16 +607,24 @@ function _symv_mul!(y::DVector, A::DMatrix, x::DVector, α, β,
     end
 end
 
-function LinearAlgebra.BLAS.symm!(side::AbstractChar, uplo::AbstractChar,
-                                  α::Number, A::DMatrix, B::DMatrix,
-                                  β::Number, C::DMatrix)
-    return _symm_mul!(C, A, B, α, β, side, uplo, false)
+# BLAS.symm! already has `AbstractMatrix{Float64}` / `Float32` methods. A
+# `Number` + `DMatrix` method is ambiguous with those (more specific on the
+# arrays, less specific on α/β). Match the stdlib α/β union.
+for T in (Float32, Float64)
+    @eval function LinearAlgebra.BLAS.symm!(side::AbstractChar, uplo::AbstractChar,
+                                            α::Union{Bool,$T}, A::DMatrix{$T},
+                                            B::DMatrix{$T}, β::Union{Bool,$T},
+                                            C::DMatrix{$T})
+        return _symm_mul!(C, A, B, α, β, side, uplo, false)
+    end
 end
-
-function LinearAlgebra.BLAS.hemm!(side::AbstractChar, uplo::AbstractChar,
-                                  α::Number, A::DMatrix, B::DMatrix,
-                                  β::Number, C::DMatrix)
-    return _symm_mul!(C, A, B, α, β, side, uplo, true)
+for T in (ComplexF32, ComplexF64)
+    @eval function LinearAlgebra.BLAS.hemm!(side::AbstractChar, uplo::AbstractChar,
+                                            α::Union{Bool,$T}, A::DMatrix{$T},
+                                            B::DMatrix{$T}, β::Union{Bool,$T},
+                                            C::DMatrix{$T})
+        return _symm_mul!(C, A, B, α, β, side, uplo, true)
+    end
 end
 
 function LinearAlgebra.mul!(C::DMatrix, A::LinearAlgebra.Symmetric{<:Any,<:DMatrix},
