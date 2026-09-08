@@ -325,17 +325,22 @@ function LinearAlgebra.eigvals(A::DMatrix; kwargs...)
     return LinearAlgebra.eigen(A; kwargs...).values
 end
 
-function LinearAlgebra.eigen(H::LinearAlgebra.Hermitian{<:Any,<:DMatrix}; kwargs...)
-    return LinearAlgebra.eigen(parent(H); kwargs...)
+# LinearAlgebra defines
+#   eigen(::Union{Hermitian{T,S}, Hermitian{Complex{T},S}, Symmetric{T,S}} where {T<:Real,S})
+# which is *not* more specific than `Hermitian{<:Any,<:DMatrix}` (and vice
+# versa), so a `Hermitian{Float64,DMatrix}` is ambiguous. Match that union
+# with `S<:DMatrix` so we win on distributed wrappers.
+const _DHermOrSymReal{T} = Union{
+    LinearAlgebra.Hermitian{T,<:DMatrix},
+    LinearAlgebra.Hermitian{Complex{T},<:DMatrix},
+    LinearAlgebra.Symmetric{T,<:DMatrix},
+} where {T<:Real}
+
+function LinearAlgebra.eigen(A::_DHermOrSymReal; kwargs...)
+    return LinearAlgebra.eigen(parent(A); kwargs...)
 end
-function LinearAlgebra.eigvals(H::LinearAlgebra.Hermitian{<:Any,<:DMatrix}; kwargs...)
-    return LinearAlgebra.eigvals(parent(H); kwargs...)
-end
-function LinearAlgebra.eigen(S::LinearAlgebra.Symmetric{<:Any,<:DMatrix}; kwargs...)
-    return LinearAlgebra.eigen(parent(S); kwargs...)
-end
-function LinearAlgebra.eigvals(S::LinearAlgebra.Symmetric{<:Any,<:DMatrix}; kwargs...)
-    return LinearAlgebra.eigvals(parent(S); kwargs...)
+function LinearAlgebra.eigvals(A::_DHermOrSymReal; kwargs...)
+    return LinearAlgebra.eigvals(parent(A); kwargs...)
 end
 
 function LinearAlgebra.eigen(A::Projected; v0=nothing, kwargs...)
