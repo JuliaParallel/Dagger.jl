@@ -136,10 +136,28 @@ end
 _index_at(ind::AbstractRange, k::Int) = Int(ind[k])
 _index_at(ind::AbstractVector, k::Int) = Int(ind[k])
 
+# Length before `_copy_index`: a StepRange view into a differently-sized dest
+# is `DimensionMismatch` (`test/array/copyto.jl`). Same-length StepRange still
+# throws `ArgumentError` at conversion — that is the intentional contract.
+_copy_index_length(x::Integer) = 1
+_copy_index_length(x) = length(x)
+function _copy_inds_lengths_match(Binds, Ainds)
+    n = max(length(Binds), length(Ainds))
+    for i in 1:n
+        bl = i <= length(Binds) ? _copy_index_length(Binds[i]) : 1
+        al = i <= length(Ainds) ? _copy_index_length(Ainds[i]) : 1
+        bl == al || return false
+    end
+    return true
+end
+
 function darray_copyto!(B::DArray{TB,NB}, A::DArray{TA,NA}, Binds=parentindices(B), Ainds=parentindices(A)) where {TB,NB,TA,NA}
     if _is_linear_parentinds(B, Binds) || _is_linear_parentinds(A, Ainds)
         return _darray_copyto_linear!(B, A, Binds, Ainds)
     end
+
+    _copy_inds_lengths_match(Binds, Ainds) || throw(DimensionMismatch(
+        "Cannot copy from array of size $(size(A)) (indices $Ainds) to array of size $(size(B)) (indices $Binds)"))
 
     Binds_n = ntuple(i -> _copy_index(Binds[i]), length(Binds))
     Ainds_n = ntuple(i -> _copy_index(Ainds[i]), length(Ainds))

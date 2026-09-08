@@ -409,9 +409,11 @@ lesson.
    DArray parent as `view(parent, AutoBlocks())`, whose tiles are
    SubArrays of a DArray, and the copy then scalar-indexed (one task per
    element). Do not send a DArray parent through
-   `view(::AbstractArray, ::Blocks)`. `copyto!` of a StepRange view
+   `view(::AbstractArray, ::Blocks)`.    `copyto!` of a StepRange view
    throwing is intentional (`test/array/copyto.jl`); convert StepRange to
-   `Vector` only on the `getindex` path. Integer indices drop dimensions
+   `Vector` only on the `getindex` path. Check index *lengths* before
+   `_copy_index`: a StepRange view into a differently-sized dest is
+   `DimensionMismatch`, and only same-length StepRange is the ArgumentError. Integer indices drop dimensions
    like Base (`A[:, 5]` is a `DVector`); `A[:, 5:5]` stays n×1. Range
    `getindex` must not call `length` on an integer (`to_indices` leaves
    integers as integers). Allocate the same-ndims slice with `i:i`, copy,
