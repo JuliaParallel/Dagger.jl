@@ -287,16 +287,20 @@ function _householder_dmatrix!(Q::DMatrix, R::AbstractMatrix, τ::AbstractVector
     return Q, R
 end
 
-function Krylov.householder!(Q::DMatrix, R::AbstractMatrix, τ::AbstractVector; compact::Bool=false)
+# Krylov's generics are `householder!(::AbstractMatrix{FC}, ::AbstractMatrix{FC},
+# ::AbstractVector{FC}[, ::AbstractVector{FC}])`. A method that only specializes
+# `Q::BlockKrylovMatrix` / `Q::DMatrix` is *less* specific on `R`/`τ`/`buffer`
+# and Julia will not pick it.
+function Krylov.householder!(Q::DMatrix{FC}, R::AbstractMatrix{FC}, τ::AbstractVector{FC}; compact::Bool=false) where {FC}
     return _householder_dmatrix!(Q, R, τ, nothing; compact)
 end
-function Krylov.householder!(Q::DMatrix, R::AbstractMatrix, τ::AbstractVector, buffer::AbstractVector; compact::Bool=false)
+function Krylov.householder!(Q::DMatrix{FC}, R::AbstractMatrix{FC}, τ::AbstractVector{FC}, buffer::AbstractVector{FC}; compact::Bool=false) where {FC}
     return _householder_dmatrix!(Q, R, τ, buffer; compact)
 end
-function Krylov.householder!(Q::BlockKrylovMatrix, R::AbstractMatrix, τ::AbstractVector; compact::Bool=false)
+function Krylov.householder!(Q::BlockKrylovMatrix{FC}, R::AbstractMatrix{FC}, τ::AbstractVector{FC}; compact::Bool=false) where {FC}
     return Krylov.householder!(Q.data, R isa BlockKrylovMatrix ? R.data : R, τ; compact)
 end
-function Krylov.householder!(Q::BlockKrylovMatrix, R::AbstractMatrix, τ::AbstractVector, buffer::AbstractVector; compact::Bool=false)
+function Krylov.householder!(Q::BlockKrylovMatrix{FC}, R::AbstractMatrix{FC}, τ::AbstractVector{FC}, buffer::AbstractVector{FC}; compact::Bool=false) where {FC}
     return Krylov.householder!(Q.data, R isa BlockKrylovMatrix ? R.data : R, τ, buffer; compact)
 end
 
@@ -306,14 +310,14 @@ end
 function Krylov.kungqr_buffer!(A::Union{DMatrix,BlockKrylovMatrix}, τ::AbstractVector)
     return 0
 end
-function Krylov.kunmqr_buffer!(side::Char, trans::Char, A::BlockKrylovMatrix, τ::AbstractVector, C::AbstractMatrix)
+function Krylov.kunmqr_buffer!(side::Char, trans::Char, A::BlockKrylovMatrix{T}, τ::AbstractVector{T}, C::AbstractMatrix{T}) where {T}
     return Krylov.kunmqr_buffer!(side, trans, A.data, τ, C isa BlockKrylovMatrix ? C.data : C)
 end
-function Krylov.kunmqr!(side::Char, trans::Char, A::BlockKrylovMatrix, τ::AbstractVector, C::BlockKrylovMatrix)
+function Krylov.kunmqr!(side::Char, trans::Char, A::BlockKrylovMatrix{T}, τ::AbstractVector{T}, C::BlockKrylovMatrix{T}) where {T}
     Krylov.kunmqr!(side, trans, A.data, τ, C.data)
     return C
 end
-function Krylov.kunmqr!(side::Char, trans::Char, A::BlockKrylovMatrix, τ::AbstractVector, C::BlockKrylovMatrix, buffer::AbstractVector)
+function Krylov.kunmqr!(side::Char, trans::Char, A::BlockKrylovMatrix{T}, τ::AbstractVector{T}, C::BlockKrylovMatrix{T}, buffer::AbstractVector{T}) where {T}
     Krylov.kunmqr!(side, trans, A.data, τ, C.data, buffer)
     return C
 end
