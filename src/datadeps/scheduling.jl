@@ -462,6 +462,31 @@ end
 
 ### Greedy (EFT) Scheduler ###
 
+"""
+    _propagate_aot_time_util!(spec::DTaskSpec, proc::Processor, task_time_ns::Real)
+
+Attach the AOT-computed per-task runtime estimate to `spec.options.time_util`,
+so `Sch.has_capacity` uses it directly instead of scanning the metrics snapshot
+for a runtime the AOT pass has already computed.
+
+`has_capacity` reads the value as `round(UInt64, time_util[T] * 1000^3)`, so it
+is stored keyed by `typeof(proc)` with the runtime in seconds. Non-finite or
+non-positive estimates are ignored, leaving `options.time_util` unset so
+`has_capacity` takes its usual fallback.
+"""
+function _propagate_aot_time_util!(spec::DTaskSpec, proc::Processor, task_time_ns::Real)
+    task_time_ns > 0 || return
+    isfinite(task_time_ns) || return
+    time_util_secs = Float64(task_time_ns) / 1e9
+    T = typeof(proc)
+    if spec.options.time_util === nothing
+        spec.options.time_util = Dict{Type,Any}(T => time_util_secs)
+    else
+        spec.options.time_util[T] = time_util_secs
+    end
+    return
+end
+
 const GREEDY_DEFAULT_RUNTIME_NS = UInt64(1_000_000_000)
 const GREEDY_DEFAULT_TRANSFER_RATE = UInt64(1_000_000)
 const GREEDY_DEFAULT_OUTPUT_SIZE = UInt64(1_048_576)
@@ -473,11 +498,27 @@ const GREEDY_DEFAULT_OUTPUT_SIZE = UInt64(1_048_576)
 # to what the uncached path would compute, so cost-model claims and every
 # non-worsening / determinism / correctness invariant are preserved.
 struct EFTCostCache
-    task_times::Matrix{Float64}        
-    proc_compatible::Matrix{Bool}      
-    proc_spaces::Vector{MemorySpace}   
-    proc_to_idx::Dict{Processor, Int}  
-    move_rates::Matrix{Float64}        
+    task_times::Matrix{Float64}
+    proc_compatible::Matrix{Bool}
+    proc_spaces::Vector{MemorySpace}
+    proc_to_idx::Dict{Processor, Int}
+    move_rates::Matrix{Float64}
+end
+
+"""
+    _propagate_aot_time_util_from_cache!(dag_spec, cache, task_idx, proc)
+
+Pull the AOT-computed runtime for `(task_idx, proc)` out of an `EFTCostCache`
+the caller already built for its own cost model, and forward it to
+`_propagate_aot_time_util!`. A no-op when the cache holds no entry for `proc`.
+"""
+function _propagate_aot_time_util_from_cache!(dag_spec::DAGSpec, cache::EFTCostCache,
+                                              task_idx::Int, proc::Processor)
+    proc_idx = get(cache.proc_to_idx, proc, nothing)
+    proc_idx === nothing && return
+    task_time_ns = cache.task_times[task_idx, proc_idx]
+    _propagate_aot_time_util!(dag_spec.id_to_spec[task_idx], proc, task_time_ns)
+    return
 end
 
 function _build_eft_cost_cache(snap::MT.MetricsSnapshot, dag_spec::DAGSpec,
@@ -653,7 +694,10 @@ function datadeps_schedule_dag_aot!(scheduler::GreedyScheduler, schedule, dag_sp
     greedy_schedule!(state, snap, dag_spec, all_procs; cache=cache)
     for idx in 1:nv(dag_spec.g)
         task = dag_spec.id_to_task[idx]
-        schedule[task] = state.task_proc[idx]
+        proc = state.task_proc[idx]
+        schedule[task] = proc
+        # Propagate our AOT-computed per-task runtime to Sch's fast path.
+        _propagate_aot_time_util_from_cache!(dag_spec, cache, idx, proc)
     end
     return
 end
@@ -1033,7 +1077,9 @@ function datadeps_schedule_dag_aot!(scheduler::IteratedGreedyScheduler,
 
     @inbounds for idx in 1:n_tasks
         task = dag_spec.id_to_task[idx]
-        schedule[task] = state.task_proc[idx]
+        proc = state.task_proc[idx]
+        schedule[task] = proc
+        _propagate_aot_time_util_from_cache!(dag_spec, cache, idx, proc)
     end
     return
 end
@@ -1408,7 +1454,9 @@ function datadeps_schedule_dag_aot!(scheduler::SimulatedAnnealingScheduler,
 
     @inbounds for idx in 1:n_tasks
         task = dag_spec.id_to_task[idx]
-        schedule[task] = final_state.task_proc[idx]
+        proc = final_state.task_proc[idx]
+        schedule[task] = proc
+        _propagate_aot_time_util_from_cache!(dag_spec, cache, idx, proc)
     end
     return
 end
