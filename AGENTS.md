@@ -415,4 +415,7 @@ lesson.
    side as a single-tile view — do not `collect` the tall factor.
    `LinearSolve`'s `KrylovJL_GMRES` / `KrylovJL_MINRES` are the ecosystem
    entry for a `DMatrix` RHS; do not invent a `Dagger.xyz` block solver.
-   Check `‖AX−B‖`, not only `stats.solved`.
+   Check `‖AX−B‖`, not only `stats.solved`. Pairwise wrappers
+   `copyto!(::SM, ::AbstractArray)` / `copyto!(::AbstractArray, ::SM)` (and
+   the matching `mul!` AdjOrTrans pair) are ambiguous when both sides are
+   `SM` — Krylov's `copyto!(V[1], R₀)` and `mul!(R, V', Q)` hit that.

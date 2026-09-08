@@ -191,8 +191,12 @@ function Base.fill!(A::BlockKrylovMatrix, x)
     return A
 end
 
+function Base.copyto!(dest::BlockKrylovMatrix, src::BlockKrylovMatrix)
+    copyto!(dest.data, src.data)
+    return dest
+end
 function Base.copyto!(dest::BlockKrylovMatrix, src::AbstractArray)
-    copyto!(dest.data, src isa BlockKrylovMatrix ? src.data : src)
+    copyto!(dest.data, src)
     return dest
 end
 function Base.copyto!(dest::Dagger.DArray, src::BlockKrylovMatrix)
@@ -223,6 +227,26 @@ function LinearAlgebra.mul!(C::BlockKrylovMatrix, A, B)
     return C
 end
 function LinearAlgebra.mul!(C::BlockKrylovMatrix, A, B, α::Number, β::Number)
+    LinearAlgebra.mul!(_bk_data(C), _bk_data(A), _bk_data(B), α, β)
+    return C
+end
+# More specific than `mul!(::BlockKrylovMatrix, A, B)` ×
+# `mul!(::AbstractMatrix, ::AdjOrTrans{<:BlockKrylovMatrix}, ::BlockKrylovMatrix)`.
+function LinearAlgebra.mul!(
+        C::BlockKrylovMatrix,
+        A::LinearAlgebra.AdjOrTrans{<:Any,<:BlockKrylovMatrix},
+        B::BlockKrylovMatrix,
+    )
+    LinearAlgebra.mul!(_bk_data(C), _bk_data(A), _bk_data(B))
+    return C
+end
+function LinearAlgebra.mul!(
+        C::BlockKrylovMatrix,
+        A::LinearAlgebra.AdjOrTrans{<:Any,<:BlockKrylovMatrix},
+        B::BlockKrylovMatrix,
+        α::Number,
+        β::Number,
+    )
     LinearAlgebra.mul!(_bk_data(C), _bk_data(A), _bk_data(B), α, β)
     return C
 end
