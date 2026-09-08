@@ -282,14 +282,50 @@ end
 _block_apply!(y, P::PinnedTileOperator, x) = _block_apply!(y, P.op, x)
 function _block_apply!(y, op, x)
     if x isa Array
-        _apply_inverse!(y, op, x)
+        _apply_inverse_mixed!(y, op, x)
     else
         xh = Adapt.adapt(Array, x)
         yh = similar(xh)
-        _apply_inverse!(yh, op, xh)
+        _apply_inverse_mixed!(yh, op, xh)
         copyto!(y, yh)
     end
     return nothing
+end
+
+# Working precision of a per-tile operator, if it exposes a numeric `eltype`
+# (LU / ILU / UMFPACK / KLU do). A user op that only defines `ldiv!` typically
+# does not, and we leave the apply alone — broadcast/`ldiv!` can still promote.
+function _pc_work_eltype(op)
+    T = try
+        eltype(op)
+    catch
+        return nothing
+    end
+    return T isa Type && T <: Number ? T : nothing
+end
+
+function _convert_pc_tile(::Type{Tw}, x) where Tw
+    eltype(x) === Tw && return x
+    return convert(Vector{Tw}, x isa Array ? x : Array(x))
+end
+
+# PETSc/HYPRE mixed apply: FP32 PC + FP64 Krylov. Convert the tile to the
+# operator's eltype, apply the existing same-type `_apply_inverse!`, widen back.
+# Specific backends (KLU, UMFPACK, ILU, IC0) keep their `_apply_inverse!`
+# methods; they just see matching eltypes.
+function _apply_inverse_mixed!(y, op, x)
+    Tw = _pc_work_eltype(op)
+    if Tw === nothing || (eltype(x) === Tw && eltype(y) === Tw)
+        return _apply_inverse!(y, op, x)
+    end
+    xw = _convert_pc_tile(Tw, x)
+    if eltype(y) === Tw
+        return _apply_inverse!(y, op, xw)
+    end
+    yw = similar(xw)
+    _apply_inverse!(yw, op, xw)
+    copyto!(y, yw)
+    return y
 end
 
 # `y = op⁻¹ x` for a host operator. Factorizations are applied with `\`;
@@ -699,7 +735,7 @@ function _asm_apply_host!(y, op, Ω, interior, ranges, xs)
         _asm_restrict_from_chunk!(xΩ, Ω, ranges[k], xs[k])
     end
     yΩ = Vector{T}(undef, length(Ω))
-    _apply_inverse!(yΩ, op, xΩ)
+    _apply_inverse_mixed!(yΩ, op, xΩ)
     off = first(interior) - first(Ω)
     copyto!(y, 1, yΩ, 1 + off, length(interior))
     return nothing
