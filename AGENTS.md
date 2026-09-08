@@ -489,9 +489,11 @@ lesson.
    `N` from the wrapper; there is no `Dagger.set_nearnullspace`.
    [`AMGPreconditioner`](@ref) stays per-tile (lesson 19) and does not take
    this keyword. Ruge–Stüben has no candidate injection — reject `nullspace`
-   there. Setup still gathers `N` with `A` to build `P` (same first-cut
-   limit as distributed-`P`). Check `‖Ax−b‖`, not only `stats.solved`. A
-   2-component / elasticity problem is where scalar SA stalls; Poisson with
+   there. Default (scalar `ones`) setup is tiled and does not collect `A`
+   (lesson 42). `nullspace=N` still gathers `N` with `A` so coarse levels
+   get the `R` from `fit_candidates`, not the fine `N`. Check `‖Ax−b‖`,
+   not only `stats.solved`. A 2-component / elasticity problem is where
+   scalar SA stalls; Poisson with
    `ones` is not a near-nullspace test. The `DaggerSparseLU \ DVector`
    tie-breaker this workstream also hit is already lesson 36
    (`_solve_pinned_dvector`); do not add a second `invoke` method.
@@ -530,3 +532,24 @@ lesson.
    `stats.solved` as `Ax≈b` (lesson 19). The `DaggerSparseLU \ DVector`
    tie-breaker this workstream also hit is already lesson 36
    (`_solve_pinned_dvector`); do not add a second `invoke` method.
+
+42. **GlobalAMG builds `P` from tiles, not a gathered CSC of `A`.** Per-tile
+   StandardAggregation / Ruge–Stüben on the diagonal tile, leftover
+   matching of *unaggregated* interface nodes, then Jacobi-smooth
+   `P ← T − ω D⁻¹ A T` via distributed SpGEMM (`Dᵢᵢ` is the row 1-norm,
+   matching AMG.jl's `JacobiProlongation`). On 1-D Poisson local SA
+   assigns every node, so leftover matching is a no-op and tentative `P`
+   is block-diagonal; smoothing through `A T` is what couples tiles.
+   Do **not** merge already-assigned interface aggregates: that produced
+   V-cycle residuals of O(1)–O(5) vs Jacobi (union-find collapse, and
+   even pairwise merge). A second tiled coarsening on ≤3 tiles of the
+   RAP product is also worse than Jacobi — skip it and LU that operator
+   (`_gather_sparse`, not `_collect_sparse_dmatrix`). The caller fetches
+   only per-tile headers (`nagg` + interface pairs), not `A`.
+   `COLLECT_SPARSE_DMATRIX_MAXSIZE` lets tests prove setup does not
+   gather the fine operator. Remaining gathers: coarsest LU, one row of
+   tiles per coarsen, header fetch, GPU tile host-stage. `nullspace=N`
+   still gathers (lesson 39). Do not treat `stats.solved` as `Ax≈b`
+   (lessons 19/32). `AMGPreconditioner` is still per-tile Schwarz — do
+   not change it. Aggregates still do not come from a distributed MIS;
+   a row-coarsen task sees one row of tiles.
