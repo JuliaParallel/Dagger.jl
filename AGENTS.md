@@ -399,3 +399,19 @@ lesson.
    type (`BlockOperator`) and cannot reuse `hvcat`. `BlockArrays.mortar`
    is the ecosystem name for the assembled case, but adding that dependency
    does not give you matrix-free blocks or field-split `mul!`.
+
+35. **`@stencil` cannot express geometric restriction / prolongation.**
+   `origin/jps/sparse-stencil` adds sparse-tile sweeps and `@stencil
+   sparse=true` (dilated CSC support, GPU halo staging). It is still a
+   same-`idx`, same-size, same-chunk halo sweep — neighborhood access at any
+   other index is rejected, and operands must share shape and layout. A V-cycle
+   transfer maps a fine grid of size `n` onto a coarse grid of size `n/2`.
+   Do not implement a competing stencil stack for that gap. [`GeometricMultigrid`](@ref)
+   is matrix-based: injection / full-weighting `R` and linear / bilinear `P`
+   as sparse `DMatrix`s, Galerkin `Ac = R A P`, damped-Jacobi via existing
+   `mul!`. Check `‖Ax−b‖`, not only `stats.solved` (lessons 19 / 32). Two
+   Jacobi sweeps each side of the V-cycle (lesson 32). This does not change
+   [`AMGPreconditioner`](@ref) or [`GlobalAMG`](@ref).
+   `DaggerSparseLU \ AbstractVector` is ambiguous with
+   `\(::_PinnedSparseFactor, ::DVector)` — both GlobalAMG and geometric MG
+   coarse solves hit that pair. Keep a `DaggerSparseLU`+`DVector` method.

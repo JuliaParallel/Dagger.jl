@@ -52,6 +52,7 @@ tests = [
     ("Array - LinearAlgebra - SVD", "array/linalg/svd.jl"),
     ("Array - LinearAlgebra - Iterative Solvers", "array/linalg/iterativesolvers.jl"),
     ("Array - LinearAlgebra - Global AMG", "array/linalg/global_amg.jl"),
+    ("Array - LinearAlgebra - Geometric MG", "array/linalg/gmg.jl"),
     ("Array - LinearAlgebra - Sparse Direct", "array/linalg/sparsedirect.jl"),
     ("Array - LinearAlgebra - LinearSolve", "array/linalg/linearsolve.jl"),
     ("Array - LinearAlgebra - Sparse Assembly", "array/linalg/assembly.jl"),

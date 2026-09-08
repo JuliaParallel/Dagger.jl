@@ -148,6 +148,7 @@ include("array/projected.jl")
 include("array/blockoperator.jl")
 include("array/sparsedirect.jl")
 include("array/amg.jl")
+include("array/gmg.jl")
 
 # GPU
 include("gpu.jl")

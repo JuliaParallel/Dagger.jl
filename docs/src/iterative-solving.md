@@ -224,6 +224,7 @@ The built-in preconditioners, from cheapest to strongest:
 | [`Dagger.BlockILUPreconditioner`](@ref)    | `IncompleteLU`    | incomplete-LU (drop tol `τ`) per tile      |
 | [`Dagger.AMGPreconditioner`](@ref)         | `AlgebraicMultigrid` | AMG V-cycle **per diagonal tile** (additive Schwarz) |
 | [`Dagger.GlobalAMG`](@ref)                 | `AlgebraicMultigrid` | true coarse grid over the whole `DMatrix` |
+| [`Dagger.GeometricMultigrid`](@ref)        | `SparseArrays`    | geometric (PFMG-like) V-cycle on a regular grid |
 
 ```julia
 using AlgebraicMultigrid, IncompleteLU
@@ -233,6 +234,7 @@ x, _ = Krylov.gmres(DA, b; M = Dagger.AdditiveSchwarzPreconditioner(DA; overlap 
 x, _ = Krylov.cg(DA, b; M = Dagger.BlockILUPreconditioner(DA; τ = 0.01))
 x, _ = Krylov.gmres(DA, b; M = Dagger.AMGPreconditioner(DA; method = :ruge_stuben))
 x, _ = Krylov.gmres(DA, b; M = Dagger.SmoothedAggregationPreconditioner(DA))
+x, _ = Krylov.gmres(DA, b; M = Dagger.GeometricMultigrid(DA))  # 1-D; pass grid=(nx,ny) for 2-D
 ```
 
 `AdditiveSchwarzPreconditioner` is overlapping restricted additive Schwarz
@@ -332,12 +334,42 @@ This is a first cut (unsmoothed or Jacobi-smoothed aggregation, 1–2 coarse
 levels, two damped-Jacobi sweeps each side, gathered LU on the coarsest grid).
 Setup still gathers the current level to build `P`; RAP and the V-cycle do not.
 
+### Geometric multigrid (regular grids)
+
+[`Dagger.GeometricMultigrid`](@ref) is the structured-grid counterpart of
+[`GlobalAMG`](@ref) — a first-cut HYPRE PFMG analog. Restriction is injection
+or full-weighting, prolongation is linear (1-D) or bilinear (2-D), each coarse
+operator is the distributed Galerkin product `Ac = R * A * P`, and
+`mul!(y, M, x)` is a V-cycle with the same damped-Jacobi smoother as
+`GlobalAMG`. `grid` is the lattice shape (`(n,)` by default; `(nx, ny)` for a
+column-major 2-D grid). User-supplied `R` / `P` (`AbstractMatrix` or `DMatrix`)
+replace the finest transfer.
+
+This does **not** use `@stencil`. `origin/jps/sparse-stencil` is a same-index,
+same-size halo sweep; restriction maps `n → n/2` and cannot be written that
+way. Do not treat this constructor as a new stencil stack.
+
+```julia
+using SparseArrays, Krylov
+
+M = Dagger.GeometricMultigrid(DA)                    # 1-D full-weighting
+M = Dagger.GeometricMultigrid(DA; grid = (nx, ny))   # 2-D bilinear
+x, stats = Krylov.gmres(DA, b; M)
+r = similar(b); mul!(r, DA, x); axpy!(-1, b, r)
+@assert norm(r) / norm(b) < 1e-8   # do not stop at stats.solved
+```
+
+`AMGPreconditioner` and `GlobalAMG` are unchanged: per-tile AMG is still
+additive Schwarz; aggregation AMG is still `GlobalAMG`.
+
 ### Choosing a preconditioner
 
 - **SPD elliptic (Poisson-like) problems:** [`GlobalAMG`](@ref) /
-  [`SmoothedAggregationPreconditioner`](@ref) is the real coarse-grid choice.
-  `AMGPreconditioner` is per-tile Schwarz and can look solved while `‖Ax−b‖`
-  is huge. Prefer `gmres` if `cg` rejects the V-cycle as non-SPD.
+  [`SmoothedAggregationPreconditioner`](@ref) is the algebraic coarse-grid
+  choice; [`GeometricMultigrid`](@ref) is the one to use when the operator
+  lives on a regular 1-D / 2-D grid. `AMGPreconditioner` is per-tile Schwarz
+  and can look solved while `‖Ax−b‖` is huge. Prefer `gmres` if `cg` rejects
+  the V-cycle as non-SPD.
 - **General sparse systems:** `BlockILUPreconditioner` is a solid, cheap-setup
   general-purpose option; pair with `gmres` or `bicgstab`.
 - **Quick baseline / very well-conditioned systems:** `JacobiPreconditioner` (or
@@ -434,6 +466,7 @@ Dagger.AdditiveSchwarzPreconditioner
 Dagger.BlockILUPreconditioner
 Dagger.AMGPreconditioner
 Dagger.GlobalAMG
+Dagger.GeometricMultigrid
 Dagger.SmoothedAggregationPreconditioner
 Dagger.RugeStubenPreconditioner
 Dagger.BlockKLUPreconditioner

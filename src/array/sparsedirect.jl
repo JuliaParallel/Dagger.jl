@@ -320,6 +320,12 @@ function Base.:\(F::DaggerSparseLU, b::AbstractVector)
     return F \ distribute(collect(b), F.part)
 end
 
+# `DVector <: AbstractVector`, so the host-vector method above is otherwise
+# ambiguous with `\(::_PinnedSparseFactor, ::DVector)`. Coarse-grid solves in
+# GlobalAMG / GeometricMultigrid hit that pair. Semantics of both callers
+# stay the pinned DVector path.
+Base.:\(F::DaggerSparseLU, b::DVector) = invoke(\, Tuple{_PinnedSparseFactor, DVector}, F, b)
+
 function Base.:\(F::DaggerSparseLU, B::AbstractMatrix)
     bs = F.part.blocksize[1]
     return F \ distribute(collect(B), Blocks(bs, bs))
