@@ -735,7 +735,7 @@ From `LinearAlgebra`:
 - `mul!` (In-place Matrix-Matrix and Matrix-Vector multiply; mixed eltypes promote like LinearAlgebra)
 - `cholesky`/`cholesky!` (In-place/Out-of-place Cholesky factorization; sparse `cholesky!(F, A)` reuses the CHOLMOD symbolic factor)
 - `lu`/`lu!` (In-place/Out-of-place LU factorization (`NoPivot` and `RowMaximum`); sparse `lu!(F, A)` reuses KLU's symbolic analysis when the pattern is unchanged)
-- `qr`/`qr!` (In-place/Out-of-place tiled Compact-WY QR; keywords `ib` and `p` for inner block size and CAQR domains)
+- `qr`/`qr!` (dense: tiled Compact-WY, keywords `ib` and `p`; sparse-backed: gather-then-SPQR, never tiled dense QR)
 - `\`/`ldiv!` (In-place/Out-of-place Linear solving with LU, Cholesky, QR, and SVD factorizations)
 - `inv` (Out-of-place matrix inversion, including via SVD)
 - `svd`/`svd!`/`svdvals!` (In-place/Out-of-place Singular Value Decomposition)

@@ -541,6 +541,13 @@ x = F \ b             # returns a DVector partitioned like b
 once, solve many right-hand sides cheaply. `lu(A)` / `factorize(A)` prefer
 `splu` when both packages are loaded.
 
+Overdetermined / rank-revealing sparse systems use the same gather, via
+`qr(A)` / `qr!(A)` (SuiteSparse SPQR; [`Dagger.DaggerSparseQR`](@ref)). That
+path is **not** tiled dense Compact-WY QR — the same densify footgun as
+sparse `lu` / `cholesky`. Solve with `F \\ b` (least squares; `x` has
+length `size(A, 2)`). Least-squares Krylov (`lsqr` / `lsmr`) remains the
+matrix-free alternative when the operator should stay distributed.
+
 When the **values** change but the sparsity pattern does not (implicit time
 stepping), refresh with `lu!(F, A)` — the LinearAlgebra factor-update API,
 not a Dagger-specific `refactor`. `Dagger.klu` then `lu!(F, A)` reuses KLU's
@@ -645,6 +652,7 @@ Dagger.BlockKLUPreconditioner
 Dagger.BlockUMFPACKPreconditioner
 Dagger.klu
 Dagger.splu
+Dagger.DaggerSparseQR
 Dagger.DaggerSparseLU
 Dagger.DaggerSparseCholesky
 Dagger.SparseIterativeFactorization
