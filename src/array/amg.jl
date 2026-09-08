@@ -46,8 +46,9 @@ are Dagger-distributed.
 
 Keyword arguments:
 
-- `max_levels=3`, `max_coarse=32` — stop after this many levels, or when the
-  operator is this small (then a gathered LU is the coarse solver).
+- `max_levels=3`, `max_coarse=32` — stop after this many levels, when the
+  operator is this small, or when a later coarsening would see only a
+  handful of tiles (then a gathered LU is the coarse solver).
 - `smooth=true` — Jacobi-smooth the tentative aggregation `P` (SA only).
 - `relax=2/3`, `presweeps=2`, `postsweeps=2` — damped-Jacobi V-cycle sweeps.
   One sweep each side is not enough for the coarse correction to beat

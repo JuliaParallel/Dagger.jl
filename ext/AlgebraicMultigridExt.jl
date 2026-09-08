@@ -234,13 +234,21 @@ function _amg_match_interface(headers, row_starts, ::Type{T}) where T
                          [Vector{Tuple{Int,Int,T}}() for _ in 1:mt], 0)
 
     parent = collect(1:nids)
+    matched = falses(nids)
     node_id = function (g)
         t, _, agg = node_info[g]
         return agg > 0 ? (offsets[t] + agg) : extra_id[g]
     end
+    # Pairwise: each aggregate merges at most once. Unrestricted union-find
+    # along a 1-D interface chain collapses into one domain-wide coarse
+    # variable when a tile's two ends share an aggregate (seen as V-cycle
+    # residuals of O(1)–O(5) vs Jacobi).
     for (a, b) in edges
         (haskey(node_info, a) && haskey(node_info, b)) || continue
-        _amg_union!(parent, node_id(a), node_id(b))
+        ia, ib = node_id(a), node_id(b)
+        (matched[ia] || matched[ib] || ia == ib) && continue
+        _amg_union!(parent, ia, ib)
+        matched[ia] = matched[ib] = true
     end
 
     roots = Vector{Int}(undef, nids)
@@ -467,6 +475,12 @@ function Dagger.GlobalAMG(A::DMatrix;
     n, A = _square_amg_operator(A)
     levels = GlobalAMGLevel[]
     while length(levels) + 1 < max_levels && size(A, 1) > max_coarse
+        # A later tiled coarsening on a handful of tiles sees only the
+        # diagonal blocks of an already-denser RAP product; that P can make
+        # the V-cycle worse than Jacobi (lesson 32 / 35). Stop and LU.
+        if !isempty(levels) && size(A.chunks, 1) <= 3
+            break
+        end
         P = _amg_prolongation(A; method, smooth, jacobi_ω, kwargs...)
         P === nothing && break
         Ac = _amg_galerkin(A, P)

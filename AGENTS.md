@@ -402,12 +402,15 @@ lesson.
 
 35. **GlobalAMG builds `P` from tiles, not a gathered CSC of `A`.** Per-tile
    StandardAggregation / Ruge–Stüben on the diagonal tile, plus a
-   lightweight union-find that merges local aggregates sharing an
+   lightweight pairwise merge of local aggregates that share an
    interface edge (off-diagonal entries in the same row). Matching only
    the *unaggregated* leftovers is a no-op on 1-D Poisson: local SA
    assigns every node, `niface=0`, and `P` stays block-diagonal — a
    second coarse level of that `P` can make a V-cycle *worse* than
-   Jacobi (n=128, 8 tiles). Jacobi-smooth `P ← T − ω D⁻¹ A T` with
+   Jacobi (n=128, 8 tiles). Unrestricted union-find along the interface
+   chain is also wrong: if a tile's two ends share an aggregate, the
+   whole chain collapses to one coarse variable (V-cycle residuals
+   O(1)–O(5)). Each aggregate merges at most once. Jacobi-smooth `P ← T − ω D⁻¹ A T` with
    distributed SpGEMM (`Dᵢᵢ` is the row 1-norm, matching AMG.jl's
    `JacobiProlongation`). The caller fetches only per-tile headers
    (`nagg` + interface pairs and local aggregate ids), not `A`. Galerkin
