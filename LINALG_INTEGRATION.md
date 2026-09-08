@@ -6,7 +6,7 @@ branches; they do **not** merge into this workspace branch, and they do **not**
 edit other agents' rows here. Report status in your final message so the
 coordinator can update the table.
 
-Last coordinator pass: 2026-09-07 (seven workstreams merged onto `Dagger-linalg-ultra`).
+Last coordinator pass: 2026-09-07 (seven P0 workstreams merged; P0 leftovers and P1 workstreams assigned to sibling agents).
 
 ---
 
@@ -235,15 +235,29 @@ anyone else's `linalg/*`) destructively.
 
 Status values: `not started` | `in progress` | `blocked` | `done` | `failed`.
 
-| Workstream | Status | Branch | Owner notes | Last update |
-|---|---|---|---|---|
-| sparse-solve-dispatch | done | `linalg/sparse-solve-dispatch` @ `57c7414b` | Sparse `A\b` / `lu` / `factorize` route off dense LU via `is_sparse_backed`. AWS: array/linalg pass. Numeric refactor skipped — PureUMFPACK has no `splu!`. `inv` on sparse uses the sparse factor (`factorize` + `ldiv!` into `I`). | 2026-09-07 |
-| linearsolve | done | `linalg/linearsolve` @ `55c38361` | `LinearSolve.solve` / `defaultalg` on `DArray` (direct `KrylovJL_GMRES` / `PureKLU` / `PureUMFPACK`, never `DefaultLinearSolver`). AWS: linearsolve 25/25, full array/linalg pass. AlgebraicMultigrid compat `"1, 2"`. | 2026-09-07 |
-| assembly | done | `linalg/assembly` @ `6018c6f4` | `sparse` / `sparse!` + `Blocks` tile-routed COO; regular `@spawn`, not datadeps (`SparseCOOBucket` has no `move!`). AWS: assembly 64/64, array/linalg pass. | 2026-09-07 |
-| overlapping-asm | done | `linalg/overlapping-asm` @ `5a2102f7` | `AdditiveSchwarzPreconditioner` (`PC_ASM_RESTRICT`). RAS is not SPD — use GMRES. Overlap benefit is problem-dependent (no `niter` drop on well-conditioned 1-D Laplacian with large tiles). AWS: iterativesolvers 346, array/linalg pass. | 2026-09-07 |
-| sparse-chol-ic | done | `linalg/sparse-chol-ic` @ `5c1f9991` | Sparse `cholesky` via `_cholesky` / `cholesky!` (never `_chol!`); per-tile `BlockICPreconditioner` / `ichol`. AWS: sparse chol 55, array/linalg pass. | 2026-09-07 |
-| global-amg | done | `linalg/global-amg` @ `c7779f81` | `GlobalAMG` / `SmoothedAggregationPreconditioner` / `RugeStubenPreconditioner`. First cut still gathers to build `P`; RAP and the V-cycle do not. Check `‖Ax−b‖`, not only `stats.solved`. AWS: global_amg 113, iterativesolvers 297. | 2026-09-07 |
-| operator-types | done | `linalg/operator-types` @ `9158cb47` | `Projected` (nullspace; constructor orthonormalizes) + `BlockOperator` / `BlockDiagonalPC`. AWS: iterativesolvers 346, array/linalg pass. | 2026-09-07 |
+Priority: **P0 done** = merged onto `Dagger-linalg-ultra`. **P0 leftover** = follow-up from a merged P0, now in progress on a sibling. **P1** = next-wave work, in progress on a sibling.
+
+| Pri | Workstream | Status | Branch | Owner notes | Last update |
+|---|---|---|---|---|---|
+| P0 | sparse-solve-dispatch | done | `linalg/sparse-solve-dispatch` @ `57c7414b` | Sparse `A\b` / `lu` / `factorize` route off dense LU via `is_sparse_backed`. AWS: array/linalg pass. Numeric refactor skipped — see `numeric-refactor`. `inv` on sparse uses the sparse factor (`factorize` + `ldiv!` into `I`). | 2026-09-07 |
+| P0 | linearsolve | done | `linalg/linearsolve` @ `55c38361` | `LinearSolve.solve` / `defaultalg` on `DArray` (direct `KrylovJL_GMRES` / `PureKLU` / `PureUMFPACK`, never `DefaultLinearSolver`). AWS: linearsolve 25/25, full array/linalg pass. AlgebraicMultigrid compat `"1, 2"`. | 2026-09-07 |
+| P0 | assembly | done | `linalg/assembly` @ `6018c6f4` | `sparse` / `sparse!` + `Blocks` tile-routed COO; regular `@spawn`, not datadeps (`SparseCOOBucket` has no `move!`). AWS: assembly 64/64, array/linalg pass. | 2026-09-07 |
+| P0 | overlapping-asm | done | `linalg/overlapping-asm` @ `5a2102f7` | `AdditiveSchwarzPreconditioner` (`PC_ASM_RESTRICT`). RAS is not SPD — use GMRES. Overlap benefit is problem-dependent (no `niter` drop on well-conditioned 1-D Laplacian with large tiles). Symmetric leftover: `ras-symmetric`. AWS: iterativesolvers 346, array/linalg pass. | 2026-09-07 |
+| P0 | sparse-chol-ic | done | `linalg/sparse-chol-ic` @ `5c1f9991` | Sparse `cholesky` via `_cholesky` / `cholesky!` (never `_chol!`); per-tile `BlockICPreconditioner` / `ichol`. AWS: sparse chol 55, array/linalg pass. | 2026-09-07 |
+| P0 | global-amg | done | `linalg/global-amg` @ `c7779f81` | `GlobalAMG` / `SmoothedAggregationPreconditioner` / `RugeStubenPreconditioner`. First cut still gathers to build `P`; RAP and the V-cycle do not. Check `‖Ax−b‖`, not only `stats.solved`. Distributed-`P` leftover: `global-amg-distributed-P`. AWS: global_amg 113, iterativesolvers 297. | 2026-09-07 |
+| P0 | operator-types | done | `linalg/operator-types` @ `9158cb47` | `Projected` (nullspace; constructor orthonormalizes) + `BlockOperator` / `BlockDiagonalPC`. AWS: iterativesolvers 346, array/linalg pass. | 2026-09-07 |
+| P0 leftover | numeric-refactor | in progress | `linalg/numeric-refactor` | Numeric rewrite of the sparse factorization itself. Dispatch already stays sparse; PureUMFPACK has no `splu!` in-place hook. | 2026-09-07 |
+| P0 leftover | global-amg-distributed-P | in progress | `linalg/amg-distributed-p` | Distribute GlobalAMG prolongation setup (`P`). RAP and the V-cycle are already distributed; first-cut setup still gathers. More coarse levels / smoothing variants also open. | 2026-09-07 |
+| P0 leftover | ras-symmetric | in progress | `linalg/ras-symmetric` | RAS (`PC_ASM_RESTRICT`) is not SPD — leftover is a usable symmetric option (e.g. ASM interpolate / symmetrized variant) **or** honest docs+tests that RAS is nonsymmetric and CG is the wrong pairing. | 2026-09-07 |
+| P1 | stencil-gmg | in progress | `linalg/stencil-gmg` | Geometric multigrid on stencil operators. Inspect `jps/sparse-stencil` first (existing stencil work; do not reimplement blindly). | 2026-09-07 |
+| P1 | csr-bsr | in progress | `linalg/csr-bsr` | CSR / BSR sparse tile formats alongside the existing CSC-backed `DSparseArray` path. | 2026-09-07 |
+| P1 | graph-partition | in progress | `linalg/graph-partition` | Graph / mesh partitioners as a `Blocks` alternative (or input to it) for sparse operators. | 2026-09-07 |
+| P1 | sparse-eigen | in progress | `linalg/sparse-eigen` | Sparse / matrix-free eigensolvers on `DArray` via ecosystem generics (no novel `Dagger.xyz` unless unavoidable). | 2026-09-07 |
+| P1 | mixed-precision | in progress | `linalg/mixed-precision` | Mixed-precision Krylov / apply / residual paths that stay sparse and do not densify. | 2026-09-07 |
+| P1 | gpu-pc | in progress | `linalg/gpu-pc` | Device-side preconditioner apply (block Jacobi / ILU / AMG / RAS) without host gather on the apply path. | 2026-09-07 |
+| P1 | near-nullspace | in progress | `linalg/near-nullspace` | Near-nullspace / rigid-body modes into GlobalAMG / smoothed aggregation (builds on `Projected`). | 2026-09-07 |
+| P1 | block-krylov | in progress | `linalg/block-krylov` | Block / multi-RHS Krylov on `DArray` (ecosystem hooks, not a new solver type). | 2026-09-07 |
+| P1 | slicing | in progress | `linalg/slicing` | Distributed `getindex` / views / subarray slicing that preserves tile backend (no silent densify). | 2026-09-07 |
 
 ---
 
@@ -259,12 +273,18 @@ Status values: `not started` | `in progress` | `blocked` | `done` | `failed`.
 | 2026-09-07 | `0e3c0e48` `linalg/sparse-chol-ic` @ `5c1f9991` | Conflicts: `AGENTS.md` (lesson 31), `ext/SparseArraysExt.jl` (union assembly + IC0). `runtests.jl` auto-kept `sparsechol.jl`. |
 | 2026-09-07 | `79fa35f5` `linalg/global-amg` @ `c7779f81` | Conflicts: `AGENTS.md` (lesson 32), `docs/src/iterative-solving.md` (kept ASM prose + GlobalAMG warning). |
 | 2026-09-07 | `e5e7eaaa` `linalg/operator-types` @ `9158cb47` | Conflict: `AGENTS.md` (lessons 33–34; Projected orthonormalize folded into 33). |
+| 2026-09-07 | tracking doc only | Assigned P0 leftovers (`numeric-refactor`, `global-amg-distributed-P`, `ras-symmetric`) and nine P1 workstreams to sibling agents. No feature-branch merges. |
 
 ## Remaining follow-ups
 
-- **Numeric refactor of sparse LU** — skipped. Dispatch stays sparse; PureUMFPACK has no `splu!` in-place hook, so a later numeric rewrite of the actual factorization is still open.
-- **GlobalAMG first cut still gathers to build `P`.** RAP and the V-cycle are distributed; setup of the prolongation is not. More coarse levels / smoothing variants are also open.
-- **RAS overlap benefit is problem-dependent.** Overlap 1 does not reduce GMRES `niter` on a well-conditioned 1-D Laplacian with large tiles; the drop needs smaller subdomains or stronger convection. RAS is nonsymmetric — use GMRES, not CG.
+P0 leftovers are **in progress** on siblings (do not merge those branches here):
+
+- **numeric-refactor** (`linalg/numeric-refactor`) — numeric rewrite of the sparse factorization. Dispatch already stays sparse; PureUMFPACK has no `splu!` in-place hook.
+- **global-amg-distributed-P** (`linalg/amg-distributed-p`) — first-cut GlobalAMG still gathers to build `P`. RAP and the V-cycle are distributed.
+- **ras-symmetric** (`linalg/ras-symmetric`) — RAS is not SPD. Deliver a usable symmetric option **or** honest docs+tests. Overlap benefit remains problem-dependent (no `niter` drop on a well-conditioned 1-D Laplacian with large tiles).
+
+Unassigned leftover from P0:
+
 - **`inv` on a sparse-backed `DMatrix`** uses the sparse factor (`factorize` + `ldiv!` into `I`) rather than a dedicated sparse inverse. The result is still a dense `I` solve.
 
 `AGENTS.md` lessons 27–34 are the union of the per-workstream lesson 27s (LinearSolve `DefaultLinearSolver`; ASM Restricted / GMRES; GlobalAMG vs per-tile residual; qualify `cholesky!`/`mul!`; `SparseCOOBucket` not in datadeps; Projected orthonormalize / `Adjoint` `mul!`; `hvcat` is not `MatNest`). Lesson 20 remains unused (pre-existing gap).
