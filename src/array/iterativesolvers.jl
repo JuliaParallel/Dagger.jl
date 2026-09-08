@@ -453,13 +453,10 @@ struct BlockILUPreconditioner{F,S} <: AbstractBlockPreconditioner
     n::Int
 end
 
-# Default: host IncompleteLU or a GPU sparse `_ilu_tile` method. GPU
-# extensions add more-specific methods on `CuSparseMatrixCSC` / `ROCSparseMatrixCSC`.
+# Host IncompleteLU and GPU sparse extensions add `_ilu_tile` methods.
+# No `::Any` default here — that signature is what IncompleteLUExt implements,
+# and overwriting it during extension precompile is forbidden.
 function _ilu_tile end
-_ilu_tile(tile; kwargs...) = throw(ArgumentError(
-    "Dagger.BlockILUPreconditioner requires IncompleteLU.jl (host ILU) or a \
-    GPU sparse backend with ILU0 (CUDA/ROCm). Run `using IncompleteLU`, or \
-    load CUDA/AMDGPU with SparseArrays."))
 _ilu_tile(M::DSparseArray; kwargs...) = _ilu_tile(M.mat; kwargs...)
 
 function BlockILUPreconditioner(A::DMatrix; kwargs...)

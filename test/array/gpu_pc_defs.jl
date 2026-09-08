@@ -46,7 +46,8 @@ _gpu_pc_laplacian(T, n) = SparseArrays.spdiagm(
 
 function _gpu_pc_ilu_unavailable(e)
     msg = sprint(showerror, e)
-    return occursin("IncompleteLU", msg) || occursin("ILU0", msg)
+    return occursin("IncompleteLU", msg) || occursin("ILU0", msg) ||
+           occursin("_ilu_tile", msg)
 end
 
 """

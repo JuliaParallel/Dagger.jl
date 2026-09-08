@@ -12,7 +12,7 @@ import LinearAlgebra
 _as_sparse(A::SparseArrays.SparseMatrixCSC) = A
 _as_sparse(A::AbstractMatrix) = SparseArrays.sparse(A)
 
-function Dagger._ilu_tile(tile; τ=0.001, kwargs...)
+function Dagger._ilu_tile(tile::AbstractMatrix; τ=0.001, kwargs...)
     S = _as_sparse(Dagger._tile_matrix(tile))
     return IncompleteLU.ilu(S; τ=τ, kwargs...)
 end
