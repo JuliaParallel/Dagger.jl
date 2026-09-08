@@ -421,12 +421,15 @@ ichol(A; kwargs...) = throw(ArgumentError(
 """
     AMGPreconditioner(A::DMatrix; method=:ruge_stuben, kwargs...)
 
-Algebraic-multigrid preconditioner: builds an AMG hierarchy (`method` is
-`:ruge_stuben` or `:smoothed_aggregation`) for each diagonal tile and applies a
-V-cycle per block. Near mesh-independent convergence for elliptic (Poisson-like)
-operators. With one tile this is global AMG; with many tiles it is a scalable
-block/additive-Schwarz AMG. Requires `AlgebraicMultigrid.jl` to be loaded and
-sparse-backed tiles. See [`AbstractBlockPreconditioner`](@ref).
+Per-tile algebraic-multigrid preconditioner: builds an AMG hierarchy (`method`
+is `:ruge_stuben` or `:smoothed_aggregation`) for each **diagonal tile** and
+applies a V-cycle per block. That is additive Schwarz, not a coarse grid over
+`A`. With one tile (`Blocks(n, n)`) it happens to be global; with many tiles
+Krylov can report `stats.solved` while `‖Ax−b‖` is still large (see
+`AGENTS.md` lesson 19). For a hierarchy that coarsens **across** tiles, use
+[`GlobalAMG`](@ref) / [`SmoothedAggregationPreconditioner`](@ref). Requires
+`AlgebraicMultigrid.jl` and sparse-backed tiles. See
+[`AbstractBlockPreconditioner`](@ref).
 """
 struct AMGPreconditioner{F,S} <: AbstractBlockPreconditioner
     ops::F

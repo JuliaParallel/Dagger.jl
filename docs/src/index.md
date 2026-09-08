@@ -423,12 +423,13 @@ x, stats = Krylov.cg(DA, b)
 ### Add a preconditioner
 
 ```julia
-using AlgebraicMultigrid   # enables Dagger.AMGPreconditioner
+using AlgebraicMultigrid   # enables AMG preconditioners
 
-P = Dagger.AMGPreconditioner(DA)        # build once
-x, stats = Krylov.cg(DA, b; M = P)      # pass as `M`
+P = Dagger.SmoothedAggregationPreconditioner(DA)  # global AMG; build once
+x, stats = Krylov.gmres(DA, b; M = P)             # check ‖Ax−b‖, not just stats.solved
 ```
 
+`Dagger.AMGPreconditioner` is the older **per-tile** (additive-Schwarz) AMG.
 Other preconditioners: `Dagger.JacobiPreconditioner`,
 `Dagger.BlockJacobiPreconditioner`, `Dagger.AdditiveSchwarzPreconditioner`
 (core; overlapping restricted ASM), `Dagger.BlockILUPreconditioner`
