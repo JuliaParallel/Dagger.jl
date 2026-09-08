@@ -399,3 +399,17 @@ lesson.
    type (`BlockOperator`) and cannot reuse `hvcat`. `BlockArrays.mortar`
    is the ecosystem name for the assembled case, but adding that dependency
    does not give you matrix-free blocks or field-split `mul!`.
+
+35. **ProcessScope on a GPU vector apply moves chunks to CPU and kills SpMV.**
+   `iscompatible_arg(ThreadProc, CuArray)` is false (`@gpuproc`), so a
+   block-PC apply pinned only to `ProcessScope` is placed on a CPU thread
+   and Datadeps gathers every GPU vector chunk, restamping the Krylov
+   workspace as host `Array`. The next SpMV then re-uploads. Pin GPU tiles
+   with `memory_space_scope` (`ExactScope` of the device proc,
+   identity-stable / cached). Stamp pinned operators from
+   `value_memory_space` of the *factor*, not `task_processor()`: a host
+   UMFPACK/AMG built under a GPU compute scope is still CPURAM (lesson 26).
+   `_supports_device_apply` is the hook for on-device apply (dense vendor
+   `LU`, `DeviceILU0`); host-only factors still `Adapt` a temporary inside
+   the GPU-scoped task so the DArray chunk stays on-device. Do not treat
+   `stats.solved` as `Ax≈b` for block AMG (lesson 19).

@@ -221,7 +221,7 @@ The built-in preconditioners, from cheapest to strongest:
 | [`Dagger.JacobiPreconditioner`](@ref)      | (core)            | scale by `1 ./ diag(A)`                    |
 | [`Dagger.BlockJacobiPreconditioner`](@ref) | (core)            | exact `lu` solve per diagonal tile         |
 | [`Dagger.AdditiveSchwarzPreconditioner`](@ref) | (core)        | overlapping ASM (`PC_ASM_RESTRICT`; default overlap 1) |
-| [`Dagger.BlockILUPreconditioner`](@ref)    | `IncompleteLU`    | incomplete-LU (drop tol `τ`) per tile      |
+| [`Dagger.BlockILUPreconditioner`](@ref)    | `IncompleteLU` or CUDA/ROCm sparse | incomplete-LU per tile (`τ` on host; vendor ILU0 on GPU) |
 | [`Dagger.AMGPreconditioner`](@ref)         | `AlgebraicMultigrid` | AMG V-cycle **per diagonal tile** (additive Schwarz) |
 | [`Dagger.GlobalAMG`](@ref)                 | `AlgebraicMultigrid` | true coarse grid over the whole `DMatrix` |
 
@@ -301,6 +301,16 @@ share a common mechanism ([`Dagger.AbstractBlockPreconditioner`](@ref)):
   operator is **pinned** to the worker owning its tile, and every apply for that
   block is scheduled there — only the (small, movable) vector chunks are
   transferred.
+- On a GPU tile the apply is pinned to that device (`ExactScope`), not just
+  the worker (`ProcessScope`). A CPU-scoped apply would move GPU vector
+  chunks to host and restamp the Krylov workspace as `Array`, killing the
+  next GPU SpMV. Device-capable applies (Jacobi scale, dense vendor `lu` /
+  getrf, cuSPARSE / rocSPARSE ILU0) stay on-device. Host-only factors
+  (UMFPACK, CHOLMOD, AlgebraicMultigrid.jl, IncompleteLU.jl) still gather a
+  temporary RHS *inside* the GPU-scoped task; the DArray chunk itself stays
+  on the device. `BlockILUPreconditioner` does not require `IncompleteLU`
+  when CUDA or ROCm sparse is loaded — those backends build vendor ILU(0)
+  (`τ` is then ignored).
 
 A useful consequence of the per-tile design: with a **single tile**
 (`Blocks(n, n)`), any of these becomes a *global* preconditioner over the whole
@@ -432,6 +442,7 @@ Dagger.BlockPreconditioner
 Dagger.BlockJacobiPreconditioner
 Dagger.AdditiveSchwarzPreconditioner
 Dagger.BlockILUPreconditioner
+Dagger.DeviceILU0
 Dagger.AMGPreconditioner
 Dagger.GlobalAMG
 Dagger.SmoothedAggregationPreconditioner
