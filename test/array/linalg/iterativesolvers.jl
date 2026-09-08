@@ -30,20 +30,26 @@ function advection_diffusion_1d(T, n)
     )
 end
 
-# Serial restricted-ASM apply (PETSc PC_ASM_RESTRICT): solve each halo-expanded
-# diagonal block and write back only the interior. Used as the reference for
-# `AdditiveSchwarzPreconditioner`.
-function ras_mul!(y, A, x, blocksize, overlap)
+# Serial ASM apply. `:restrict` (PETSc `PC_ASM_RESTRICT`) writes only the
+# interior; `:basic` (`PC_ASM_BASIC`) scatter-adds the whole subdomain solve.
+function asm_mul!(y, A, x, blocksize, overlap, type=:restrict)
     n = length(x)
     fill!(y, 0)
     for s in 1:blocksize:n
         interior = s:min(s + blocksize - 1, n)
         Ω = max(1, first(interior) - overlap):min(n, last(interior) + overlap)
         yΩ = A[Ω, Ω] \ view(x, Ω)
-        y[interior] = yΩ[(first(interior) - first(Ω) + 1):(last(interior) - first(Ω) + 1)]
+        if type === :restrict
+            y[interior] = yΩ[(first(interior) - first(Ω) + 1):(last(interior) - first(Ω) + 1)]
+        elseif type === :basic
+            y[Ω] .+= yΩ
+        else
+            throw(ArgumentError("asm_mul! type must be :restrict or :basic, got $(repr(type))"))
+        end
     end
     return y
 end
+ras_mul!(y, A, x, blocksize, overlap) = asm_mul!(y, A, x, blocksize, overlap, :restrict)
 
 function true_relres(DA, x, b)
     r = similar(x)
@@ -307,10 +313,11 @@ end
         @test collect(x_ragged) ≈ xref rtol = 1e-6
     end
 
-    # Restricted additive Schwarz (PETSc PC_ASM_RESTRICT). Overlap 0 is block
-    # Jacobi; overlap ≥ 1 gathers neighbor rows, solves the halo-expanded
-    # diagonal block, and writes back only the interior. Check the true
-    # residual (AGENTS.md lesson 19 / 27), not only `stats.solved`.
+    # Overlapping additive Schwarz. Default type is PETSc PC_ASM_RESTRICT
+    # (write back only the interior). `type = :basic` is PC_ASM_BASIC
+    # (scatter-add the whole subdomain solve) and is the SPD-preserving
+    # option for CG. Overlap 0 is block Jacobi for either type. Check the
+    # true residual (AGENTS.md lesson 19 / 30), not only `stats.solved`.
     @testset "overlapping additive Schwarz" begin
         Asp = laplacian_1d(Float64, n)
         Adense = Matrix(Asp)
@@ -318,30 +325,44 @@ end
         xref = Adense \ b
         yref0 = ras_mul!(similar(b), Adense, b, k, 0)
         yref1 = ras_mul!(similar(b), Adense, b, k, 1)
+        yref1b = asm_mul!(similar(b), Adense, b, k, 1, :basic)
 
         @testset "build + apply ($(backend))" for backend in (:dense, :sparse)
             DA = backend === :dense ? distribute(Adense, A_part) : distribute(Asp, A_part)
             Db = distribute(b, Db_part)
 
             @test_throws ArgumentError Dagger.AdditiveSchwarzPreconditioner(DA; overlap = -1)
+            @test_throws ArgumentError Dagger.AdditiveSchwarzPreconditioner(DA; type = :none)
 
             P0 = Dagger.AdditiveSchwarzPreconditioner(DA; overlap = 0)
             P1 = Dagger.AdditiveSchwarzPreconditioner(DA; overlap = 1)
+            P1b = Dagger.AdditiveSchwarzPreconditioner(DA; overlap = 1, type = :basic)
             @test P0 isa Dagger.AbstractDaggerPreconditioner
             @test P0.overlap == 0
             @test P1.overlap == 1
+            @test P0.type === :restrict
+            @test P1.type === :restrict
+            @test P1b.type === :basic
 
             PBJ = Dagger.BlockJacobiPreconditioner(DA)
             y0 = similar(Db); mul!(y0, P0, Db)
             yBJ = similar(Db); mul!(yBJ, PBJ, Db)
             y1 = similar(Db); mul!(y1, P1, Db)
+            y1b = similar(Db); mul!(y1b, P1b, Db)
             @test collect(y0) ≈ yref0
             @test collect(y0) ≈ collect(yBJ)
             @test collect(y1) ≈ yref1
+            @test collect(y1b) ≈ yref1b
 
-            # Default overlap is PETSc's 1.
+            # Overlap 0 is block Jacobi for either type.
+            P0b = Dagger.AdditiveSchwarzPreconditioner(DA; overlap = 0, type = :basic)
+            y0b = similar(Db); mul!(y0b, P0b, Db)
+            @test collect(y0b) ≈ yref0
+
+            # Default overlap is PETSc's 1; default type is RESTRICT.
             Pdef = Dagger.AdditiveSchwarzPreconditioner(DA)
             @test Pdef.overlap == 1
+            @test Pdef.type === :restrict
             ydef = similar(Db); mul!(ydef, Pdef, Db)
             @test collect(ydef) ≈ yref1
 
@@ -359,11 +380,24 @@ end
 
         # Overlap that spans more than one neighboring tile.
         yref20 = ras_mul!(similar(b), Adense, b, k, 20)
+        yref20b = asm_mul!(similar(b), Adense, b, k, 20, :basic)
         DA = distribute(Asp, A_part)
         Db = distribute(b, Db_part)
         P20 = Dagger.AdditiveSchwarzPreconditioner(DA; overlap = 20)
+        P20b = Dagger.AdditiveSchwarzPreconditioner(DA; overlap = 20, type = :basic)
         y20 = similar(Db); mul!(y20, P20, Db)
+        y20b = similar(Db); mul!(y20b, P20b, Db)
         @test collect(y20) ≈ yref20
+        @test collect(y20b) ≈ yref20b
+
+        # BASIC is SPD when A is: y'Px ≈ x'Py and x'Px > 0.
+        Dx = distribute(rand(n), Db_part)
+        Dy = distribute(rand(n), Db_part)
+        Px = similar(Dx); mul!(Px, P20b, Dx)
+        Py = similar(Dy); mul!(Py, P20b, Dy)
+        @test LinearAlgebra.dot(collect(Dy), collect(Px)) ≈
+              LinearAlgebra.dot(collect(Dx), collect(Py)) rtol = 1e-10
+        @test LinearAlgebra.dot(collect(Dx), collect(Px)) > 0
 
         # A single tile makes ASM an exact solve regardless of overlap.
         DA1 = distribute(Adense, Blocks(n, n))
@@ -386,9 +420,10 @@ end
 
         # Overlap 1 must reduce iterations on a slightly harder operator
         # (standard 1-D Laplacian, weaker diagonal, many small subdomains).
-        # Use GMRES: RAS restriction is nonsymmetric, so CG can take *more*
-        # iterations with overlap (AGENTS.md lesson 27). n=64 / tiles of 8
-        # is still a 15=15 GMRES tie; tiles of 3 on n=48 is 31→17.
+        # Use GMRES with the default RESTRICT type: it is nonsymmetric, so CG
+        # can take *more* iterations with overlap (AGENTS.md lesson 30).
+        # n=64 / tiles of 8 is still a 15=15 GMRES tie; tiles of 3 on n=48
+        # is 31→17. The CG-safe option is `type = :basic`, tested below.
         nh, kh = 48, 3
         Ahard = SparseArrays.spdiagm(
             -1 => fill(-1.0, nh - 1),
@@ -425,6 +460,40 @@ end
         @test collect(x1a) ≈ xrefa rtol = 1e-6
         @test true_relres(DAa, x1a, Dba) < 1e-8
         @test s1a.niter <= s0a.niter
+
+        # CG needs an SPD-preserving apply. BASIC is that option; RESTRICT
+        # remains the default and may still be a poor CG pairing.
+        @testset "CG + BASIC (SPD-preserving)" begin
+            # n=64, tiles of 8 is the documented restrict+CG 15→171 case.
+            ncg, kcg = 64, 8
+            Acg = laplacian_1d(Float64, ncg)
+            bcg = rand(ncg)
+            xrefcg = Matrix(Acg) \ bcg
+            DAcg = distribute(Acg, Blocks(kcg, kcg))
+            Dbcg = distribute(bcg, Blocks(kcg))
+            Prest = Dagger.AdditiveSchwarzPreconditioner(DAcg; overlap = 1, type = :restrict)
+            Pbasic = Dagger.AdditiveSchwarzPreconditioner(DAcg; overlap = 1, type = :basic)
+
+            xb, sb = Dagger.cg(DAcg, Dbcg; M = Pbasic, atol = 1e-12, rtol = 1e-10, itmax = 500)
+            @test sb.solved
+            @test collect(xb) ≈ xrefcg rtol = 1e-6
+            @test true_relres(DAcg, xb, Dbcg) < 1e-8
+
+            # Documented leftover: restrict + CG is not required to converge.
+            # RAS interpolation is nonsymmetric, so this pairing can take far
+            # more iterations than overlap 0 (seen 15 → 171). Not a failure.
+            xr, sr = Dagger.cg(DAcg, Dbcg; M = Prest, atol = 1e-12, rtol = 1e-10, itmax = 500)
+            if sr.solved
+                @test true_relres(DAcg, xr, Dbcg) < 1e-6
+            end
+
+            # Same pairing on the harder 1-D Laplacian (many small tiles).
+            P1hb = Dagger.AdditiveSchwarzPreconditioner(DAh; overlap = 1, type = :basic)
+            xhb, shb = Dagger.cg(DAh, Dbh; M = P1hb, atol = 1e-12, rtol = 1e-10, itmax = 500)
+            @test shb.solved
+            @test collect(xhb) ≈ xrefh rtol = 1e-6
+            @test true_relres(DAh, xhb, Dbh) < 1e-8
+        end
     end
 end
 
