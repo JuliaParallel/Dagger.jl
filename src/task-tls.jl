@@ -8,6 +8,12 @@ mutable struct DTaskTLS
     cancel_token::CancelToken
     logging_enabled::Bool
     acceleration::Acceleration
+    # Scratch metrics cache for the executing thunk, so instrumentation deep
+    # inside `execute!` (e.g. `instrumented_move!`) can record into the same
+    # cache `do_task` drains. Reached through the TLS rather than a
+    # `ScopedValue`/`TaskLocalValue` because `ThreadProc.execute!` runs the
+    # thunk on a *sub-task*, which neither of those propagate back out of.
+    metrics_cache::Union{MT.MetricsCache, Nothing}
 end
 
 const DTASK_TLS = TaskLocalValue{Union{DTaskTLS,Nothing}}(()->nothing)
@@ -19,7 +25,8 @@ Base.copy(tls::DTaskTLS) =
              tls.task_spec,
              tls.cancel_token,
              tls.logging_enabled,
-             tls.acceleration)
+             tls.acceleration,
+             tls.metrics_cache)
 
 """
     get_tls() -> DTaskTLS
@@ -35,10 +42,11 @@ Sets all Dagger TLS variables from `tls`, which may be a `DTaskTLS` or a `NamedT
 """
 set_tls!(tls) = set_tls!(tls.processor, tls.sch_uid, tls.sch_handle,
                          tls.task_spec, tls.cancel_token,
-                         tls.logging_enabled, tls.acceleration)
+                         tls.logging_enabled, tls.acceleration,
+                         hasproperty(tls, :metrics_cache) ? tls.metrics_cache : nothing)
 # Positional form: hot callers (do_task) avoid building a NamedTuple per task
 function set_tls!(processor, sch_uid, sch_handle, task_spec, cancel_token,
-                  logging_enabled::Bool, acceleration)
+                  logging_enabled::Bool, acceleration, metrics_cache=nothing)
     # Reuse the existing DTaskTLS in place: pooled scheduler tasks call this
     # once per executed thunk, and nothing retains the old TLS across thunks
     # (`get_tls()` callers copy it if they need to keep it).
@@ -51,9 +59,11 @@ function set_tls!(processor, sch_uid, sch_handle, task_spec, cancel_token,
         dtls.cancel_token = cancel_token
         dtls.logging_enabled = logging_enabled
         dtls.acceleration = acceleration
+        dtls.metrics_cache = metrics_cache
     else
         DTASK_TLS[] = DTaskTLS(processor, sch_uid, sch_handle, task_spec,
-                               cancel_token, logging_enabled, acceleration)
+                               cancel_token, logging_enabled, acceleration,
+                               metrics_cache)
     end
     set_task_acceleration!(acceleration)
 end

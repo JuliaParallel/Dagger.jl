@@ -2395,7 +2395,7 @@ Executes a single task specified by `task` on `to_proc`.
         # Set TLS variables (positional form: no NamedTuple per task)
         Dagger.set_tls!(to_proc, task.sch_uid, task.sch_handle::SchedulerHandle, task,
                         Dagger.DTASK_CANCEL_TOKEN[], logging_enabled,
-                        Dagger.current_acceleration())
+                        Dagger.current_acceleration(), local_metrics_cache)
 
         result = Dagger.with_options(propagated) do
             @with TASK_SIGNATURE => task_sig TASK_PROCESSOR => to_proc TASK_WORKER => myid() TASK_TRANSFER_SIZE => transfer_size TASK_TRANSFER_TIME => transfer_time begin

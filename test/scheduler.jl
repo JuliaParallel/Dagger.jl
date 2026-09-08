@@ -548,6 +548,262 @@ end
             proc_values = MetricsTracker.values_for_metric(post_snap, Dagger, :execute!, Dagger.ProcessorMetric())
             @test any(v -> v isa Dagger.Processor, values(proc_values))
         end
+        end
+
+        @testset "Move Metric Types" begin
+            @test MetricsTracker.metric_type(Dagger.FromSpaceMetric) === Union{Dagger.MemorySpace, Nothing}
+            @test MetricsTracker.metric_type(Dagger.ToSpaceMetric) === Union{Dagger.MemorySpace, Nothing}
+            @test MetricsTracker.metric_type(Dagger.MoveSizeMetric) === Union{UInt64, Nothing}
+            @test MetricsTracker.metric_applies(Dagger.FromSpaceMetric(), Val{:execute!}())
+            @test MetricsTracker.metric_applies(Dagger.ToSpaceMetric(), Val{:execute!}())
+            @test MetricsTracker.metric_applies(Dagger.MoveSizeMetric(), Val{:execute!}())
+        end
+
+        @testset "_record_move_metrics! writes From/To/Size to cache" begin
+            cache = MetricsTracker.MetricsCache()
+            src_space = Dagger.memory_space(1)
+            dst_space = Dagger.memory_space(1)
+            test_key = 1234
+            Dagger._record_move_metrics!(cache, test_key, src_space, dst_space, UInt64(4096))
+            snap = MetricsTracker.snapshot(cache)
+            @test MetricsTracker.lookup_value(snap, Dagger, :execute!, Dagger.FromSpaceMetric(), test_key) === src_space
+            @test MetricsTracker.lookup_value(snap, Dagger, :execute!, Dagger.ToSpaceMetric(), test_key) === dst_space
+            @test MetricsTracker.lookup_value(snap, Dagger, :execute!, Dagger.MoveSizeMetric(), test_key) == UInt64(4096)
+        end
+
+        @testset "_record_move_metrics! skips MoveSizeMetric when size is nothing" begin
+            cache = MetricsTracker.MetricsCache()
+            src_space = Dagger.memory_space(1)
+            dst_space = Dagger.memory_space(1)
+            test_key = 1235
+            Dagger._record_move_metrics!(cache, test_key, src_space, dst_space, nothing)
+            snap = MetricsTracker.snapshot(cache)
+            @test MetricsTracker.lookup_value(snap, Dagger, :execute!, Dagger.FromSpaceMetric(), test_key) === src_space
+            @test MetricsTracker.lookup_value(snap, Dagger, :execute!, Dagger.ToSpaceMetric(), test_key) === dst_space
+            @test MetricsTracker.lookup_value(snap, Dagger, :execute!, Dagger.MoveSizeMetric(), test_key) === nothing
+        end
+
+        @testset "EXECUTE_METRICS_SPEC excludes move metrics" begin
+            spec_metrics = Dagger.execute_metrics_spec().metrics
+            @test !any(m -> m isa Dagger.FromSpaceMetric, spec_metrics)
+            @test !any(m -> m isa Dagger.ToSpaceMetric, spec_metrics)
+            @test !any(m -> m isa Dagger.MoveSizeMetric, spec_metrics)
+            @test any(m -> m isa Dagger.SignatureMetric, spec_metrics)
+            @test any(m -> m isa MetricsTracker.TimeMetric, spec_metrics)
+        end
+
+        @testset "DTaskTLS carries metrics_cache field" begin
+            @test :metrics_cache in fieldnames(Dagger.DTaskTLS)
+        end
+
+        @testset "Move Lookups" begin
+            cache = MetricsTracker.global_metrics_cache()
+            src_space = Dagger.memory_space(1)
+            dst_space = Dagger.memory_space(1)
+            move_key_a = 888_888_001
+            move_key_b = 888_888_002
+
+            MetricsTracker.bulk_update!(cache) do c
+                ctx = MetricsTracker.pending_context!(c, Dagger, :execute!, Int)
+                from_storage = MetricsTracker.get_or_create_storage!(ctx, Dagger.FromSpaceMetric())
+                to_storage = MetricsTracker.get_or_create_storage!(ctx, Dagger.ToSpaceMetric())
+                size_storage = MetricsTracker.get_or_create_storage!(ctx, Dagger.MoveSizeMetric())
+                time_storage = MetricsTracker.get_or_create_storage!(ctx, MetricsTracker.TimeMetric())
+                MetricsTracker.set_metric_value!(from_storage, move_key_a, src_space)
+                MetricsTracker.set_metric_value!(to_storage, move_key_a, dst_space)
+                MetricsTracker.set_metric_value!(size_storage, move_key_a, UInt64(1_000_000))
+                MetricsTracker.set_metric_value!(time_storage, move_key_a, UInt64(1_000_000))
+                MetricsTracker.set_metric_value!(from_storage, move_key_b, src_space)
+                MetricsTracker.set_metric_value!(to_storage, move_key_b, dst_space)
+                MetricsTracker.set_metric_value!(size_storage, move_key_b, UInt64(3_000_000))
+                MetricsTracker.set_metric_value!(time_storage, move_key_b, UInt64(3_000_000))
+            end
+
+            snap = MetricsTracker.snapshot(cache)
+            t = Dagger.metrics_lookup_move_time(snap, src_space, dst_space)
+            @test t isa UInt64 && t > 0
+            r = Dagger.metrics_lookup_move_rate(snap, src_space, dst_space)
+            @test r isa UInt64
+            @test r ≈ round(UInt64, 4_000_000 / (4_000_000 / 1e9))
+
+            MetricsTracker.bulk_update!(cache) do c
+                ctx = MetricsTracker.pending_context!(c, Dagger, :execute!, Int)
+                for m in (Dagger.FromSpaceMetric(), Dagger.ToSpaceMetric(),
+                          Dagger.MoveSizeMetric(), MetricsTracker.TimeMetric())
+                    storage = MetricsTracker.get_or_create_storage!(ctx, m)
+                    MetricsTracker.delete_metric_value!(storage, move_key_a)
+                    MetricsTracker.delete_metric_value!(storage, move_key_b)
+                end
+            end
+        end
+
+        @testset "metrics_lookup_move_* nothing on empty" begin
+            empty_cache = MetricsTracker.MetricsCache()
+            snap = MetricsTracker.snapshot(empty_cache)
+            src_space = Dagger.memory_space(1)
+            dst_space = Dagger.memory_space(1)
+            @test Dagger.metrics_lookup_move_time(snap, src_space, dst_space) === nothing
+            @test Dagger.metrics_lookup_move_rate(snap, src_space, dst_space) === nothing
+        end
+
+        @testset "Runtime Reducer Variants" begin
+            cache = MetricsTracker.global_metrics_cache()
+            test_sig = Any[typeof(MyStruct), MyStruct, Int64]
+            test_proc = tproc1_1
+            base_key = 777_777_000
+
+            keys_used = Int[]
+            try
+                MetricsTracker.bulk_update!(cache) do c
+                    ctx = MetricsTracker.pending_context!(c, Dagger, :execute!, Int)
+                    sig_storage = MetricsTracker.get_or_create_storage!(ctx, Dagger.SignatureMetric())
+                    proc_storage = MetricsTracker.get_or_create_storage!(ctx, Dagger.ProcessorMetric())
+                    worker_storage = MetricsTracker.get_or_create_storage!(ctx, Dagger.WorkerMetric())
+                    time_storage = MetricsTracker.get_or_create_storage!(ctx, MetricsTracker.ThreadTimeMetric())
+                    for (i, t) in enumerate([UInt64(100), UInt64(200), UInt64(300), UInt64(500), UInt64(900)])
+                        key = base_key + i
+                        push!(keys_used, key)
+                        MetricsTracker.set_metric_value!(sig_storage, key, test_sig)
+                        MetricsTracker.set_metric_value!(proc_storage, key, test_proc)
+                        MetricsTracker.set_metric_value!(worker_storage, key, 1)
+                        MetricsTracker.set_metric_value!(time_storage, key, t)
+                    end
+                end
+                snap = MetricsTracker.snapshot(cache)
+                @test Dagger.metrics_lookup_runtime_min(snap, test_sig, test_proc, 1) == UInt64(100)
+                @test Dagger.metrics_lookup_runtime_max(snap, test_sig, test_proc, 1) == UInt64(900)
+                @test Dagger.metrics_lookup_runtime_mean(snap, test_sig, test_proc, 1) == UInt64(400)
+                @test Dagger.metrics_lookup_runtime_median(snap, test_sig, test_proc, 1) == UInt64(300)
+                @test Dagger.metrics_lookup_runtime(snap, test_sig, test_proc, 1) in [UInt64(100), UInt64(200), UInt64(300), UInt64(500), UInt64(900)]
+                @test Dagger.metrics_lookup_runtime(snap, test_sig, test_proc, 1; reducer=Statistics.mean) == UInt64(400)
+
+                empty_sig = Any[typeof(println)]
+                @test Dagger.metrics_lookup_runtime_median(snap, empty_sig, test_proc, 1) === nothing
+            finally
+                MetricsTracker.bulk_update!(cache) do c
+                    ctx = MetricsTracker.pending_context!(c, Dagger, :execute!, Int)
+                    for m in (Dagger.SignatureMetric(), Dagger.ProcessorMetric(),
+                              Dagger.WorkerMetric(), MetricsTracker.ThreadTimeMetric())
+                        storage = MetricsTracker.get_or_create_storage!(ctx, m)
+                        for k in keys_used
+                            MetricsTracker.delete_metric_value!(storage, k)
+                        end
+                    end
+                end
+            end
+        end
+
+        @testset "Alloc Reducer Variants" begin
+            cache = MetricsTracker.global_metrics_cache()
+            test_sig = Any[typeof(MyStruct), MyStruct, Float64]
+            test_proc = tproc1_1
+            base_key = 666_666_000
+
+            keys_used = Int[]
+            try
+                MetricsTracker.bulk_update!(cache) do c
+                    ctx = MetricsTracker.pending_context!(c, Dagger, :execute!, Int)
+                    sig_storage = MetricsTracker.get_or_create_storage!(ctx, Dagger.SignatureMetric())
+                    proc_storage = MetricsTracker.get_or_create_storage!(ctx, Dagger.ProcessorMetric())
+                    alloc_storage = MetricsTracker.get_or_create_storage!(ctx, MetricsTracker.AllocMetric())
+                    for (i, allocd_bytes) in enumerate([100, 200, 300, 500, 900])
+                        key = base_key + i
+                        push!(keys_used, key)
+                        MetricsTracker.set_metric_value!(sig_storage, key, test_sig)
+                        MetricsTracker.set_metric_value!(proc_storage, key, test_proc)
+                        gc_diff = Base.GC_Diff(allocd_bytes, 0, 0, 0, 0, 0, 0, 0, 0)
+                        MetricsTracker.set_metric_value!(alloc_storage, key, gc_diff)
+                    end
+                end
+                snap = MetricsTracker.snapshot(cache)
+                @test Dagger.metrics_lookup_alloc_min(snap, test_sig, test_proc) == UInt64(100)
+                @test Dagger.metrics_lookup_alloc_max(snap, test_sig, test_proc) == UInt64(900)
+                @test Dagger.metrics_lookup_alloc_mean(snap, test_sig, test_proc) == UInt64(400)
+                @test Dagger.metrics_lookup_alloc_median(snap, test_sig, test_proc) == UInt64(300)
+            finally
+                MetricsTracker.bulk_update!(cache) do c
+                    ctx = MetricsTracker.pending_context!(c, Dagger, :execute!, Int)
+                    for m in (Dagger.SignatureMetric(), Dagger.ProcessorMetric(),
+                              MetricsTracker.AllocMetric())
+                        storage = MetricsTracker.get_or_create_storage!(ctx, m)
+                        for k in keys_used
+                            MetricsTracker.delete_metric_value!(storage, k)
+                        end
+                    end
+                end
+            end
+        end
+
+        @testset "Move Time Reducer Variants" begin
+            cache = MetricsTracker.global_metrics_cache()
+            src_space = Dagger.memory_space(1)
+            dst_space = Dagger.memory_space(1)
+            base_key = 555_555_000
+
+            keys_used = Int[]
+            try
+                MetricsTracker.bulk_update!(cache) do c
+                    ctx = MetricsTracker.pending_context!(c, Dagger, :execute!, Int)
+                    from_storage = MetricsTracker.get_or_create_storage!(ctx, Dagger.FromSpaceMetric())
+                    to_storage = MetricsTracker.get_or_create_storage!(ctx, Dagger.ToSpaceMetric())
+                    time_storage = MetricsTracker.get_or_create_storage!(ctx, MetricsTracker.TimeMetric())
+                    for (i, t) in enumerate([UInt64(100), UInt64(200), UInt64(300), UInt64(500), UInt64(900)])
+                        key = base_key + i
+                        push!(keys_used, key)
+                        MetricsTracker.set_metric_value!(from_storage, key, src_space)
+                        MetricsTracker.set_metric_value!(to_storage, key, dst_space)
+                        MetricsTracker.set_metric_value!(time_storage, key, t)
+                    end
+                end
+                snap = MetricsTracker.snapshot(cache)
+                @test Dagger.metrics_lookup_move_time(snap, src_space, dst_space) == UInt64(400)
+                @test Dagger.metrics_lookup_move_time_median(snap, src_space, dst_space) == UInt64(300)
+                @test Dagger.metrics_lookup_move_time_min(snap, src_space, dst_space) == UInt64(100)
+                @test Dagger.metrics_lookup_move_time_max(snap, src_space, dst_space) == UInt64(900)
+            finally
+                MetricsTracker.bulk_update!(cache) do c
+                    ctx = MetricsTracker.pending_context!(c, Dagger, :execute!, Int)
+                    for m in (Dagger.FromSpaceMetric(), Dagger.ToSpaceMetric(),
+                              MetricsTracker.TimeMetric())
+                        storage = MetricsTracker.get_or_create_storage!(ctx, m)
+                        for k in keys_used
+                            MetricsTracker.delete_metric_value!(storage, k)
+                        end
+                    end
+                end
+            end
+        end
+
+        @testset "instrumented_move! records via TLS in real Dagger task" begin
+            cache = MetricsTracker.global_metrics_cache()
+            pre_snap = MetricsTracker.snapshot(cache)
+            pre_count = if haskey(pre_snap.contexts, (Dagger, :execute!))
+                length(MetricsTracker.values_for_metric(pre_snap, Dagger, :execute!, Dagger.FromSpaceMetric()))
+            else
+                0
+            end
+
+            src_data = rand(64)
+            dst_data = zeros(64)
+            src_chunk = Dagger.tochunk(src_data)
+            dst_chunk = Dagger.tochunk(dst_data)
+            src_space = Dagger.memory_space(src_chunk)
+            dst_space = Dagger.memory_space(dst_chunk)
+
+            move_task = Dagger.@spawn meta=true Dagger.instrumented_move!(identity, dst_space, src_space, dst_chunk, src_chunk)
+            fetch(move_task)
+            sleep(0.1)
+
+            post_snap = MetricsTracker.snapshot(cache)
+            from_values = MetricsTracker.values_for_metric(post_snap, Dagger, :execute!, Dagger.FromSpaceMetric())
+            to_values = MetricsTracker.values_for_metric(post_snap, Dagger, :execute!, Dagger.ToSpaceMetric())
+            size_values = MetricsTracker.values_for_metric(post_snap, Dagger, :execute!, Dagger.MoveSizeMetric())
+
+            @test length(from_values) > pre_count
+            @test any(v -> v === src_space, values(from_values))
+            @test any(v -> v === dst_space, values(to_values))
+            @test any(v -> v isa UInt64 && v > 0, values(size_values))
+        end
     end
 end
 
