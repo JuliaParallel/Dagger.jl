@@ -6,7 +6,7 @@ branches; they do **not** merge into this workspace branch, and they do **not**
 edit other agents' rows here. Report status in your final message so the
 coordinator can update the table.
 
-Last coordinator pass: 2026-09-07 (`linalg/ras-symmetric` merged; remaining P0 leftover and other P1 workstreams still in progress on siblings).
+Last coordinator pass: 2026-09-07 (`linalg/slicing` merged; remaining P0 leftover and other P1 workstreams still in progress on siblings).
 
 ---
 
@@ -258,7 +258,7 @@ Priority: **P0 done** = merged onto `Dagger-linalg-ultra`. **P0 leftover** = fol
 | P1 | gpu-pc | done | `linalg/gpu-pc` @ `430aa1b2` | Device-side block-PC apply (Jacobi / ILU / AMG / RAS) keeps GPU Krylov vectors in VRAM (`memory_space_scope`, vendor LU / `DeviceILU0`). CPU `array/linalg/iterativesolvers` 404 passed; ROCm RX 6800 XT `gpu_pc_defs` 14/14. CUDA / MPI×GPU / Metal / OpenCL / oneAPI not device-validated. | 2026-09-07 |
 | P1 | near-nullspace | in progress | `linalg/near-nullspace` | Near-nullspace / rigid-body modes into GlobalAMG / smoothed aggregation (builds on `Projected`). | 2026-09-07 |
 | P1 | block-krylov | in progress | `linalg/block-krylov` | Block / multi-RHS Krylov on `DArray` (ecosystem hooks, not a new solver type). | 2026-09-07 |
-| P1 | slicing | in progress | `linalg/slicing` | Distributed `getindex` / views / subarray slicing that preserves tile backend (no silent densify). | 2026-09-07 |
+| P1 | slicing | done | `linalg/slicing` @ `48bc09d4` | Range `getindex` / `view` / `setindex!` match Base and stay tiled (one task per tile pair). **`view` remains `SubArray`** (intentional; not a DArray-valued view). StepRange `copyto!` still throws. AWS: indexing 251, copyto 650. | 2026-09-07 |
 
 ---
 
@@ -279,6 +279,7 @@ Priority: **P0 done** = merged onto `Dagger-linalg-ultra`. **P0 leftover** = fol
 | 2026-09-07 | `405b3a69` `linalg/numeric-refactor` @ `f4265d49` | Conflict: `AGENTS.md` (kept GPU-PC lesson 35; numeric-refactor is 36). Docs/ext/tests auto-merged. AWS: global_amg 113, sparsedirect 349, linearsolve 33, assembly 64. PureUMFPACK cannot cheap-refactor. |
 | 2026-09-07 | `0ab8911b` `linalg/stencil-gmg` @ `f78eae25` | Conflict: `AGENTS.md` (kept GPU-PC 35 + numeric-refactor 36; GMG is 37). Docs/`runtests`/`SparseArraysExt` auto-merged. Auto-merge also duplicated `DaggerSparseLU \ DVector`; kept the numeric-refactor concrete methods (also covers Cholesky) and dropped the incoming `invoke`. **FLAG:** `jps/sparse-stencil` is same-idx halo only — not usable for restriction/prolongation; GMG is matrix-based. AWS: gmg 158/158, full array/linalg pass, GlobalAMG 113 unchanged. |
 | 2026-09-07 | `3fddd5f6` `linalg/ras-symmetric` @ `a552987b` | Conflicts: `docs/src/index.md`, `docs/src/iterative-solving.md` (union: incoming `:restrict`/`:basic` plus HEAD GPU ILU / GMG wording). AGENTS/src/tests auto-merged (lesson 30 now documents `:basic`). Auto-merge also duplicated `DaggerSparseLU \ DVector`; kept the numeric-refactor `_solve_pinned_dvector` methods and dropped the incoming `invoke`. AWS: iterativesolvers 419/419, full array/linalg pass. |
+| 2026-09-07 | `f3128a64` `linalg/slicing` @ `48bc09d4` | Conflict: `AGENTS.md` (kept GPU-PC 35 + numeric-refactor 36 + GMG 37; slicing `view`/`SubArray` is 38). FEATURES_ROADMAP / `darray.md` / indexing / copy / tests auto-merged. **`view` stays `SubArray`** (intentional). StepRange `copyto!` still throws. No `DaggerSparseLU \ DVector` change. AWS: indexing 251, copyto 650. |
 
 ## Remaining follow-ups
 
@@ -290,7 +291,7 @@ Unassigned leftover from P0:
 
 - **`inv` on a sparse-backed `DMatrix`** uses the sparse factor (`factorize` + `ldiv!` into `I`) rather than a dedicated sparse inverse. The result is still a dense `I` solve.
 
-`AGENTS.md` lessons 27–37 are the union of the per-workstream lesson 27s (LinearSolve `DefaultLinearSolver`; ASM `:restrict` / `:basic`; GlobalAMG vs per-tile residual; qualify `cholesky!`/`mul!`; `SparseCOOBucket` not in datadeps; Projected orthonormalize / `Adjoint` `mul!`; `hvcat` is not `MatNest`; GPU block-PC `ProcessScope` gather; sparse `lu!(F, A)` / PureUMFPACK cannot cheap-refactor; `@stencil` cannot express GMG transfers). Lesson 20 remains unused (pre-existing gap).
+`AGENTS.md` lessons 27–38 are the union of the per-workstream lesson 27s (LinearSolve `DefaultLinearSolver`; ASM `:restrict` / `:basic`; GlobalAMG vs per-tile residual; qualify `cholesky!`/`mul!`; `SparseCOOBucket` not in datadeps; Projected orthonormalize / `Adjoint` `mul!`; `hvcat` is not `MatNest`; GPU block-PC `ProcessScope` gather; sparse `lu!(F, A)` / PureUMFPACK cannot cheap-refactor; `@stencil` cannot express GMG transfers; `view(::DArray)` stays `SubArray`). Lesson 20 remains unused (pre-existing gap).
 
 ---
 
