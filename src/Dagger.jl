@@ -146,6 +146,7 @@ include("array/svd.jl")
 include("array/iterativesolvers.jl")
 include("array/projected.jl")
 include("array/blockoperator.jl")
+include("array/eigen.jl")
 include("array/sparsedirect.jl")
 include("array/amg.jl")
 
