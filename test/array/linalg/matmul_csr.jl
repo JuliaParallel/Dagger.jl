@@ -161,8 +161,11 @@ else
         DA = sparsecsr(distribute(A, Blocks(k, k)), Blocks(k, k))
         @test _csr_inner(DA) isa SparseMatricesCSR.SparseMatrixCSR
         Db = distribute(b, Blocks(k))
-        x, stats = Dagger.cg(DA, Db; atol=1e-8, rtol=1e-8, itmax=500)
-        @test stats.solved
+        x, stats = Krylov.cg(DA, Db; atol=1e-8, rtol=1e-8, itmax=500)
+        r = similar(Db)
+        mul!(r, DA, x)
+        axpy!(-1, Db, r)
+        @test LinearAlgebra.norm(collect(r)) / LinearAlgebra.norm(b) < 1e-6
         @test collect(x) ≈ Matrix(A) \ b rtol=1e-6
     end
 end

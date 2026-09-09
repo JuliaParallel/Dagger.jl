@@ -651,3 +651,21 @@ lesson.
    movement was designed for Datadeps; do **not** invent a second MPI path
    for these kernels. Do not fuse across Krylov's scalar `α` and do not
    add `Dagger.cg`. The guard is `_blas1_tiles_local`.
+
+50. **Host BSR is `SparseMatrixBSR`, not `Dagger.BSR` as the type.** There is
+    still no ecosystem BSR package (`BlockArrays` is dense mortar;
+    `CuSparseMatrixBSR` is device-only). The type is block-CSR (`blocksize`,
+    `rowptr`, `colval`, `nzval`) so it can move out later; `Dagger.BSR` is
+    only an alias. CSC stays the default tile; host CSR stays on
+    SparseMatricesCSR; GPU may stay CSC. Wire `mul!` / `*` / `distribute` /
+    `sparsebsr` / `spzeros(SparseMatrixBSR, ...)` — not `Dagger.bsr_mul`.
+    Range `getindex` must return BSR so `distribute` does not densify
+    (lesson 44). SpGEMM / transposed SpMV may gather a *tile* to CSC.
+    Repartition still allocates CSC zeros (`DArray` does not record the
+    inner format); `sparsebsr(A, part, blocksize)` converts back. Block
+    PCs collect a tile to CSC via `_sparse_collect`. Extensions must *add*
+    more-specific hooks (`_sparse_collect(::SparseMatrixBSR)`,
+    `_dmatrix_host_sparse(::DMatrix)`, `_bsr_matvecmul_trans!` on BSR) —
+    they must not overwrite a core method of the same signature (Julia
+    forbids that during precompilation). Check `‖Ax−b‖`, not only
+    `stats.solved`.

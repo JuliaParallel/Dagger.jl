@@ -5,7 +5,7 @@ import SparseArrays: SparseMatrixCSC, SparseVector
 import LinearAlgebra
 import Dagger
 import Dagger: Blocks, AutoBlocks, BlocksOrAuto, AssignmentType, DSparseArray, DSparseMatrix
-import Dagger: DArray, DMatrix, DVector, SparseCOOBucket
+import Dagger: DArray, DMatrix, DVector, SparseCOOBucket, SparseMatrixBSR, sparsebsr
 import Dagger: GeometricMultigrid, GeometricMGLevel
 
 # Keep tiles sparse through `collect`/`cat`; the outer `collect` densifies.
@@ -746,5 +746,80 @@ function Dagger.GeometricMultigrid(A::Dagger.DMatrix{T};
     return GeometricMultigrid(levels, coarse, A, Float64(relax), Int(presweeps),
                               Int(postsweeps), n, part, g0, r_show, p_show)
 end
+
+#------------------------------------------------------------------------------
+# SparseMatrixBSR (host block-CSR tiles)
+#------------------------------------------------------------------------------
+
+function SparseArrays.SparseMatrixCSC{Tv,Ti}(A::SparseMatrixBSR) where {Tv,Ti}
+    I, J, V = Dagger._bsr_findnz(A)
+    return SparseArrays.sparse(Tv.(I), Ti.(J), Tv.(V), size(A)...)
+end
+SparseArrays.SparseMatrixCSC(A::SparseMatrixBSR{Tv,Ti}) where {Tv,Ti} =
+    SparseArrays.SparseMatrixCSC{Tv,Ti}(A)
+SparseArrays.sparse(A::SparseMatrixBSR) = SparseArrays.SparseMatrixCSC(A)
+SparseArrays.findnz(A::SparseMatrixBSR) = Dagger._bsr_findnz(A)
+SparseArrays.nnz(A::SparseMatrixBSR) = length(A.nzval)
+
+Dagger._sparse_collect(A::SparseMatrixBSR) = SparseArrays.SparseMatrixCSC(A)
+
+function Dagger._bsr_matvecmul_trans!(C::AbstractVector, transA::Char, A::SparseMatrixBSR,
+                                      B::AbstractVector, alpha, beta)
+    return LinearAlgebra.mul!(C, _apply_trans(SparseArrays.SparseMatrixCSC(A), transA), B, alpha, beta)
+end
+
+function _bsr_spgemm!(C::DSparseMatrix, transA::Char, transB::Char, A, B, alpha, beta)
+    opA = _apply_trans(SparseArrays.SparseMatrixCSC(A isa SparseMatrixBSR ? A : Dagger._sparse_collect(A)), transA)
+    opB = _apply_trans(SparseArrays.SparseMatrixCSC(B isa SparseMatrixBSR ? B : Dagger._sparse_collect(B)), transB)
+    AB = opA * opB
+    prod = isone(alpha) ? SparseMatrixCSC(AB) : SparseMatrixCSC(alpha * AB)
+    bs = C.mat isa SparseMatrixBSR ? C.mat.blocksize :
+         A isa SparseMatrixBSR ? A.blocksize : (1, 1)
+    if iszero(beta)
+        C.mat = SparseMatrixBSR(prod, bs)
+    else
+        Ch = SparseArrays.SparseMatrixCSC(C.mat isa SparseMatrixBSR ? C.mat : Dagger._sparse_collect(C.mat))
+        result = isone(beta) ? prod + Ch : prod + beta * Ch
+        C.mat = SparseMatrixBSR(SparseMatrixCSC(result), bs)
+    end
+    return C
+end
+
+function Dagger.matmatmul!(C::DSparseMatrix, transA::Char, transB::Char,
+                           A::SparseMatrixBSR, B::SparseMatrixBSR, alpha, beta)
+    return _bsr_spgemm!(C, transA, transB, A, B, alpha, beta)
+end
+function Dagger.matmatmul!(C::DSparseMatrix, transA::Char, transB::Char,
+                           A::SparseMatrixBSR, B::SparseMatrixCSC, alpha, beta)
+    return _bsr_spgemm!(C, transA, transB, A, B, alpha, beta)
+end
+function Dagger.matmatmul!(C::DSparseMatrix, transA::Char, transB::Char,
+                           A::SparseMatrixCSC, B::SparseMatrixBSR, alpha, beta)
+    return _bsr_spgemm!(C, transA, transB, A, B, alpha, beta)
+end
+
+# More specific than core `_dmatrix_host_sparse(A) = collect(A)` — no overwrite.
+Dagger._dmatrix_host_sparse(A::DMatrix) = SparseArrays.sparse(A)
+
+function Dagger.sparsebsr(I::_COOIndexVec, J::_COOIndexVec, V::AbstractVector,
+                          m::Integer, n::Integer, blocksize::Tuple{Integer,Integer},
+                          part::Blocks{2}; assignment::AssignmentType=:arbitrary)
+    A = SparseArrays.sparse(I, J, V, Int(m), Int(n), +, part; assignment)
+    return sparsebsr(A, part, blocksize)
+end
+
+function SparseArrays.spzeros(::Type{<:SparseMatrixBSR}, p::Blocks{2}, T::Type, dims::Dims{2};
+                              blocksize::Tuple{Integer,Integer}=(1, 1),
+                              assignment::AssignmentType=:arbitrary)
+    return Dagger._spzeros_bsr(p, T, dims, (Int(blocksize[1]), Int(blocksize[2])); assignment)
+end
+SparseArrays.spzeros(::Type{<:SparseMatrixBSR}, p::Blocks{2}, T::Type, m::Integer, n::Integer;
+                     blocksize::Tuple{Integer,Integer}=(1, 1),
+                     assignment::AssignmentType=:arbitrary) =
+    SparseArrays.spzeros(SparseMatrixBSR, p, T, (Int(m), Int(n)); blocksize, assignment)
+SparseArrays.spzeros(::Type{<:SparseMatrixBSR}, p::Blocks{2}, m::Integer, n::Integer;
+                     blocksize::Tuple{Integer,Integer}=(1, 1),
+                     assignment::AssignmentType=:arbitrary) =
+    SparseArrays.spzeros(SparseMatrixBSR, p, Float64, (Int(m), Int(n)); blocksize, assignment)
 
 end # module SparseArraysExt

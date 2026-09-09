@@ -143,7 +143,7 @@ Whether `x` is a bare sparse container that Datadeps must see through a
 [`DSparseArray`](@ref) wrapper rather than directly.
 
 Such containers reallocate their storage on write and (for `SparseMatrixCSC`,
-`SparseMatrixCSR`, and Finch tensors) are *immutable* structs, so they have no
+`SparseMatrixCSR`, `SparseMatrixBSR`, and Finch tensors) are *immutable* structs, so they have no
 stable object identity to hang whole-object aliasing off of, and no meaningful
 data pointer for the span machinery. `DSparseArray` supplies both.
 
