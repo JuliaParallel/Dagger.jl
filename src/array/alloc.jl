@@ -167,9 +167,15 @@ end
 # Initializers
 
 function Base.fill!(A::DArray, x)
-    spawn_datadeps() do
+    if _blas1_tiles_local(A.chunks)
         for chunk in A.chunks
-            Dagger.@spawn fill!(chunk, x)
+            fill!(fetch(chunk), x)
+        end
+    else
+        spawn_datadeps() do
+            for chunk in A.chunks
+                Dagger.@spawn fill!(chunk, x)
+            end
         end
     end
     return A

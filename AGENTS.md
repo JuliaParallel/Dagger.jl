@@ -637,3 +637,15 @@ lesson.
    A sparse-backed `DMatrix` hitting that path is the same densify footgun
    as generic `eigen` (lesson 43) — throw, and leave LOBPCG `eigen` as the
    few-pair entry. This is not ScaLAPACK; `schur!` is not in-place on tiles.
+
+48. **Local BLAS-1 skips Datadeps because region overhead dominates the SIMD.**
+   A 4-tile `axpy!` via `spawn_datadeps` is ~1.23 ms vs ~0.7 µs host BLAS.
+   `dot` / `axpy!` / `axpby!` / `rmul!` / `lmul!` / `norm` / `copyto!` /
+   `fill!` therefore run a plain tile loop when **every** chunk is already a
+   local `ThreadProc` in `CPURAMMemorySpace` (same-process host RAM, DRef
+   owner is `myid()`). Anything else — a non-thread processor, a remote
+   worker, GPU / MPI spaces, or a handle owned elsewhere — keeps
+   `spawn_datadeps` (in-place) or the existing `@spawn` reduction. MPI
+   movement was designed for Datadeps; do **not** invent a second MPI path
+   for these kernels. Do not fuse across Krylov's scalar `α` and do not
+   add `Dagger.cg`. The guard is `_blas1_tiles_local`.

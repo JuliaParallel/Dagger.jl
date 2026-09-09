@@ -1,8 +1,113 @@
+# --- BLAS-1 local fast path -----------------------------------------------
+# Per-op `spawn_datadeps` on a 4-tile `axpy!` is ~1.23 ms vs ~0.7 µs host BLAS
+# (the SIMD is lost under region + thunk setup). When every tile is already a
+# local `ThreadProc` host chunk, run the kernels in a plain loop. MPI / remote
+# workers / GPU / non-thread processors keep `spawn_datadeps`: Datadeps is how
+# distributed movement is designed, and a second MPI path is intentionally not
+# provided (see AGENTS.md lesson 48).
+
+function _as_chunk(c)
+    c isa Chunk && return c
+    return fetch(c; raw=true)
+end
+
+function _is_local_thread_chunk(c)
+    ch = try
+        _as_chunk(c)
+    catch
+        return false
+    end
+    ch isa Chunk || return false
+    proc = processor(ch)
+    proc isa ThreadProc || return false
+    is_local_processor(proc) || return false
+    ch.space isa CPURAMMemorySpace || return false
+    h = ch.handle
+    if h isa MemPool.DRef && h.owner != myid()
+        return false
+    end
+    return true
+end
+
+"""
+    _blas1_tiles_local(chunkses...) -> Bool
+
+`true` when every chunk is already on a local `ThreadProc` in host RAM.
+Otherwise the caller must use `spawn_datadeps` (or the existing `@spawn`
+reduction) so MPI / remote / GPU movement stays on the Datadeps path.
+"""
+function _blas1_tiles_local(chunkses...)
+    for chunks in chunkses
+        for c in chunks
+            _is_local_thread_chunk(c) || return false
+        end
+    end
+    return true
+end
+
+function _inds_span_full(A, inds)
+    n = ndims(A)
+    length(inds) == n || return false
+    for d in 1:n
+        idx = inds[d]
+        ax = axes(A, d)
+        if idx isa Colon
+            continue
+        elseif idx isa Integer
+            return false
+        elseif idx isa AbstractUnitRange
+            first(idx) == first(ax) && last(idx) == last(ax) || return false
+            step(idx) == 1 || return false
+        else
+            return false
+        end
+    end
+    return true
+end
+
+function _blas1_copyto_local_ok(B::DArray, A::DArray, Binds, Ainds)
+    ndims(B) == ndims(A) || return false
+    size(B) == size(A) || return false
+    B.partitioning == A.partitioning || return false
+    _inds_span_full(B, Binds) || return false
+    _inds_span_full(A, Ainds) || return false
+    return _blas1_tiles_local(B.chunks, A.chunks)
+end
+
+function _blas1_copyto_local!(B::DArray, A::DArray)
+    Bc, Ac = B.chunks, A.chunks
+    for i in eachindex(Bc)
+        copyto!(fetch(Bc[i]), fetch(Ac[i]))
+    end
+    return B
+end
+
 function LinearAlgebra.norm2(A::DArray{T,N}) where {T,N}
     Ac = A.chunks
-    norms = [Dagger.@spawn mapreduce(LinearAlgebra.norm_sqr, +, chunk) for chunk in Ac]::Array{DTask,N}
     zeroRT = zero(real(T))
+    if !isempty(Ac) && _blas1_tiles_local(Ac)
+        s = zeroRT
+        for chunk in Ac
+            s += mapreduce(LinearAlgebra.norm_sqr, +, fetch(chunk); init=zeroRT)
+        end
+        return sqrt(s)
+    end
+    norms = [Dagger.@spawn mapreduce(LinearAlgebra.norm_sqr, +, chunk) for chunk in Ac]::Array{DTask,N}
     return sqrt(sum(map(norm->fetch(norm)::real(T), norms); init=zeroRT))
+end
+
+# Generic `norm(::AbstractArray)` scalar-indexes. Route the 2-norm (Krylov's
+# `knorm`) through the tiled `norm2`; other `p` use mapreduce / collect.
+function LinearAlgebra.norm(A::DArray{T,N}, p::Real=2) where {T,N}
+    if p == 2
+        return LinearAlgebra.norm2(A)
+    elseif p == 1
+        return mapreduce(abs, +, A; init=zero(real(T)))
+    elseif p == Inf
+        return mapreduce(abs, max, A; init=zero(real(T)))
+    else
+        return LinearAlgebra.norm(collect(A), p)
+    end
 end
 
 # --- BLAS-1 vector operations ---------------------------------------------
@@ -13,12 +118,20 @@ end
 # `maybe_copy_buffered` (a no-op when they already share a layout, and which
 # copies results back to the originals for in-place operations), so users keep
 # full control over their own (possibly sub-optimal) partitioning.
+# Same-process host tiles skip Datadeps (see `_blas1_tiles_local` above).
 
 function LinearAlgebra.dot(x::DArray{Tx,N}, y::DArray{Ty,N}) where {Tx,Ty,N}
     size(x) == size(y) || throw(DimensionMismatch("dot: x has size $(size(x)), y has size $(size(y))"))
     R = typeof(LinearAlgebra.dot(zero(Tx), zero(Ty)))
     return maybe_copy_buffered(x => x.partitioning, y => x.partitioning) do x, y
         xc, yc = x.chunks, y.chunks
+        if _blas1_tiles_local(xc, yc)
+            s = zero(R)
+            for i in eachindex(xc)
+                s += LinearAlgebra.dot(fetch(xc[i]), fetch(yc[i]))
+            end
+            return s
+        end
         parts = [Dagger.@spawn LinearAlgebra.dot(xc[i], yc[i]) for i in eachindex(xc)]
         sum(fetch, parts; init=zero(R))
     end
@@ -30,9 +143,15 @@ function LinearAlgebra.axpy!(a::Number, x::DArray{Tx,N}, y::DArray{Ty,N}) where 
     # updated in place (and copied back by `maybe_copy_buffered` if it was buffered).
     maybe_copy_buffered(x => y.partitioning, y => y.partitioning) do x, y
         xc, yc = x.chunks, y.chunks
-        Dagger.spawn_datadeps() do
+        if _blas1_tiles_local(xc, yc)
             for i in eachindex(xc)
-                Dagger.@spawn LinearAlgebra.axpy!(a, In(xc[i]), InOut(yc[i]))
+                LinearAlgebra.axpy!(a, fetch(xc[i]), fetch(yc[i]))
+            end
+        else
+            Dagger.spawn_datadeps() do
+                for i in eachindex(xc)
+                    Dagger.@spawn LinearAlgebra.axpy!(a, In(xc[i]), InOut(yc[i]))
+                end
             end
         end
     end
@@ -43,9 +162,15 @@ function LinearAlgebra.axpby!(a::Number, x::DArray{Tx,N}, b::Number, y::DArray{T
     size(x) == size(y) || throw(DimensionMismatch("axpby!: x has size $(size(x)), y has size $(size(y))"))
     maybe_copy_buffered(x => y.partitioning, y => y.partitioning) do x, y
         xc, yc = x.chunks, y.chunks
-        Dagger.spawn_datadeps() do
+        if _blas1_tiles_local(xc, yc)
             for i in eachindex(xc)
-                Dagger.@spawn LinearAlgebra.axpby!(a, In(xc[i]), b, InOut(yc[i]))
+                LinearAlgebra.axpby!(a, fetch(xc[i]), b, fetch(yc[i]))
+            end
+        else
+            Dagger.spawn_datadeps() do
+                for i in eachindex(xc)
+                    Dagger.@spawn LinearAlgebra.axpby!(a, In(xc[i]), b, InOut(yc[i]))
+                end
             end
         end
     end
@@ -53,18 +178,32 @@ function LinearAlgebra.axpby!(a::Number, x::DArray{Tx,N}, b::Number, y::DArray{T
 end
 
 function LinearAlgebra.rmul!(x::DArray, a::Number)
-    Dagger.spawn_datadeps() do
-        for c in x.chunks
-            Dagger.@spawn LinearAlgebra.rmul!(InOut(c), a)
+    xc = x.chunks
+    if _blas1_tiles_local(xc)
+        for c in xc
+            LinearAlgebra.rmul!(fetch(c), a)
+        end
+    else
+        Dagger.spawn_datadeps() do
+            for c in xc
+                Dagger.@spawn LinearAlgebra.rmul!(InOut(c), a)
+            end
         end
     end
     return x
 end
 
 function LinearAlgebra.lmul!(a::Number, x::DArray)
-    Dagger.spawn_datadeps() do
-        for c in x.chunks
-            Dagger.@spawn LinearAlgebra.lmul!(a, InOut(c))
+    xc = x.chunks
+    if _blas1_tiles_local(xc)
+        for c in xc
+            LinearAlgebra.lmul!(a, fetch(c))
+        end
+    else
+        Dagger.spawn_datadeps() do
+            for c in xc
+                Dagger.@spawn LinearAlgebra.lmul!(a, InOut(c))
+            end
         end
     end
     return x
