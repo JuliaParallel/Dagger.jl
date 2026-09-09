@@ -49,7 +49,7 @@ Please consider contributing an improvement if you feel able to do so!
 | Streaming Tasks | https://github.com/JuliaParallel/Dagger.jl/pull/463 | :heavy_check_mark: | :heavy_check_mark: | Streaming task interface for Dagger | @jpsamaroo, @JamesWrigley, or `@Davide Ferretti` |
 | SPMD | None | :heavy_check_mark: | :heavy_check_mark: | SPMD interface (like MPI) | @jpsamaroo |
 | KernelAbstractions Backend | None | :heavy_check_mark: | N/A | KA `DaggerBackend` for SPMD programming | @jpsamaroo |
-| Einsum | None | :heavy_check_mark: | N/A | Einsum-notation operator for DArray | @jpsamaroo |
+| Einsum | None | :heavy_check_mark: | N/A | `Dagger.@einsum` tiled Datadeps macro (not TensorOperations / OMEinsum / Tullio — those still need a tensor backend) | @jpsamaroo |
 
 ## DArrays
 

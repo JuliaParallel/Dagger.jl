@@ -637,3 +637,14 @@ lesson.
    A sparse-backed `DMatrix` hitting that path is the same densify footgun
    as generic `eigen` (lesson 43) — throw, and leave LOBPCG `eigen` as the
    few-pair entry. This is not ScaLAPACK; `schur!` is not in-place on tiles.
+
+49. **`Dagger.@einsum` is a tiled Datadeps macro, not a host einsum wrapper.**
+    Mirror `@stencil`: parse the product, spawn one task per output tile ×
+    contracted tile, and communicate through chunk `In`/`InOut`. Do not
+    `collect` the operands and call TensorOperations / OMEinsum / Tullio —
+    those packages still need their own `DArray` tensor backend (a second
+    invention; do not add one here). Index names that share a `Blocks` size
+    must already match; do not silently repartition. At most three tensor
+    factors per product. `mul!` / `*` / `dot` remain the LinearAlgebra
+    entries for 2-tensor products; `@einsum` is the notation. Check values
+    against `mul!` / `dot`, not only a generated helper.

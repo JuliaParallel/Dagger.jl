@@ -479,6 +479,25 @@ end
 ```
 In this example, `idx` refers to the coordinates of each element being processed. `@neighbors(A[idx], 1, Wrap())` fetches the 3x3 neighborhood around `A[idx]`. The `1` indicates a neighborhood distance of 1 from the central element, and `Wrap()` specifies the boundary behavior.
 
+## Quickstart: Einsum
+
+`Dagger.@einsum` writes Einstein-summation products over `DArray` tiles. It
+spawns Datadeps tasks (like `@stencil`); it is not a host-`Array` wrapper.
+`mul!` / `*` remain the LinearAlgebra entries for ordinary 2-tensor products.
+
+```julia
+using Dagger
+import Dagger: @einsum
+
+A = rand(Blocks(4, 4), 8, 8)
+B = rand(Blocks(4, 4), 8, 8)
+C = zeros(Blocks(4, 4), 8, 8)
+@einsum C[i,j] = A[i,k] * B[k,j]   # same values as mul!(C, A, B)
+s = @einsum A[i,j] * B[i,j]        # Frobenius inner product
+```
+
+For more details: [Einsum (`@einsum`)](@ref)
+
 ## Quickstart: Datadeps
 
 Datadeps is a feature in Dagger.jl that facilitates parallelism control within designated regions, allowing tasks to write to their arguments while ensuring dependencies are respected.

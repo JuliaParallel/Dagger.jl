@@ -736,6 +736,7 @@ From `Statistics`:
 
 From `LinearAlgebra`:
 - `norm`
+- `Dagger.@einsum` (tiled Einstein summation; `mul!` / `*` / `dot` remain the 2-tensor LinearAlgebra entries)
 - `transpose`/`adjoint` (Out-of-place transpose)
 - `*` (Out-of-place Matrix-(Matrix/Vector) multiply)
 - `mul!` (In-place Matrix-Matrix and Matrix-Vector multiply; mixed eltypes promote like LinearAlgebra; `Symmetric`/`Hermitian` `DMatrix` use tiled SYMM/HEMM)

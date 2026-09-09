@@ -33,6 +33,7 @@ shard
 ## Data Dependencies Functions
 ```@docs
 spawn_datadeps
+@einsum
 ```
 
 ## Scope Functions
