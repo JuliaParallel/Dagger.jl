@@ -650,3 +650,5 @@ lesson.
     the whole RHS is treated as a scalar. `mul!` / `*` / `dot` remain the
     LinearAlgebra entries for 2-tensor products; `@einsum` is the notation.
     Check values against `mul!` / `dot`, not only a generated helper.
+    Qualify `LinearAlgebra.transpose` in tile kernels: `Dagger.transpose`
+    is only defined on `DomainBlocks` and would steal a `Matrix` GEMM.
