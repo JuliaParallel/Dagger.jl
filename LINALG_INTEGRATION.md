@@ -6,7 +6,7 @@ branches; they do **not** merge into this workspace branch, and they do **not**
 edit other agents' rows here. Report status in your final message so the
 coordinator can update the table.
 
-Last coordinator pass: 2026-09-08 (P2 completeness merged at `40f75ac4`; subset + remaining suites green on job `2d19db10113920ac`). All assigned P0/P1/accepted-P2 workstreams are merged. Performance / Bottlenecks P0 is **out of scope**. Identify AWS jobs by **job id**, not EC2 `Name`/`vmbench-label` (see AWS note below).
+Last coordinator pass: 2026-09-09 (`linalg/blas1-fastpath`, `linalg/einsum`, `linalg/bsr` merged; BLAS-1 is on `origin/Dagger-linalg-ultra` so the blocksize/assignment sweep can start). Identify AWS jobs by **job id**, not EC2 `Name`/`vmbench-label` (see AWS note below).
 
 ---
 
@@ -263,11 +263,12 @@ Priority: **P0 done** / **P1 done** = merged onto `Dagger-linalg-ultra`. **P2** 
 | P2 | sparse-qr | done | `linalg/sparse-qr` @ `0f93b02e` | Sparse-backed `qr` / `qr!` gather-then-SPQR (`DaggerSparseQR`). Multi-RHS uses `_direct_solve` (tall `n×p`). Lesson 46. AWS: sparseqr 18/18, dense qr 184/184. | 2026-09-08 |
 | P2 | matrix-io | done | `linalg/matrix-io` @ `d2a05594` | `MatrixMarket.mmread` / `mmwrite` and `DelimitedFiles.readdlm` / `writedlm` on `DArray` / `Blocks`. Sparse write via `_collect_sparse_dmatrix`. AWS: matrixio 9/9 (`Pkg.resolve()` on the test project). | 2026-09-08 |
 | P2 | dense-schur | done | `linalg/dense-schur` @ `2c1e32b9` | `schur(::DMatrix)` gather-then-LAPACK for dense tiles; sparse-backed throws. Does **not** replace LOBPCG `eigen`. Lesson 47. AWS: schur 8/8, eigen 34/34. | 2026-09-08 |
-| P2 | einsum | skipped | — | **FLAG:** TensorOperations / OMEinsum / Tullio have no honest `DArray` hook (they need a tensor backend). FEATURES_ROADMAP "Einsum" would be a novel `Dagger.einsum`. Skip rather than invent. | 2026-09-08 |
+| P2 | einsum | done | `linalg/einsum` @ `245f68df` | User-approved `Dagger.@einsum` (tiled Datadeps, `@stencil` style). Lesson 49. **FLAG:** TensorOperations / OMEinsum / Tullio still need a `DArray` tensor backend (second invention; not added). AWS: einsum 16/16 on job `a332fb32a54319f5`; tail after known NNS 39/40. | 2026-09-09 |
 | P2 | mpi-vecghost | skipped | — | **FLAG:** MPI chunks are already rank-owned; `HaloArray` / `@stencil` already express ghosts. A public `Dagger.VecGhost` would be a new type. Discuss only — do not ship. | 2026-09-08 |
 | P2 | sparse-inv | skipped | — | Already `factorize` + `ldiv!` into `I`. Result is a dense inverse; that is LinearAlgebra's `inv`, not an API hole. | 2026-09-08 |
-| P2 | bsr-tiles | skipped | — | No host ecosystem BSR type. Do not invent `Dagger.BSR`. | 2026-09-08 |
+| P2 | bsr-tiles | done | `linalg/bsr` @ `5cfa88cb` | User-approved host `SparseMatrixBSR` (block-CSR; `Dagger.BSR` is only an alias). CSC default; host CSR unchanged; GPU stays CSC. `mul!` / `*` / `distribute` / `spzeros(SparseMatrixBSR,…)`. Lesson 50. Assembly via `sparsebsr(I,J,V,…,part)`; block PCs still collect a tile to CSC. AWS: BSR 27/27 + CSR 83 on job `d951c6a41f5c60d6`. | 2026-09-09 |
 | P2 | stencil-gmg-xfer | skipped | — | **FLAG:** `jps/sparse-stencil` cannot express restriction/prolongation (lesson 37). Matrix `GeometricMultigrid` already landed. Do not grow the stencil stack. | 2026-09-08 |
+| P0 leftover | blas1-fastpath | done | `linalg/blas1-fastpath` @ `69c88672` | Local `ThreadProc`+CPURAM BLAS-1 (`dot`/`axpy!`/`axpby!`/`norm`/`copyto!`/`fill!`/`rmul!`/`lmul!`) skips `spawn_datadeps`; MPI/remote/GPU stay on Datadeps (no second MPI path). Lesson 48. **Sweep may start.** AWS job `50a5dd19ede8a63e`: core 43 (incl. local vs Datadeps), rest green except known NNS 39/40. | 2026-09-09 |
 
 ---
 
@@ -305,6 +306,9 @@ Priority: **P0 done** / **P1 done** = merged onto `Dagger-linalg-ultra`. **P2** 
 | 2026-09-08 | tracking + full suite | Job `2d19db10113920ac`: P2 suites green; full `array/linalg` (no Finch) green except NNS 39/40 (`24>25` P-width, twice). Remaining after NNS: sparsedirect 349, linearsolve 42, assembly 64, matrixio 9, partition 295. |
 | 2026-09-09 | docs + tracker | `@stencil` cannot express GMG transfers (`docs/src/stencils.md` `stencil-no-gmg`); AMG vs BoomerAMG coverage table (this file + shorter `iterative-solving.md`). Best-config sweep numbers wait for `linalg/blas1-fastpath`. |
 | 2026-09-09 | sweep harness | `run_linalg_sweep.sh` + `LINALG_BENCH_SWEEP` in `linalg_integration.jl`. Pending BLAS-1 before measured best-config tables. |
+| 2026-09-09 | `d81d17ff` `linalg/blas1-fastpath` @ `69c88672` | No conflicts. Lesson 48. AWS `50a5dd19ede8a63e`: core 43; known NNS 39/40 (`24>25`); tail sparsedirect 349, linearsolve 42, assembly 64, matrixio 9, partition 295. **BLAS-1 is on origin — sweep can start.** |
+| 2026-09-09 | `d2784096` `linalg/bsr` @ `5cfa88cb` | Conflict: `AGENTS.md` (kept BLAS-1 48; incoming BSR is 50). Lesson 50. Kept `_solve_pinned_dvector`. AWS `d951c6a41f5c60d6`: BSR 27, CSR 83, same known NNS leftover + green tail. |
+| 2026-09-09 | `3bfcebf6` `linalg/einsum` @ `245f68df` | Conflicts: `AGENTS.md` (inserted lesson 49 between 48 and 50), `docs/src/darray.md` / `index.md` (union BLAS-1 + stencil-no-gmg + einsum). **FLAG:** no TensorOperations/OMEinsum/Tullio backend. AWS `a332fb32a54319f5`: einsum 16/16 after n-ary `*` + `LinearAlgebra.transpose` fixes. |
 
 ## Remaining follow-ups
 
@@ -322,22 +326,22 @@ Unassigned leftover from P0:
 
 Unassigned leftover from `csr-bsr`:
 
-- **BSR tiles** — no host ecosystem type (`BlockArrays` is dense mortar; `CuSparseMatrixBSR` is device-only). Do not invent `Dagger.BSR`. Host CSR is done; GPU stays CSC. **P2: skipped.**
+- **BSR tiles** — **done** (`SparseMatrixBSR`, lesson 50). Still flagged: GPU vendor BSR; block PCs collect a tile to CSC; `allocate_tiled` still makes CSC zeros (convert back with `sparsebsr(A, part, blocksize)`).
 
 P2 flags (completeness, not scheduled):
 
-- **Einsum / tensor contractions** — no ecosystem generic that can dispatch on `DArray` without a new tensor backend. Do not invent `Dagger.einsum`.
+- **Einsum ecosystem backends** — `Dagger.@einsum` landed (lesson 49). TensorOperations / OMEinsum / Tullio still need a `DArray` tensor backend (second invention; not added).
 - **MPI owned+ghost / `VecGhost`** — rank-owned `Chunk` + `HaloArray` / `@stencil` already cover this. A new public vector type is out of scope.
 - **`@stencil` restriction/prolongation** — not usable for GMG (lesson 37).
   Matrix `GeometricMultigrid` is the transfer path. User-facing write-up:
   `docs/src/stencils.md` (`stencil-no-gmg`), plus the GMG / BoomerAMG
   sections in `docs/src/iterative-solving.md`. Short recap below.
 - **Full dense geev / ScaLAPACK Schur** — not required. `eigen` stays LOBPCG; P2 `schur` is gather-then-LAPACK for dense tiles only.
-- **Near-nullspace Q1 elasticity `P`-width assert** — on `40f75ac4`, `array/linalg/nearnullspace` is 39/40 twice (`size(Mn.levels[1].P, 2) > size(Ms.levels[1].P, 2)` evaluated `24 > 25`). P2 did not touch AMG. Residual/`\\` checks in that testset were not reached. **Question:** is this a brittle width check vs a real NNS regression? Do not weaken it from P2.
+- **Near-nullspace Q1 elasticity `P`-width assert** — reproduced 2026-09-09 on blas1/einsum/bsr jobs (`24 > 25`, 39/40). Same leftover as `40f75ac4`; not introduced by BLAS-1 / einsum / BSR. Residual/`\\` checks in that testset were not reached. Do not weaken it from this pass.
 
 AWS labeling (2026-09-08 `vmbench.py` working-tree tweak): EC2 `Name` is now the launch `--label` (was always `vmbench`), plus `vmbench-label` / `vmbench-pid` / `vmbench-started`. `batchd` still calls `provision_vm` without `label=`, so new `batchctl` VMs would tag `Name=vmbench`. Pre-tweak instances (including `i-021ef9ff800fc17a4`) have no `vmbench-label` tag. Filter/teardown by **job id**. Reserved `dagger-distributed` (`2f5b7c978c2a0b3a`) and `dagger-mpi` (`a1e9f3af2f347b8d`) are already `done` in batchd — do not `done` them again.
 
-`AGENTS.md` lessons 27–47 are the union of the per-workstream lessons (through block Krylov 45; sparse `qr` is 46; dense `schur` is 47). Lesson 20 remains unused (pre-existing gap). Lesson 35 is GPU-PC; do not reuse that number.
+`AGENTS.md` lessons 27–50 are the union (through dense `schur` 47; BLAS-1 is 48; `@einsum` is 49; BSR is 50). Lesson 20 remains unused (pre-existing gap). Lesson 35 is GPU-PC; do not reuse that number.
 
 ---
 
@@ -418,10 +422,10 @@ invented.
 `krylov_cg`, `krylov_blockjacobi` (full GMRES is too expensive per cell).
 Deep warmup, min of timed runs, same Krylov `atol`/`rtol`; rows record
 `‖Ax−b‖/‖b‖`. Output: `benchmark/results/linalg_integration_sweep_mt.json`.
-**Do not publish a “best configuration” until `linalg/blas1-fastpath` is
-on `origin/Dagger-linalg-ultra`** — that path changes BLAS-1 / Krylov
-walls. No invented numbers below. MPI sweep is optional and hang-prone
-(same omit list as the MPI table).
+**`linalg/blas1-fastpath` is on `origin/Dagger-linalg-ultra` (`d81d17ff`,
+tip `69c88672`). The blocksize / assignment sweep can start.** No invented
+numbers below. MPI sweep is optional and hang-prone (same omit list as
+the MPI table).
 
 **Hardware / software (multi-threaded):** AWS `c6i.4xlarge` (16 vCPU, 32 GiB,
 `us-east-1`), Julia 1.12.7, 16 Julia threads, 2026-09-07 (PDT) /
