@@ -444,7 +444,7 @@ function _einsum_try_mul!(Cwrap, C, A, B, Cinds, Ainds, Binds, α, β)
             LinearAlgebra.mul!(C, A, B, α, β)
             return true
         elseif Ainds == (j, i)
-            LinearAlgebra.mul!(C, transpose(A), B, α, β)
+            LinearAlgebra.mul!(C, LinearAlgebra.transpose(A), B, α, β)
             return true
         end
     elseif length(Cinds) == 1 && length(Binds) == 2 && length(Ainds) == 1
@@ -452,10 +452,10 @@ function _einsum_try_mul!(Cwrap, C, A, B, Cinds, Ainds, Binds, α, β)
     elseif length(Cinds) == 2 && length(Ainds) == 1 && length(Binds) == 1
         i, j = Cinds
         if Ainds == (i,) && Binds == (j,)
-            LinearAlgebra.mul!(C, reshape(A, :, 1), transpose(reshape(B, :, 1)), α, β)
+            LinearAlgebra.mul!(C, reshape(A, :, 1), LinearAlgebra.transpose(reshape(B, :, 1)), α, β)
             return true
         elseif Ainds == (j,) && Binds == (i,)
-            LinearAlgebra.mul!(C, reshape(B, :, 1), transpose(reshape(A, :, 1)), α, β)
+            LinearAlgebra.mul!(C, reshape(B, :, 1), LinearAlgebra.transpose(reshape(A, :, 1)), α, β)
             return true
         end
     end
@@ -463,8 +463,8 @@ function _einsum_try_mul!(Cwrap, C, A, B, Cinds, Ainds, Binds, α, β)
 end
 
 function _einsum_muladd!(Cwrap, C, A, B, tA, tB, α, β)
-    opA = tA == 'T' ? transpose(A) : A
-    opB = tB == 'T' ? transpose(B) : B
+    opA = tA == 'T' ? LinearAlgebra.transpose(A) : A
+    opB = tB == 'T' ? LinearAlgebra.transpose(B) : B
     if Cwrap isa DSparseArray
         AB = opA * opB
         if iszero(β)
