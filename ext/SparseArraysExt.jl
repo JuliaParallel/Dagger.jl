@@ -763,13 +763,9 @@ SparseArrays.nnz(A::SparseMatrixBSR) = length(A.nzval)
 
 Dagger._sparse_collect(A::SparseMatrixBSR) = SparseArrays.SparseMatrixCSC(A)
 
-function Dagger.matvecmul!(C::AbstractVector, transA::Char, A::SparseMatrixBSR, B::AbstractVector, alpha, beta)
-    if transA == 'N'
-        LinearAlgebra.mul!(C, A, B, alpha, beta)
-    else
-        LinearAlgebra.mul!(C, _apply_trans(SparseArrays.SparseMatrixCSC(A), transA), B, alpha, beta)
-    end
-    return C
+function Dagger._bsr_matvecmul_trans!(C::AbstractVector, transA::Char, A::SparseMatrixBSR,
+                                      B::AbstractVector, alpha, beta)
+    return LinearAlgebra.mul!(C, _apply_trans(SparseArrays.SparseMatrixCSC(A), transA), B, alpha, beta)
 end
 
 function _bsr_spgemm!(C::DSparseMatrix, transA::Char, transB::Char, A, B, alpha, beta)
@@ -802,10 +798,8 @@ function Dagger.matmatmul!(C::DSparseMatrix, transA::Char, transB::Char,
     return _bsr_spgemm!(C, transA, transB, A, B, alpha, beta)
 end
 
-# Gather convert without densifying (overrides the core `collect` fallback).
-function Dagger.sparsebsr(A::DMatrix, blocksize::Tuple{Integer,Integer})
-    return SparseMatrixBSR(SparseArrays.sparse(A), (Int(blocksize[1]), Int(blocksize[2])))
-end
+# More specific than core `_dmatrix_host_sparse(A) = collect(A)` — no overwrite.
+Dagger._dmatrix_host_sparse(A::DMatrix) = SparseArrays.sparse(A)
 
 function Dagger.sparsebsr(I::_COOIndexVec, J::_COOIndexVec, V::AbstractVector,
                           m::Integer, n::Integer, blocksize::Tuple{Integer,Integer},

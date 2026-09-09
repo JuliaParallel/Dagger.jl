@@ -297,19 +297,23 @@ function Base.:*(A::SparseMatrixBSR, x::AbstractVector)
 end
 
 # Tile kernel used by distributed SpMV. Transposed/adjoint fall back to a dense
-# tile (tiles are small); SparseArraysExt replaces this with a CSC gather.
+# tile unless SparseArraysExt adds a more-specific `_bsr_matvecmul_trans!`.
 function matvecmul!(C::AbstractVector, transA::Char, A::SparseMatrixBSR, B::AbstractVector, alpha, beta)
     if transA == 'N'
         return LinearAlgebra.mul!(C, A, B, alpha, beta)
     end
-    Ah = _bsr_to_dense(A)
+    return _bsr_matvecmul_trans!(C, transA, A, B, alpha, beta)
+end
+# Unconstrained `A` so SparseArraysExt can add a SparseMatrixBSR CSC path
+# without overwriting this method (precompilation forbids the overwrite).
+function _bsr_matvecmul_trans!(C::AbstractVector, transA::Char, A, B::AbstractVector, alpha, beta)
+    Ah = A isa SparseMatrixBSR ? _bsr_to_dense(A) : Array(A)
     op = transA == 'T' ? transpose(Ah) : adjoint(Ah)
     return LinearAlgebra.mul!(C, op, B, alpha, beta)
 end
 
 wraps_as_sparse_tile(::SparseMatrixBSR) = true
 _sparse_copy(A::SparseMatrixBSR) = copy(A)
-_sparse_collect(A::SparseMatrixBSR) = _bsr_to_dense(A)
 function _sparse_similar(A::SparseMatrixBSR, ::Type{T}, dims::Dims{2}) where T
     br, bc = A.blocksize
     bs = (dims[1] % br == 0 && dims[2] % bc == 0) ? A.blocksize : (1, 1)
@@ -368,9 +372,10 @@ end
 sparsebsr(A::DMatrix, part::Blocks{2}, br::Integer, bc::Integer) = sparsebsr(A, part, (br, bc))
 
 # More specific than `AbstractMatrix` so we do not scalar-index a DMatrix.
-# SparseArraysExt replaces this with `sparse(A)` then convert (no densify).
+# Default gathers densely; SparseArraysExt adds `_dmatrix_host_sparse(::DMatrix)`.
+_dmatrix_host_sparse(A) = collect(A)
 function sparsebsr(A::DMatrix, blocksize::Tuple{Integer,Integer})
-    return SparseMatrixBSR(collect(A), (Int(blocksize[1]), Int(blocksize[2])))
+    return SparseMatrixBSR(_dmatrix_host_sparse(A), (Int(blocksize[1]), Int(blocksize[2])))
 end
 sparsebsr(A::DMatrix, br::Integer, bc::Integer) = sparsebsr(A, (br, bc))
 

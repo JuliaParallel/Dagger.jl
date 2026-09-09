@@ -649,5 +649,9 @@ lesson.
     (lesson 44). SpGEMM / transposed SpMV may gather a *tile* to CSC.
     Repartition still allocates CSC zeros (`DArray` does not record the
     inner format); `sparsebsr(A, part, blocksize)` converts back. Block
-    PCs collect a tile to CSC via `_sparse_collect`. Check `‖Ax−b‖`, not
-    only `stats.solved`.
+    PCs collect a tile to CSC via `_sparse_collect`. Extensions must *add*
+    more-specific hooks (`_sparse_collect(::SparseMatrixBSR)`,
+    `_dmatrix_host_sparse(::DMatrix)`, `_bsr_matvecmul_trans!` on BSR) —
+    they must not overwrite a core method of the same signature (Julia
+    forbids that during precompilation). Check `‖Ax−b‖`, not only
+    `stats.solved`.
