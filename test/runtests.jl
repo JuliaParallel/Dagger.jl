@@ -64,6 +64,7 @@ tests = [
     ("Array - LinearAlgebra - Sparse Assembly", "array/linalg/assembly.jl"),
     ("Array - LinearAlgebra - Matrix I/O", "array/linalg/matrixio.jl"),
     ("Array - LinearAlgebra - Graph Partition", "array/linalg/partition.jl"),
+    ("Array - LinearAlgebra - Einsum", "array/linalg/einsum.jl"),
     ("Array - Permute", "array/permute.jl"),
     ("Array - Random", "array/random.jl"),
     ("Array - Stencils", "array/stencil.jl"),

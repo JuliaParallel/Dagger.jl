@@ -736,6 +736,7 @@ From `Statistics`:
 
 From `LinearAlgebra`:
 - `norm` / `dot` / `axpy!` / `axpby!` / `rmul!` / `lmul!` (BLAS-1: local `ThreadProc` tiles run in-process and skip `spawn_datadeps`, because that region overhead dominates the SIMD; MPI / remote / GPU stay on Datadeps)
+- `Dagger.@einsum` (tiled Einstein summation; `mul!` / `*` / `dot` remain the 2-tensor LinearAlgebra entries)
 - `transpose`/`adjoint` (Out-of-place transpose)
 - `*` (Out-of-place Matrix-(Matrix/Vector) multiply)
 - `mul!` (In-place Matrix-Matrix and Matrix-Vector multiply; mixed eltypes promote like LinearAlgebra; `Symmetric`/`Hermitian` `DMatrix` use tiled SYMM/HEMM)

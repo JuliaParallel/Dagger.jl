@@ -32,6 +32,7 @@ makedocs(;
         "Datadeps" => [
             "Basics" => "datadeps.md",
             "Stencils" => "stencils.md",
+            "Einsum" => "einsum.md",
         ],
         "GPUs" => "gpu.md",
         "MPI" => "mpi.md",

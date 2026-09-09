@@ -488,6 +488,25 @@ restriction / prolongation (fine `n` → coarse `n/2`) is outside that
 contract; use [`GeometricMultigrid`](@ref) instead. The full explanation is
 in [Why restriction / prolongation cannot be a `@stencil`](@ref stencil-no-gmg).
 
+## Quickstart: Einsum
+
+`Dagger.@einsum` writes Einstein-summation products over `DArray` tiles. It
+spawns Datadeps tasks (like `@stencil`); it is not a host-`Array` wrapper.
+`mul!` / `*` remain the LinearAlgebra entries for ordinary 2-tensor products.
+
+```julia
+using Dagger
+import Dagger: @einsum
+
+A = rand(Blocks(4, 4), 8, 8)
+B = rand(Blocks(4, 4), 8, 8)
+C = zeros(Blocks(4, 4), 8, 8)
+@einsum C[i,j] = A[i,k] * B[k,j]   # same values as mul!(C, A, B)
+s = @einsum A[i,j] * B[i,j]        # Frobenius inner product
+```
+
+For more details: [Einsum (`@einsum`)](@ref)
+
 ## Quickstart: Datadeps
 
 Datadeps is a feature in Dagger.jl that facilitates parallelism control within designated regions, allowing tasks to write to their arguments while ensuring dependencies are respected.
