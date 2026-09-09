@@ -6,7 +6,7 @@ branches; they do **not** merge into this workspace branch, and they do **not**
 edit other agents' rows here. Report status in your final message so the
 coordinator can update the table.
 
-Last coordinator pass: 2026-09-09 (`linalg/blas1-fastpath`, `linalg/einsum`, `linalg/bsr` merged; BLAS-1 is on `origin/Dagger-linalg-ultra` so the blocksize/assignment sweep can start). Identify AWS jobs by **job id**, not EC2 `Name`/`vmbench-label` (see AWS note below).
+Last coordinator pass: 2026-09-09 (`linalg/blas1-fastpath`, `linalg/einsum`, `linalg/bsr` merged; blocksize/assignment sweep published from job `f74175e59a65e3ec` at SHA `6bf9aa2b`). Identify AWS jobs by **job id**, not EC2 `Name`/`vmbench-label` (see AWS note below).
 
 ---
 
@@ -309,6 +309,7 @@ Priority: **P0 done** / **P1 done** = merged onto `Dagger-linalg-ultra`. **P2** 
 | 2026-09-09 | `d81d17ff` `linalg/blas1-fastpath` @ `69c88672` | No conflicts. Lesson 48. AWS `50a5dd19ede8a63e`: core 43; known NNS 39/40 (`24>25`); tail sparsedirect 349, linearsolve 42, assembly 64, matrixio 9, partition 295. **BLAS-1 is on origin — sweep can start.** |
 | 2026-09-09 | `d2784096` `linalg/bsr` @ `5cfa88cb` | Conflict: `AGENTS.md` (kept BLAS-1 48; incoming BSR is 50). Lesson 50. Kept `_solve_pinned_dvector`. AWS `d951c6a41f5c60d6`: BSR 27, CSR 83, same known NNS leftover + green tail. |
 | 2026-09-09 | `3bfcebf6` `linalg/einsum` @ `245f68df` | Conflicts: `AGENTS.md` (inserted lesson 49 between 48 and 50), `docs/src/darray.md` / `index.md` (union BLAS-1 + stencil-no-gmg + einsum). **FLAG:** no TensorOperations/OMEinsum/Tullio backend. AWS `a332fb32a54319f5`: einsum 16/16 after n-ary `*` + `LinearAlgebra.transpose` fixes. |
+| 2026-09-09 | sweep numbers | Job `f74175e59a65e3ec` (`c6i.4xlarge`) measured SHA `6bf9aa2b` (post BLAS-1 / BSR / einsum). Best-config + compact 2-D grid in Performance. 1drow SpMV OOM; rest of 1drow/1dcol/auto aborted. MPI sweep not launched. |
 
 ## Remaining follow-ups
 
@@ -412,20 +413,107 @@ iterations and the un-preconditioned `‖Ax−b‖/‖b‖`. Speedup is
 baseline/Dagger (`>1` means Dagger is faster). Empty cells are omitted, not
 invented.
 
-**Blocksize / assignment sweep (harness ready, numbers pending BLAS-1):**
-`benchmark/suites/run_linalg_sweep.sh` drives `linalg_integration.jl` with
-`LINALG_BENCH_SWEEP=1`. It loops existing knobs only — `Blocks` tile side
-(`LINALG_BENCH_TILES`), `distribute` assignment (`:arbitrary` / `:blockrow`
-/ `:blockcol` / `:cyclicrow` / `:cycliccol`), layout `2d` / `1drow` /
-`1dcol` / `auto`, and `Dagger.scope` (`default` / `process` /
-`threads:N`). Default compact keys: `dense_gemm`, `sparse_spmv`,
-`krylov_cg`, `krylov_blockjacobi` (full GMRES is too expensive per cell).
-Deep warmup, min of timed runs, same Krylov `atol`/`rtol`; rows record
-`‖Ax−b‖/‖b‖`. Output: `benchmark/results/linalg_integration_sweep_mt.json`.
-**`linalg/blas1-fastpath` is on `origin/Dagger-linalg-ultra` (`d81d17ff`,
-tip `69c88672`). The blocksize / assignment sweep can start.** No invented
-numbers below. MPI sweep is optional and hang-prone (same omit list as
-the MPI table).
+**Blocksize / assignment sweep (measured, SHA `6bf9aa2b`):**
+`benchmark/suites/run_linalg_sweep.sh` / `LINALG_BENCH_SWEEP=1`. Existing
+knobs only (`Blocks`, `distribute` assignment, `2d`/`1drow`/`1dcol`/`auto`,
+`Dagger.scope` / `ProcessScope`). Keys: `dense_gemm`, `sparse_spmv`,
+`krylov_cg`, `krylov_blockjacobi`. Warmup 5, samples 3, **min** of timed
+runs. Same Krylov `atol=1e-10` / `rtol=1e-8`; rows record `‖Ax−b‖/‖b‖`.
+Raw: `benchmark/results/linalg_integration_sweep_mt.json`.
+
+**Sweep hardware:** AWS `c6i.4xlarge` (16 vCPU, 32 GiB, `us-east-1`),
+Julia 1.12.7, 16 Julia threads, 2026-09-09 UTC. Dagger SHA
+**`6bf9aa2b5080e7072cc299a2b5da0715a51ab7f3`** (clone of
+`origin/Dagger-linalg-ultra` after BLAS-1 `d81d17ff` / BSR `d2784096` /
+einsum `3bfcebf6`). Job **`f74175e59a65e3ec`** (`linalg-sweep-mt`, then
+`done`). This is **not** the pre-fast-path SHA `292cd672` used by the
+full-suite MT table below — Krylov/BLAS-1 walls moved.
+
+**Best configuration (min Dagger time):**
+
+| Kernel | Best (tile, assignment, layout, scope) | Dagger | Host | Speedup | Residual / iters |
+|---|---|---|---|---|---|
+| Dense GEMM `A*B` (n=4096) | `Blocks(1024,1024)`, `:blockrow`, `2d`, `default` | 268 ms | 240 ms (OpenBLAS 16-thread) | 0.89× | — |
+| Sparse SpMV (1-D Laplacian n=160000) | `Blocks(2048,2048)`, `:cyclicrow`, `2d`, `default` | 517 ms | 702 µs (host CSC, 1 thread) | 0.0014× | — |
+| Krylov CG, no PC (2-D Laplacian n=4096) | `Blocks(2048,2048)`, `:blockrow`, `2d`, `threads:8` | 322 ms | 4.63 ms (`Krylov.cg(::CSC)`) | 0.014× | 196/196; `‖r‖/‖b‖` 8.82e-9 / 8.82e-9 |
+| Krylov CG + BlockJacobi | `Blocks(2048,2048)`, `:blockrow`, `2d`, `threads:8` | 81.5 ms | 137 ms (serial per-block LU) | **1.68×** | 31/31; `‖r‖/‖b‖` 6.41e-8 / 6.41e-8 |
+
+**Overall:** there is no single winner. Krylov and SpMV want the coarsest
+2-D tile (`2048`); GEMM wants `1024` (8×8). Assignment `:blockrow` is
+best or tied on every kernel except SpMV, where `:cyclicrow` is 3% faster
+than `:blockrow` (534 ms). `:arbitrary` is never the winner. `threads:8`
+helps CG/BlockJacobi a few percent at tile 2048 and hurts GEMM/SpMV
+versus the default 16-thread scope. Prefer **`Blocks(2048,2048)` +
+`:blockrow`** for solves; **`Blocks(1024,1024)` + `:blockrow`** for GEMM.
+
+Post-BLAS-1 CG at tile 2048 is 322 ms vs the published 3.37 s at tile
+1024 on SHA `292cd672` (same 196 iters and `‖r‖/‖b‖`). Fine tiles are
+still a cliff: 2-D tile 256 CG is 7.14–8.69 s at the same residual.
+
+**Compact grid** (2-D, `scope=default`; Dagger min times). Assignment is
+a small delta; tile size is not.
+
+Dense GEMM n=4096:
+
+| tile | `:arbitrary` | `:blockrow` | `:cyclicrow` |
+|---|---|---|---|
+| 256 | 532 ms | 521 ms | 507 ms |
+| 512 | 327 ms | 308 ms | 322 ms |
+| 1024 | 314 ms | **268 ms** | 278 ms |
+| 2048 | 477 ms | 467 ms | 469 ms |
+
+Sparse SpMV, 1-D Laplacian n=160000 (2-D `Blocks(t,t)` on a 160k×160k
+operator — `gemv_dagger!` still spawns empty tile pairs):
+
+| tile | `:arbitrary` | `:blockrow` | `:cyclicrow` |
+|---|---|---|---|
+| 256 | 42.6 s | 41.5 s | 44.7 s |
+| 512 | 10.6 s | 9.35 s | 9.13 s |
+| 1024 | 2.34 s | 2.15 s | 2.25 s |
+| 2048 | 576 ms | 534 ms | **517 ms** |
+
+Krylov CG, no PC, 2-D Laplacian n=4096 (always 196/196 iters,
+`‖r‖/‖b‖` 8.82e-9 / 8.82e-9):
+
+| tile | `:arbitrary` | `:blockrow` | `:cyclicrow` |
+|---|---|---|---|
+| 256 | 7.51 s | 7.14 s | 7.43 s |
+| 512 | 2.53 s | 2.35 s | 2.36 s |
+| 1024 | 864 ms | 818 ms | 807 ms |
+| 2048 | 368 ms | **348 ms** | 351 ms |
+
+Krylov CG + BlockJacobi (iters drop as tiles grow: 79 → 55 → 43 → 31;
+`‖r‖/‖b‖` 1.57e-8 / 3.28e-8 / 4.65e-8 / 6.41e-8, matched on the host):
+
+| tile | `:arbitrary` | `:blockrow` | `:cyclicrow` |
+|---|---|---|---|
+| 256 | 3.25 s | 3.16 s | 3.24 s |
+| 512 | 818 ms | 800 ms | 795 ms |
+| 1024 | 284 ms | 266 ms | 285 ms |
+| 2048 | 95.9 ms | **88.2 ms** | 92.2 ms |
+
+`threads:8` grid (same 24 cells) is in the JSON; at the winning tiles it
+is within ~10–20% of `default` (CG/BJ slightly faster, GEMM/SpMV
+slightly slower). `ProcessScope` was not swept (one worker: nearly a
+no-op vs `DefaultScope`).
+
+**Sweep hung / skipped (no invented numbers):**
+
+- **1drow SpMV** (n=160000, `Blocks(256, 160000)`): OOM-killed Julia
+  (RSS 31.6 GiB / 32 GiB) during the first 1drow cell. Remaining 1drow
+  SpMV not retried — a full-width tile densify is 256×160000×8×(n/256)
+  ≈ 200 GiB if `getindex` goes dense.
+- **1drow GEMM / CG / BlockJacobi:** one probe completed
+  (`tile=256`, `:arbitrary`, `default`): GEMM 926 ms; CG 180 s at the
+  same 196 iters / 8.82e-9 residual (vs 7.5 s for 2-D tile 256). Rest of
+  1drow aborted as not sweep-viable. 1drow BlockJacobi not timed.
+- **`1dcol` / `auto`:** not launched after the 1drow OOM / 180 s CG.
+- **MPI sweep:** not launched (known hangs: `mul!(C,A,A)`, dense Chol/QR,
+  SpMV, sparse `cholesky`/`klu`/`splu`, assembly, `lu!(F,A)`, mixed
+  SpMV).
+
+The full-suite MT / MPI tables below are earlier SHAs and are **not**
+replaced by this sweep.
 
 **Hardware / software (multi-threaded):** AWS `c6i.4xlarge` (16 vCPU, 32 GiB,
 `us-east-1`), Julia 1.12.7, 16 Julia threads, 2026-09-07 (PDT) /
