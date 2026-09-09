@@ -15,6 +15,16 @@
 #   LINALG_BENCH_SAMPLES  timed iters       (default 5)
 #   LINALG_BENCH_SCALE    default | small | mpi
 #
+# Blocksize / assignment sweep (existing Dagger knobs only — no new API):
+#   LINALG_BENCH_SWEEP=1
+#   LINALG_BENCH_TILES    tile sides, e.g. 256,512,1024,2048
+#   LINALG_BENCH_ASSIGNS  distribute assignment: arbitrary,blockrow,blockcol,cyclicrow,cycliccol
+#   LINALG_BENCH_LAYOUTS  2d | 1drow | 1dcol | auto   (Blocks(b,b) / Blocks(b,n) / Blocks(n,b) / AutoBlocks)
+#   LINALG_BENCH_SCOPES   default | process | threads:N   (Dagger.scope / ProcessScope)
+#   LINALG_BENCH_SWEEP_KEYS  compact default: dense_gemm,sparse_spmv,krylov_cg,krylov_blockjacobi
+#   Single-shot overrides (no sweep loop): LINALG_BENCH_TILE, LINALG_BENCH_ASSIGN,
+#   LINALG_BENCH_LAYOUT, LINALG_BENCH_SCOPE.
+#
 # Profile mode (attribution, not the published table):
 #   LINALG_BENCH_PROFILE=1|cpu|alloc|logs|all  → linalg_profile.jl via the driver
 #
@@ -28,6 +38,22 @@ const SAMPLES = parse(Int, get(ENV, "LINALG_BENCH_SAMPLES", "5"))
 const SCALE = lowercase(get(ENV, "LINALG_BENCH_SCALE", MODE == "mpi" ? "mpi" : "default"))
 const ONLY = let s = strip(get(ENV, "LINALG_BENCH_ONLY", ""))
     isempty(s) ? nothing : Set(strip.(split(s, ',')))
+end
+const SWEEP = lowercase(get(ENV, "LINALG_BENCH_SWEEP", "")) ∈ ("1", "true", "yes")
+const SWEEP_ONLY = let s = strip(get(ENV, "LINALG_BENCH_SWEEP_KEYS",
+        "dense_gemm,sparse_spmv,krylov_cg,krylov_blockjacobi"))
+    Set(String.(strip.(split(s, ','))))
+end
+const _ASSIGN_OK = (:arbitrary, :blockrow, :blockcol, :cyclicrow, :cycliccol)
+
+_parse_csv(s) = String.(filter(!isempty, strip.(split(s, ','))))
+function _parse_csv_ints(s, default)
+    xs = _parse_csv(s)
+    return isempty(xs) ? default : parse.(Int, xs)
+end
+function _parse_csv_syms(s, default)
+    xs = _parse_csv(s)
+    return isempty(xs) ? default : Symbol.(xs)
 end
 
 using Dates
@@ -332,6 +358,85 @@ const RTOL = 1e-8
 const ITMAX = 500
 const GMRES_MEM = 50
 
+# Live config. Sweep mode mutates this between passes; single-shot reads ENV once.
+mutable struct BenchCfg
+    assignment::Symbol
+    layout::String
+    scope::String
+    tile::Union{Int,Nothing}
+end
+
+function _init_cfg()
+    assign = Symbol(get(ENV, "LINALG_BENCH_ASSIGN", "arbitrary"))
+    assign in _ASSIGN_OK || error("LINALG_BENCH_ASSIGN must be one of $(_ASSIGN_OK), got $(assign)")
+    layout = lowercase(get(ENV, "LINALG_BENCH_LAYOUT", "2d"))
+    layout in ("2d", "1drow", "1dcol", "auto") || error(
+        "LINALG_BENCH_LAYOUT must be 2d, 1drow, 1dcol, or auto, got $(layout)")
+    scope = lowercase(get(ENV, "LINALG_BENCH_SCOPE", "default"))
+    tile_s = strip(get(ENV, "LINALG_BENCH_TILE", ""))
+    tile = isempty(tile_s) ? nothing : parse(Int, tile_s)
+    return BenchCfg(assign, layout, scope, tile)
+end
+
+const CFG = _init_cfg()
+
+function mat_blocks(n::Integer, b::Integer)
+    tb = CFG.tile === nothing ? Int(b) : CFG.tile
+    CFG.layout == "1drow" && return Blocks(tb, Int(n))
+    CFG.layout == "1dcol" && return Blocks(Int(n), tb)
+    CFG.layout == "auto" && return AutoBlocks()
+    return Blocks(tb, tb)
+end
+
+function vec_blocks(n::Integer, b::Integer)
+    tb = CFG.tile === nothing ? Int(b) : CFG.tile
+    CFG.layout == "1dcol" && return Blocks(Int(n))
+    CFG.layout == "auto" && return AutoBlocks()
+    return Blocks(tb)
+end
+
+tile_used(b::Integer) = CFG.tile === nothing ? Int(b) : CFG.tile
+
+dstr(A, part) = distribute(A, part, CFG.assignment)
+dstr_mat(A, n, b) = distribute(A, mat_blocks(n, b), CFG.assignment)
+dstr_vec(x, n, b) = distribute(x, vec_blocks(n, b), CFG.assignment)
+
+alloc_rand_mat(n, b; T=Float64) =
+    rand(mat_blocks(n, b), T, n, n; assignment=CFG.assignment)
+alloc_rand_vec(n, b; T=Float64) =
+    rand(vec_blocks(n, b), T, n; assignment=CFG.assignment)
+alloc_zeros_vec(n, b; T=Float64) =
+    zeros(vec_blocks(n, b), T, n; assignment=CFG.assignment)
+
+function with_cfg_scope(f)
+    kind = CFG.scope
+    if kind == "default"
+        return f()
+    elseif kind == "process"
+        return Dagger.with_options(; scope=ProcessScope()) do
+            f()
+        end
+    elseif startswith(kind, "threads:")
+        nt = parse(Int, kind[9:end])
+        nt >= 1 || error("LINALG_BENCH_SCOPE threads:N needs N≥1")
+        return Dagger.with_options(; scope=Dagger.scope(; threads=1:nt)) do
+            f()
+        end
+    end
+    error("Unknown LINALG_BENCH_SCOPE=$(kind); use default, process, or threads:N")
+end
+
+function cfg_tag()
+    parts = String[]
+    if SWEEP || CFG.tile !== nothing
+        push!(parts, "tile=$(CFG.tile === nothing ? "auto" : CFG.tile)")
+    end
+    (SWEEP || CFG.assignment !== :arbitrary) && push!(parts, "assign=$(CFG.assignment)")
+    (SWEEP || CFG.layout != "2d") && push!(parts, "layout=$(CFG.layout)")
+    (SWEEP || CFG.scope != "default") && push!(parts, "scope=$(CFG.scope)")
+    return isempty(parts) ? "" : " [" * join(parts, " ") * "]"
+end
+
 # --- result plumbing -------------------------------------------------------
 
 const OUTDIR = let d = get(ENV, "LINALG_BENCH_OUT", "")
@@ -356,6 +461,11 @@ const META = Dict{String,Any}(
     "atol" => ATOL,
     "rtol" => RTOL,
     "itmax" => ITMAX,
+    "sweep" => SWEEP,
+    "assignment" => string(CFG.assignment),
+    "layout" => CFG.layout,
+    "scope" => CFG.scope,
+    "tile" => CFG.tile,
 )
 
 const ROWS = Dict{String,Any}[]
@@ -370,8 +480,12 @@ function push_row!(; feature, key, problem, dagger_s, baseline_s, baseline_name,
     row = Dict{String,Any}(
         "feature" => feature,
         "key" => key,
-        "problem" => problem,
+        "problem" => problem * cfg_tag(),
         "dagger_s" => dagger_s,
+        "assignment" => string(CFG.assignment),
+        "layout" => CFG.layout,
+        "scope" => CFG.scope,
+        "tile" => CFG.tile,
         "baseline_s" => baseline_s,
         "baseline_name" => baseline_name,
         "speedup" => speedup,
@@ -436,7 +550,8 @@ end
 
 function _flush_outputs()
     is_root() || return
-    tag = MODE == "mpi" ? "mpi" : "mt"
+    tag = SWEEP ? (MODE == "mpi" ? "sweep_mpi" : "sweep_mt") :
+                 (MODE == "mpi" ? "mpi" : "mt")
     json_path = joinpath(OUTDIR, "linalg_integration_$(tag).json")
     md_path = joinpath(OUTDIR, "linalg_integration_$(tag).md")
     payload = Dict("meta" => META, "rows" => ROWS)
@@ -502,7 +617,11 @@ function _write_json(io, x)
     end
 end
 
-wanted(key) = ONLY === nothing || key in ONLY
+function wanted(key)
+    ONLY !== nothing && return key in ONLY
+    SWEEP && return key in SWEEP_ONLY
+    return true
+end
 
 macro safe_bench(key, ex)
     quote
@@ -526,8 +645,8 @@ end
 function bench_dense_gemm()
     n, b = S.gemm_n, S.gemm_b
     td = with_blas(BLAS_DAGGER) do
-        A = rand(Blocks(b, b), Float64, n, n)
-        B = rand(Blocks(b, b), Float64, n, n)
+        A = alloc_rand_mat(n, b)
+        B = alloc_rand_mat(n, b)
         timed_min() do
             C = A * B
             wait(C)
@@ -549,8 +668,8 @@ end
 
 function bench_dense_factor(feature, key, n, b, dagger_f, host_f, host_name)
     td = with_blas(BLAS_DAGGER) do
-        A = rand(Blocks(b, b), Float64, n, n); wait(A)
-        bv = rand(Blocks(b), Float64, n); wait(bv)
+        A = alloc_rand_mat(n, b); wait(A)
+        bv = alloc_rand_vec(n, b); wait(bv)
         timed_min() do
             F = dagger_f(A)
             wait_factor(F)
@@ -575,11 +694,11 @@ end
 function bench_dense_chol()
     n, b = S.chol_n, S.chol_b
     td = with_blas(BLAS_DAGGER) do
-        G = rand(Blocks(b, b), Float64, n, n); wait(G)
+        G = alloc_rand_mat(n, b); wait(G)
         A = G * G'
         wait(A)
         # ensure PD at the type/tile level
-        bv = rand(Blocks(b), Float64, n); wait(bv)
+        bv = alloc_rand_vec(n, b); wait(bv)
         timed_min() do
             F = cholesky(A)
             wait_factor(F)
@@ -605,7 +724,7 @@ end
 function bench_dense_svd()
     n, b = S.svd_n, S.svd_b
     td = with_blas(BLAS_DAGGER) do
-        A = rand(Blocks(b, b), Float64, n, n); wait(A)
+        A = alloc_rand_mat(n, b); wait(A)
         timed_min() do
             F = svd(A)
             wait_factor(F)
@@ -631,9 +750,9 @@ function bench_spmv()
     Ah = laplacian_1d(Float64, n)
     xh = rand(n)
     td = with_blas(BLAS_DAGGER) do
-        A = distribute(Ah, Blocks(b, b)); wait(A)
-        x = distribute(xh, Blocks(b)); wait(x)
-        y = Dagger.zeros(Blocks(b), Float64, n); wait(y)
+        A = dstr_mat(Ah, n, b); wait(A)
+        x = dstr_vec(xh, n, b); wait(x)
+        y = alloc_zeros_vec(n, b); wait(y)
         timed_min() do
             mul!(y, A, x); wait(y)
         end
@@ -655,8 +774,8 @@ function bench_spgemm()
     Ah = sprand(Float64, n, n, p)
     Bh = sprand(Float64, n, n, p)
     td = with_blas(BLAS_DAGGER) do
-        A = distribute(Ah, Blocks(b, b))
-        B = distribute(Bh, Blocks(b, b))
+        A = dstr_mat(Ah, n, b)
+        B = dstr_mat(Bh, n, b)
         timed_min() do
             C = A * B
             wait(C)
@@ -684,8 +803,8 @@ function _krylov_pair(; feature, key, grid, b, solver_d, solver_b, host_name,
     Pd = nothing
     setup_d = nothing
     td = with_blas(BLAS_DAGGER) do
-        DA = distribute(Ah, Blocks(b, b)); wait(DA)
-        Db = distribute(bh, Blocks(b)); wait(Db)
+        DA = dstr_mat(Ah, n, b); wait(DA)
+        Db = dstr_vec(bh, n, b); wait(Db)
         if build_d !== nothing
             setup_d = @elapsed begin
                 Pd = build_d(DA)
@@ -772,7 +891,7 @@ function bench_krylov_blockjacobi()
                  solver_d=_cg_d, solver_b=_cg_b,
                  host_name="Krylov.cg + hand-rolled block LU",
                  build_d=Dagger.BlockJacobiPreconditioner,
-                 build_b=A -> HostBlockPC(A, S.krylov_b),
+                 build_b=A -> HostBlockPC(A, tile_used(S.krylov_b)),
                  notes="host is serial per-block LU (no ecosystem BlockJacobi)")
 end
 
@@ -815,7 +934,7 @@ function bench_krylov_asm()
                  solver_d=_gmres_d, solver_b=_gmres_b,
                  host_name="Krylov.gmres + hand-rolled RAS (serial)",
                  build_d=A -> Dagger.AdditiveSchwarzPreconditioner(A; overlap=1),
-                 build_b=A -> HostRAS(A, S.krylov_b, 1),
+                 build_b=A -> HostRAS(A, tile_used(S.krylov_b), 1),
                  notes="overlap=1, PC_ASM_RESTRICT; no Julia-ecosystem distributed RAS — host is serial pre-factored RAS")
 end
 
@@ -826,10 +945,10 @@ function bench_sparse_direct()
     Ah = laplacian_2d(Float64, grid)
     bh = rand(n)
     DA = with_blas(BLAS_DAGGER) do
-        A = distribute(Ah, Blocks(b, b)); wait(A)
+        A = dstr_mat(Ah, n, b); wait(A)
         A
     end
-    Db = distribute(bh, Blocks(b)); wait(Db)
+    Db = dstr_vec(bh, n, b); wait(Db)
 
     if wanted("sparse_chol")
         td = with_blas(BLAS_DAGGER) do
@@ -907,18 +1026,18 @@ function bench_assembly()
     Random.seed!(1234)
     Ah = laplacian_2d(Float64, grid)
     I, J, V = findnz(Ah)
-    part = Blocks(b, b)
+    part = mat_blocks(n, b)
     td = with_blas(BLAS_DAGGER) do
         timed_min() do
-            A = SparseArrays.sparse(I, J, V, n, n, part)
+            A = SparseArrays.sparse(I, J, V, n, n, +, part; assignment=CFG.assignment)
             wait(A)
         end
     end
     tb = with_blas(BLAS_DAGGER) do
         # baseline: serial CSC then distribute — the path assembly replaces
         timed_min() do
-            S = SparseArrays.sparse(I, J, V, n, n)
-            A = distribute(S, part)
+            Sloc = SparseArrays.sparse(I, J, V, n, n)
+            A = dstr(Sloc, part)
             wait(A)
         end
     end
@@ -935,8 +1054,8 @@ function bench_linearsolve()
     Random.seed!(1234)
     Ah = laplacian_2d(Float64, grid)
     bh = rand(n)
-    DA = distribute(Ah, Blocks(b, b)); wait(DA)
-    Db = distribute(bh, Blocks(b)); wait(Db)
+    DA = dstr_mat(Ah, n, b); wait(DA)
+    Db = dstr_vec(bh, n, b); wait(Db)
 
     td = with_blas(BLAS_DAGGER) do
         timed_min() do
@@ -959,8 +1078,8 @@ function bench_linearsolve()
     n2 = grid2 * grid2
     Ah2 = laplacian_2d(Float64, grid2)
     bh2 = rand(n2)
-    DA2 = distribute(Ah2, Blocks(b2, b2)); wait(DA2)
-    Db2 = distribute(bh2, Blocks(b2)); wait(Db2)
+    DA2 = dstr_mat(Ah2, n2, b2); wait(DA2)
+    Db2 = dstr_vec(bh2, n2, b2); wait(Db2)
     td = with_blas(BLAS_DAGGER) do
         timed_min() do
             sol = LinearSolve.solve(LinearProblem(DA2, Db2), PureUMFPACKFactorization())
@@ -984,11 +1103,11 @@ function bench_operators()
     Nhost = fill(1 / sqrt(n), n)
     xh = rand(n)
     td = with_blas(BLAS_DAGGER) do
-        DA = distribute(Ah, Blocks(b, b)); wait(DA)
-        DN = distribute(ones(n), Blocks(b)); wait(DN)
+        DA = dstr_mat(Ah, n, b); wait(DA)
+        DN = dstr_vec(ones(n), n, b); wait(DN)
         PA = Dagger.Projected(DA, DN)
-        x = distribute(xh, Blocks(b)); wait(x)
-        y = Dagger.zeros(Blocks(b), Float64, n); wait(y)
+        x = dstr_vec(xh, n, b); wait(x)
+        y = alloc_zeros_vec(n, b); wait(y)
         timed_min() do
             mul!(y, PA, x); wait(y)
         end
@@ -1011,13 +1130,13 @@ function bench_operators()
     Ahost = [A11h A12h; A21h A22h]
     zh = rand(n)
     td = with_blas(BLAS_DAGGER) do
-        A11 = distribute(A11h, Blocks(b, b)); wait(A11)
-        A12 = distribute(A12h, Blocks(b, b)); wait(A12)
-        A21 = distribute(A21h, Blocks(b, b)); wait(A21)
-        A22 = distribute(A22h, Blocks(b, b)); wait(A22)
+        A11 = dstr_mat(A11h, n1, b); wait(A11)
+        A12 = dstr_mat(A12h, n1, b); wait(A12)
+        A21 = dstr_mat(A21h, n1, b); wait(A21)
+        A22 = dstr_mat(A22h, n1, b); wait(A22)
         BO = Dagger.BlockOperator(A11, A12, A21, A22)
-        z = distribute(zh, Blocks(b)); wait(z)
-        y = Dagger.zeros(Blocks(b), Float64, n); wait(y)
+        z = dstr_vec(zh, n, b); wait(z)
+        y = alloc_zeros_vec(n, b); wait(y)
         timed_min() do
             mul!(y, BO, z); wait(y)
         end
@@ -1038,7 +1157,7 @@ function bench_krylov_asm_basic()
                  solver_d=_cg_d, solver_b=_cg_b,
                  host_name="Krylov.cg + hand-rolled ASM BASIC (serial)",
                  build_d=A -> Dagger.AdditiveSchwarzPreconditioner(A; overlap=1, type=:basic),
-                 build_b=A -> HostRASBasic(A, S.krylov_b, 1),
+                 build_b=A -> HostRASBasic(A, tile_used(S.krylov_b), 1),
                  notes="type=:basic (SPD); overlap=1; host is serial pre-factored ASM")
 end
 
@@ -1070,9 +1189,9 @@ function bench_csr_spmv()
                          dagger_s=nothing, baseline_s=nothing, baseline_name="—",
                          error="SparseMatricesCSR not in environment"); return)
     td = with_blas(BLAS_DAGGER) do
-        A = SparseMatricesCSR.sparsecsr(Ah, Blocks(b, b)); wait(A)
-        x = distribute(xh, Blocks(b)); wait(x)
-        y = Dagger.zeros(Blocks(b), Float64, n); wait(y)
+        A = SparseMatricesCSR.sparsecsr(Ah, mat_blocks(n, b)); wait(A)
+        x = dstr_vec(xh, n, b); wait(x)
+        y = alloc_zeros_vec(n, b); wait(y)
         timed_min() do
             mul!(y, A, x); wait(y)
         end
@@ -1093,7 +1212,7 @@ function bench_eigen()
     Random.seed!(1234)
     Ah = laplacian_2d(Float64, grid)
     td = with_blas(BLAS_DAGGER) do
-        A = distribute(Ah, Blocks(b, b)); wait(A)
+        A = dstr_mat(Ah, n, b); wait(A)
         timed_min() do
             F = eigen(A; nev=1, which=:SR)
             wait_d(F.vectors)
@@ -1116,8 +1235,8 @@ function bench_numeric_refactor()
     Ah = laplacian_2d(Float64, grid)
     # Same sparsity, different values (KLU numeric update, not symbolic).
     Ah2 = Ah + SparseArrays.spdiagm(0 => fill(0.1, n))
-    DA = distribute(Ah, Blocks(b, b)); wait(DA)
-    DA2 = distribute(Ah2, Blocks(b, b)); wait(DA2)
+    DA = dstr_mat(Ah, n, b); wait(DA)
+    DA2 = dstr_mat(Ah2, n, b); wait(DA2)
     F = Dagger.klu(DA)
     wait_factor(F)
     td = with_blas(BLAS_DAGGER) do
@@ -1143,9 +1262,9 @@ function bench_mixed_mul()
     Ah = laplacian_1d(Float32, n)
     xh = rand(Float64, n)
     td = with_blas(BLAS_DAGGER) do
-        A = distribute(Ah, Blocks(b, b)); wait(A)
-        x = distribute(xh, Blocks(b)); wait(x)
-        y = Dagger.zeros(Blocks(b), Float64, n); wait(y)
+        A = dstr_mat(Ah, n, b); wait(A)
+        x = dstr_vec(xh, n, b); wait(x)
+        y = alloc_zeros_vec(n, b); wait(y)
         timed_min() do
             mul!(y, A, x); wait(y)
         end
@@ -1166,8 +1285,8 @@ function bench_multi_rhs()
     Random.seed!(1234)
     Ah = laplacian_2d(Float64, grid)
     Bh = rand(n, nrhs)
-    DA = distribute(Ah, Blocks(b, b)); wait(DA)
-    DB = distribute(Bh, Blocks(b, nrhs)); wait(DB)
+    DA = dstr_mat(Ah, n, b); wait(DA)
+    DB = dstr(Bh, Blocks(tile_used(b), nrhs)); wait(DB)
     td = with_blas(BLAS_DAGGER) do
         timed_min() do
             X = DA \ DB
@@ -1186,18 +1305,17 @@ end
 
 # --- main ------------------------------------------------------------------
 
-function main()
-    if is_root()
-        println("linalg_integration  mode=", MODE, " scale=", SCALE,
-                " threads=", NTHREADS, " ranks=", NRANKS)
-        println("julia ", VERSION, "  commit ", META["commit"],
-                "  instance ", META["instance"])
-        println("warmup=", WARMUP, " samples=", SAMPLES,
-                " out=", OUTDIR)
-        flush(stdout)
-    end
-    maybe_barrier()
+function _sync_meta!()
+    META["assignment"] = string(CFG.assignment)
+    META["layout"] = CFG.layout
+    META["scope"] = CFG.scope
+    META["tile"] = CFG.tile
+    return nothing
+end
 
+function run_all_benches()
+    _sync_meta!()
+    with_cfg_scope() do
     @safe_bench "dense_gemm" bench_dense_gemm()
     @safe_bench "dense_lu" bench_dense_factor("Dense LU + \\", "dense_lu", S.lu_n, S.lu_b,
         A -> lu(A, RowMaximum()), A -> lu(A, RowMaximum()),
@@ -1246,11 +1364,109 @@ function main()
     @safe_bench "numeric_refactor" bench_numeric_refactor()
     @safe_bench "mixed_mul" bench_mixed_mul()
     @safe_bench "multi_rhs" bench_multi_rhs()
+    end # with_cfg_scope
+    return ROWS
+end
+
+function _sweep_grid()
+    tiles = _parse_csv_ints(get(ENV, "LINALG_BENCH_TILES", ""),
+                            MODE == "mpi" ? [512, 1024] : [256, 512, 1024, 2048])
+    assigns = _parse_csv_syms(get(ENV, "LINALG_BENCH_ASSIGNS", ""),
+                              [:arbitrary, :blockrow, :cyclicrow])
+    for a in assigns
+        a in _ASSIGN_OK || error("LINALG_BENCH_ASSIGNS entry $(a) not in $(_ASSIGN_OK)")
+    end
+    layouts = let xs = _parse_csv(get(ENV, "LINALG_BENCH_LAYOUTS", ""))
+        isempty(xs) ? ["2d", "1drow"] : lowercase.(xs)
+    end
+    scopes = let xs = _parse_csv(get(ENV, "LINALG_BENCH_SCOPES", ""))
+        isempty(xs) ? ["default"] : lowercase.(xs)
+    end
+    return tiles, assigns, layouts, scopes
+end
+
+function sweep_best_rows(rows)
+    best = Dict{String,Any}()
+    for r in rows
+        r["error"] === nothing || continue
+        r["dagger_s"] isa Real && isfinite(r["dagger_s"]) || continue
+        k = String(r["key"])
+        if !haskey(best, k) || r["dagger_s"] < best[k]["dagger_s"]
+            best[k] = r
+        end
+    end
+    return best
+end
+
+function main()
+    if is_root()
+        println("linalg_integration  mode=", MODE, " scale=", SCALE,
+                " threads=", NTHREADS, " ranks=", NRANKS,
+                " sweep=", SWEEP)
+        println("julia ", VERSION, "  commit ", META["commit"],
+                "  instance ", META["instance"])
+        println("warmup=", WARMUP, " samples=", SAMPLES,
+                " out=", OUTDIR)
+        flush(stdout)
+    end
+    maybe_barrier()
+
+    if !SWEEP
+        run_all_benches()
+    else
+        tiles, assigns, layouts, scopes = _sweep_grid()
+        if is_root()
+            println("sweep tiles=", tiles, " assigns=", assigns,
+                    " layouts=", layouts, " scopes=", scopes,
+                    " keys=", sort(collect(SWEEP_ONLY)))
+            flush(stdout)
+        end
+        for layout in layouts, scope in scopes, assign in assigns
+            tile_list = layout == "auto" ? Union{Int,Nothing}[nothing] : tiles
+            for tile in tile_list
+                CFG.assignment = assign
+                CFG.layout = layout
+                CFG.scope = scope
+                CFG.tile = tile
+                if is_root()
+                    println("SWEEP tile=", tile, " assign=", assign,
+                            " layout=", layout, " scope=", scope)
+                    flush(stdout)
+                end
+                try
+                    run_all_benches()
+                catch err
+                    is_root() && @error "sweep config failed" tile assign layout scope exception=(err, catch_backtrace())
+                    push_row!(feature="sweep", key="sweep_config",
+                              problem="(failed)",
+                              dagger_s=nothing, baseline_s=nothing, baseline_name="—",
+                              error=sprint(showerror, err))
+                end
+                GC.gc()
+                maybe_barrier()
+            end
+        end
+    end
 
     if is_root()
         println()
         println(markdown_table(ROWS))
-        println("Wrote ", joinpath(OUTDIR, "linalg_integration_$(MODE == "mpi" ? "mpi" : "mt").json"))
+        tag = SWEEP ? (MODE == "mpi" ? "sweep_mpi" : "sweep_mt") :
+                     (MODE == "mpi" ? "mpi" : "mt")
+        println("Wrote ", joinpath(OUTDIR, "linalg_integration_$(tag).json"))
+        if SWEEP
+            println()
+            println("Best Dagger time per kernel (min of timed runs; same atol/rtol):")
+            for (k, r) in sort(collect(sweep_best_rows(ROWS)); by=first)
+                println("  ", k, "  ", fmt_s(r["dagger_s"]),
+                        "  tile=", r["tile"], " assign=", r["assignment"],
+                        " layout=", r["layout"], " scope=", r["scope"],
+                        r["relres_d"] === nothing ? "" :
+                            "  ‖Ax−b‖/‖b‖=$(round(r["relres_d"]; sigdigits=3))")
+            end
+            println("These ranks are harness output, not a published winner. ",
+                    "Wait for linalg/blas1-fastpath before treating them as best-config.")
+        end
     end
     return ROWS
 end

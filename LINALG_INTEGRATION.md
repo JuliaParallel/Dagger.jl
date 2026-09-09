@@ -304,6 +304,7 @@ Priority: **P0 done** / **P1 done** = merged onto `Dagger-linalg-ultra`. **P2** 
 | 2026-09-08 | `0770052b` `linalg/matrix-io` @ `d2a05594` | No conflicts. AWS matrixio 9/9. |
 | 2026-09-08 | tracking + full suite | Job `2d19db10113920ac`: P2 suites green; full `array/linalg` (no Finch) green except NNS 39/40 (`24>25` P-width, twice). Remaining after NNS: sparsedirect 349, linearsolve 42, assembly 64, matrixio 9, partition 295. |
 | 2026-09-09 | docs + tracker | `@stencil` cannot express GMG transfers (`docs/src/stencils.md` `stencil-no-gmg`); AMG vs BoomerAMG coverage table (this file + shorter `iterative-solving.md`). Best-config sweep numbers wait for `linalg/blas1-fastpath`. |
+| 2026-09-09 | sweep harness | `run_linalg_sweep.sh` + `LINALG_BENCH_SWEEP` in `linalg_integration.jl`. Pending BLAS-1 before measured best-config tables. |
 
 ## Remaining follow-ups
 
@@ -407,13 +408,20 @@ iterations and the un-preconditioned `‖Ax−b‖/‖b‖`. Speedup is
 baseline/Dagger (`>1` means Dagger is faster). Empty cells are omitted, not
 invented.
 
-**Blocksize / assignment sweep:** **best-config numbers are pending the
-`linalg/blas1-fastpath` merge onto this branch.** That path changes BLAS-1
-/ Krylov walls; a winner published before it lands would be stale the next
-day. The sweep will use existing `Blocks`, `distribute` assignment
-(`:arbitrary` / `:blockrow` / `:blockcol` / `:cyclicrow` / `:cycliccol`),
-1-D vs 2-D tiling, and `Dagger.scope` / `ProcessScope` — no new assignment
-API. No invented numbers. Harness lands in a follow-up commit.
+**Blocksize / assignment sweep (harness ready, numbers pending BLAS-1):**
+`benchmark/suites/run_linalg_sweep.sh` drives `linalg_integration.jl` with
+`LINALG_BENCH_SWEEP=1`. It loops existing knobs only — `Blocks` tile side
+(`LINALG_BENCH_TILES`), `distribute` assignment (`:arbitrary` / `:blockrow`
+/ `:blockcol` / `:cyclicrow` / `:cycliccol`), layout `2d` / `1drow` /
+`1dcol` / `auto`, and `Dagger.scope` (`default` / `process` /
+`threads:N`). Default compact keys: `dense_gemm`, `sparse_spmv`,
+`krylov_cg`, `krylov_blockjacobi` (full GMRES is too expensive per cell).
+Deep warmup, min of timed runs, same Krylov `atol`/`rtol`; rows record
+`‖Ax−b‖/‖b‖`. Output: `benchmark/results/linalg_integration_sweep_mt.json`.
+**Do not publish a “best configuration” until `linalg/blas1-fastpath` is
+on `origin/Dagger-linalg-ultra`** — that path changes BLAS-1 / Krylov
+walls. No invented numbers below. MPI sweep is optional and hang-prone
+(same omit list as the MPI table).
 
 **Hardware / software (multi-threaded):** AWS `c6i.4xlarge` (16 vCPU, 32 GiB,
 `us-east-1`), Julia 1.12.7, 16 Julia threads, 2026-09-07 (PDT) /
