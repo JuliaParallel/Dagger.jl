@@ -183,6 +183,10 @@ function _copy_inds_lengths_match(Binds, Ainds)
 end
 
 function darray_copyto!(B::DArray{TB,NB}, A::DArray{TA,NA}, Binds=parentindices(B), Ainds=parentindices(A)) where {TB,NB,TA,NA}
+    # Same-layout full copy on local ThreadProc tiles: skip Datadeps (lesson 48).
+    if _blas1_copyto_local_ok(B, A, Binds, Ainds)
+        return _blas1_copyto_local!(B, A)
+    end
     if _is_linear_parentinds(B, Binds) || _is_linear_parentinds(A, Ainds)
         return _darray_copyto_linear!(B, A, Binds, Ainds)
     end

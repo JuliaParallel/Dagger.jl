@@ -162,6 +162,12 @@ blocks the solvers rely on — `dot`, `norm`, `axpy!`, `axpby!`, `rmul!`,
 `copyto!`, `fill!`, broadcasting — are all implemented for `DVector` and align
 mismatched partitionings automatically.
 
+On a single process, those kernels skip `spawn_datadeps` when every tile is
+already a local `ThreadProc` host chunk: the Datadeps region is ~1 ms while
+the SIMD is sub-microsecond, so the scheduler would dominate. MPI, remote
+workers, and GPU tiles stay on Datadeps on purpose — that is how Dagger moves
+data across ranks and devices. There is no second MPI BLAS-1 path.
+
 !!! note "Square tiles are fastest, but not required"
     When the operator is a `DMatrix`, **square tiles** (`Blocks(k, k)`) are the
     layout everything here is fastest on. The solver's workspace vectors are all
