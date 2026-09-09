@@ -303,6 +303,7 @@ Priority: **P0 done** / **P1 done** = merged onto `Dagger-linalg-ultra`. **P2** 
 | 2026-09-08 | `026385e6` `linalg/dense-schur` @ `2c1e32b9` | Conflict: `AGENTS.md` (kept sparse-QR 46; incoming schur is 47). Docs/`runtests` auto-merged. AWS schur 8, eigen 34. |
 | 2026-09-08 | `0770052b` `linalg/matrix-io` @ `d2a05594` | No conflicts. AWS matrixio 9/9. |
 | 2026-09-08 | tracking + full suite | Job `2d19db10113920ac`: P2 suites green; full `array/linalg` (no Finch) green except NNS 39/40 (`24>25` P-width, twice). Remaining after NNS: sparsedirect 349, linearsolve 42, assembly 64, matrixio 9, partition 295. |
+| 2026-09-09 | docs + tracker | `@stencil` cannot express GMG transfers (`docs/src/stencils.md` `stencil-no-gmg`); AMG vs BoomerAMG coverage table (this file + shorter `iterative-solving.md`). Best-config sweep numbers wait for `linalg/blas1-fastpath`. |
 
 ## Remaining follow-ups
 
@@ -326,13 +327,72 @@ P2 flags (completeness, not scheduled):
 
 - **Einsum / tensor contractions** — no ecosystem generic that can dispatch on `DArray` without a new tensor backend. Do not invent `Dagger.einsum`.
 - **MPI owned+ghost / `VecGhost`** — rank-owned `Chunk` + `HaloArray` / `@stencil` already cover this. A new public vector type is out of scope.
-- **`@stencil` restriction/prolongation** — not usable for GMG (lesson 37). Matrix `GeometricMultigrid` is the transfer path.
+- **`@stencil` restriction/prolongation** — not usable for GMG (lesson 37).
+  Matrix `GeometricMultigrid` is the transfer path. User-facing write-up:
+  `docs/src/stencils.md` (`stencil-no-gmg`), plus the GMG / BoomerAMG
+  sections in `docs/src/iterative-solving.md`. Short recap below.
 - **Full dense geev / ScaLAPACK Schur** — not required. `eigen` stays LOBPCG; P2 `schur` is gather-then-LAPACK for dense tiles only.
 - **Near-nullspace Q1 elasticity `P`-width assert** — on `40f75ac4`, `array/linalg/nearnullspace` is 39/40 twice (`size(Mn.levels[1].P, 2) > size(Ms.levels[1].P, 2)` evaluated `24 > 25`). P2 did not touch AMG. Residual/`\\` checks in that testset were not reached. **Question:** is this a brittle width check vs a real NNS regression? Do not weaken it from P2.
 
 AWS labeling (2026-09-08 `vmbench.py` working-tree tweak): EC2 `Name` is now the launch `--label` (was always `vmbench`), plus `vmbench-label` / `vmbench-pid` / `vmbench-started`. `batchd` still calls `provision_vm` without `label=`, so new `batchctl` VMs would tag `Name=vmbench`. Pre-tweak instances (including `i-021ef9ff800fc17a4`) have no `vmbench-label` tag. Filter/teardown by **job id**. Reserved `dagger-distributed` (`2f5b7c978c2a0b3a`) and `dagger-mpi` (`a1e9f3af2f347b8d`) are already `done` in batchd — do not `done` them again.
 
 `AGENTS.md` lessons 27–47 are the union of the per-workstream lessons (through block Krylov 45; sparse `qr` is 46; dense `schur` is 47). Lesson 20 remains unused (pre-existing gap). Lesson 35 is GPU-PC; do not reuse that number.
+
+---
+
+## Design notes
+
+### Why `@stencil` cannot do GMG restriction / prolongation
+
+`@stencil` (including `origin/jps/sparse-stencil`) is a **same-`idx`,
+same-size, same-chunk** halo sweep. Lowering in `src/array/stencil.jl`
+(`macro stencil`) requires `r_idx == write_idx` — a neighborhood at any
+other index throws `ArgumentError` — and spawns one task per destination
+chunk that reads the **same** `chunk_idx` from every operand. Halos are
+`{−1,0,+1}` same-grid neighbors (`select_neighborhood_info`); the kernel
+(`cpu_stencil_sweep!`) iterates `axes(output)`. Operands must share shape
+and layout.
+
+Geometric restriction / prolongation maps a fine grid of size `n` onto a
+coarse grid of size `n/2` (injection / full-weighting / linear / bilinear).
+That is a **different index and a different array size**. We did **not**
+grow a competing stencil stack. `GeometricMultigrid` is
+matrix-based: `_gmg_restriction_coo` / `_gmg_prolongation_coo`
+(`src/array/gmg.jl`) assembled as sparse `DMatrix`s
+(`sparse(I, J, V, …, Blocks)` in `ext/SparseArraysExt.jl`), Galerkin
+`Ac = R A P` via existing `mul!`, V-cycle `_gmg_vcycle!`. Making
+`@stencil` do this would need mapped indices, different-sized operands,
+and a gather of source chunks that overlap the mapped neighborhood — a
+new language. Not scheduled. User-facing: `docs/src/stencils.md`
+(`stencil-no-gmg`).
+
+### AMG vs HYPRE BoomerAMG
+
+Not PETSc/HYPRE parity. Judge AMG quality by `‖Ax−b‖`, never by Krylov
+`stats.solved` (lesson 19: per-tile AMG can look solved with a huge true
+residual; lesson 32: one Jacobi sweep each side of a V-cycle can lose to
+Jacobi-only).
+
+| BoomerAMG feature | Dagger | Notes |
+|---|---|---|
+| Global V-cycle over a distributed operator | **Partial** | `GlobalAMG` / `SmoothedAggregationPreconditioner` / `RugeStubenPreconditioner`: tiled `P` (lesson 42), Galerkin `P'AP`, damped-Jacobi V-cycle (default 2+2, lesson 32). Typically one coarse grid then gathered LU. Not a distributed MIS. |
+| Per-subdomain AMG | **Different meaning** | `AMGPreconditioner` is **block-diagonal Schwarz** (one AlgebraicMultigrid.jl hierarchy per diagonal tile). `Blocks(n,n)` is “global” only because there is one tile. Lesson 19. |
+| Geometric / PFMG transfers | **Partial** | `GeometricMultigrid`: injection / full-weighting `R`, linear / bilinear `P`, Galerkin `RAP`, Jacobi V-cycle. 1-D and 2-D only. Not `@stencil`. |
+| Overlapping Schwarz | **As its own PC** | `AdditiveSchwarzPreconditioner` (`:restrict` = `PC_ASM_RESTRICT`, `:basic` = `PC_ASM_BASIC`). Not a BoomerAMG smoother. |
+| Near-nullspace / rigid-body modes | **Partial** | `SmoothedAggregationPreconditioner(A; nullspace=N)` / `GlobalAMG(Projected(A, N))` via `fit_candidates`. RS rejects `nullspace`. `AMGPreconditioner` does not take it. `nullspace=N` still gathers `A`+`N` (lesson 39). No nodal / unknown-based systems AMG. |
+| Coarsening: HMIS / PMIS / Falgout / CLJP / CGC / aggressive | **Missing** | Per-tile `StandardAggregation` or classical RS + leftover matching of *unaggregated* interface nodes. Do not merge already-assigned interface aggregates (tried; residual worse than Jacobi). |
+| Interpolation: classical / extended / ext+i / FF / AIR / multipass | **Missing** (except local classical / SA) | Tiled SA tentative `P` + Jacobi smooth `P ← T − ω D⁻¹ A T`; RS uses AlgebraicMultigrid.jl classical `P` on the tile. No AIR, no ext+i, no FF. |
+| Smoothers: hybrid GS, Schwarz, Chebyshev, ILU, FSAI, ℓ1-Jacobi | **Missing** | Damped Jacobi only (`relax=2/3`). RAS/ILU exist as **separate** preconditioners, not as AMG level smoothers. |
+| Cycle types: W, F, additive / mult-additive AMG | **Missing** | V-cycle only. |
+| Strength threshold / truncation / `Pmax` / non-Galerkin drop | **Missing** as first-class API | AlgebraicMultigrid.jl kwargs may pass through on the gathered / per-tile path; no HYPRE-style level drop or non-Galerkin sparsification. |
+| Complex arithmetic | **Missing** | Real `DMatrix` path. |
+| Nodal / unknown-based systems | **Missing** | Scalar SA default is `ones`. Elasticity needs `nullspace=N` (gathered). |
+| Native GPU AMG setup / apply | **Missing** | AlgebraicMultigrid.jl is host. GPU-PC (lesson 35) keeps *vector* chunks on-device for some block PCs; the AMG hierarchy itself is still host. |
+| Coarsest solve | Gathered LU | Same idea as HYPRE’s sequential coarse solve; we gather (`_gather_sparse`), not a distributed coarse AMG. |
+
+**Covered (short):** global V-cycle with tiled SA/RS `P` and Jacobi; optional SA near-nullspace; geometric RAP V-cycle; RAS as `PCASM`; per-tile AMG as Schwarz (do not call that BoomerAMG).
+
+**Missing (short):** HMIS/PMIS/Falgout/aggressive coarsening; extended / AIR interpolation; Chebyshev / hybrid GS / ILU AMG smoothers; W/F and additive cycles; nodal systems; complex; GPU BoomerAMG; HYPRE strength/truncation/non-Galerkin knobs.
 
 ---
 
@@ -346,6 +406,14 @@ parallelism); host dense uses OpenBLAS at `nthreads`. Iterative methods share
 iterations and the un-preconditioned `‖Ax−b‖/‖b‖`. Speedup is
 baseline/Dagger (`>1` means Dagger is faster). Empty cells are omitted, not
 invented.
+
+**Blocksize / assignment sweep:** **best-config numbers are pending the
+`linalg/blas1-fastpath` merge onto this branch.** That path changes BLAS-1
+/ Krylov walls; a winner published before it lands would be stale the next
+day. The sweep will use existing `Blocks`, `distribute` assignment
+(`:arbitrary` / `:blockrow` / `:blockcol` / `:cyclicrow` / `:cycliccol`),
+1-D vs 2-D tiling, and `Dagger.scope` / `ProcessScope` — no new assignment
+API. No invented numbers. Harness lands in a follow-up commit.
 
 **Hardware / software (multi-threaded):** AWS `c6i.4xlarge` (16 vCPU, 32 GiB,
 `us-east-1`), Julia 1.12.7, 16 Julia threads, 2026-09-07 (PDT) /

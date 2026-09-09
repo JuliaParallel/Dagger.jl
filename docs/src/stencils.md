@@ -352,7 +352,7 @@ expected_B_seq = expected_A .* 2
 
 ## Operations on Multiple `DArray`s
 
-You can read from and write to multiple `DArray`s within a single `@stencil` block, provided they have compatible chunk structures.
+You can read from and write to multiple `DArray`s within a single `@stencil` block, provided they have compatible chunk structures. That compatibility is part of the **same-`idx`, same-size, same-chunk** contract described below — it is not a suggestion.
 
 ```julia
 A = ones(Blocks(1, 1), Int, 2, 2)
@@ -364,6 +364,108 @@ C = zeros(Blocks(1, 1), Int, 2, 2)
 end
 @assert all(collect(C) .== 4)
 ```
+
+## [Why restriction / prolongation cannot be a `@stencil`](@id stencil-no-gmg)
+
+`@stencil` is a **same-`idx`, same-size, same-chunk halo sweep**. That is the
+whole contract, including on `origin/jps/sparse-stencil` (sparse-tile sweeps
+and `@stencil sparse=true`). It is the right tool for Jacobi, Game of Life,
+and image filters. It is the wrong tool for geometric multigrid transfers.
+
+### The contract the macro actually lowers
+
+Each statement is rewritten in [`src/array/stencil.jl`](https://github.com/JuliaParallel/Dagger.jl/blob/master/src/array/stencil.jl)
+(`macro stencil`) as:
+
+1. **One `spawn_datadeps` region per expression**, then **one task per chunk
+   of the write array**, indexed by the same `chunk_idx`:
+
+   ```julia
+   for chunk_idx in CartesianIndices(chunks(write_var))
+       Dagger.@spawn inner_fn(Write(chunks(write_var)[chunk_idx]),
+                              Read(chunks(read_var)[chunk_idx]), …)
+   end
+   ```
+
+   Every operand is therefore addressed at the **same chunk coordinate**.
+   Operands must share size, shape, and chunk layout (the macro docstring
+   says so explicitly). A coarse grid of length `n/2` does not have a
+   `chunks[i,j]` that lines up with the fine grid.
+
+2. **Neighborhood access is rejected at any other index.** Lowering walks
+   `A[idx]` / `@neighbors(A[idx], …)` and requires `r_idx == write_idx`.
+   A different index throws:
+
+   ```
+   ArgumentError: Neighborhood access must be at the same index
+   ```
+
+   There is no way to write `coarse[c] = f(fine[2c-1], fine[2c], fine[2c+1])`
+   — that is a *different* `idx` on a *different* array.
+
+3. **Halos are same-grid neighbors.** `select_neighborhood_info` offsets
+   the current chunk by `{−1,0,+1}` in each dimension (`3^N − 1` neighbors)
+   and `cpu_stencil_sweep!` (`inner_stencil!`) iterates `axes(output)`.
+   Injection / full-weighting / bilinear need values at **mapped** fine
+   indices, not a halo around the coarse point’s own chunk.
+
+`origin/jps/sparse-stencil` does not loosen any of this. It adds dilated CSC
+support and GPU halo staging. The sweep is still same-`idx`, same-size,
+same-chunk.
+
+### What geometric transfers actually do
+
+Restriction and prolongation map a fine grid of size `n` onto a coarse grid
+of size `n/2` (even reduction per dimension):
+
+| Transfer | Typical stencil | Index / size |
+|---|---|---|
+| Injection `R` | `coarse[i] ← fine[2i]` | write `n/2`, read `n`, different `idx` |
+| Full-weighting `R` (1-D) | `(1,2,1)/4` centered at `2i` | same |
+| Linear `P` (1-D) | `fine[2i] ← coarse[i]`, `fine[2i±1] ← ½` | write `n`, read `n/2` |
+| Bilinear `P` (2-D) | 9-point from a coarse cell | write `nx·ny`, read `(nx/2)·(ny/2)` |
+
+That is a **different index and a different array size**. It is outside the
+stencil contract. A V-cycle also needs the Galerkin product `Ac = R A P` on
+those rectangular operators — not a same-size halo update.
+
+### What we shipped instead (and are not replacing)
+
+[`GeometricMultigrid`](@ref) is **matrix-based**. It does **not** grow a
+competing stencil stack:
+
+- `_gmg_restriction_coo` / `_gmg_prolongation_coo` in `src/array/gmg.jl`
+  emit COO for injection / full-weighting `R` and linear / bilinear `P`.
+- `ext/SparseArraysExt.jl` assembles those as sparse `DMatrix`s
+  (`sparse(I, J, V, m, n, Blocks)`) and forms `Ac = R * A * P` with the
+  existing distributed `mul!`.
+- The V-cycle (`_gmg_vcycle!`) restricts with `mul!(coarse_b, R, residual)`
+  and prolongs with `mul!(correction, P, coarse_x)`, then damped-Jacobi
+  via the same `mul!` as [`GlobalAMG`](@ref).
+
+See [Geometric multigrid](@ref "Geometric multigrid (regular grids)") in
+the iterative-solvers page. Check `‖Ax−b‖`, not only Krylov
+`stats.solved`.
+
+### What would have to change in `@stencil` (we are not doing this)
+
+Making inter-grid transfers a `@stencil` would be a new language, not a
+keyword:
+
+- Allow `r_idx != write_idx`, with an explicit index map (`c → 2c`, 2-D
+  bilinear, …).
+- Allow operands of **different size and different chunk layout**, and
+  spawn per *destination* chunk while gathering every *source* chunk that
+  overlaps the mapped neighborhood (not the current `3^N−1` same-grid
+  halo).
+- Rebuild halo construction for a different index space (even-point
+  injection; 2×2 fine cells for bilinear). Same-chunk `Read(chunks[i])`
+  is not enough: one coarse tile can pull from several fine tiles.
+- Decide what “all at once” means when the write array has fewer chunks
+  than the read array, and how Datadeps aliases those gathers.
+
+That is a competing stencil stack. Geometric MG already has a path that
+reuses sparse assembly and `mul!`. Use that.
 
 ## Update Operators
 

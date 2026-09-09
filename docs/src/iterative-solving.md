@@ -427,9 +427,19 @@ operator is the distributed Galerkin product `Ac = R * A * P`, and
 column-major 2-D grid). User-supplied `R` / `P` (`AbstractMatrix` or `DMatrix`)
 replace the finest transfer.
 
-This does **not** use `@stencil`. `origin/jps/sparse-stencil` is a same-index,
-same-size halo sweep; restriction maps `n → n/2` and cannot be written that
-way. Do not treat this constructor as a new stencil stack.
+This is **matrix-based**, not a stencil. `@stencil` (including
+`origin/jps/sparse-stencil`) is a same-`idx`, same-size, same-chunk halo
+sweep: neighborhood access at any other index is rejected, and operands must
+share shape and layout. Geometric restriction / prolongation maps a fine grid
+of size `n` onto a coarse grid of size `n/2` — a different index and a
+different array size — so it cannot be written as `@stencil`. We did not grow
+a competing stencil stack for that gap. Construction is
+`_gmg_restriction_coo` / `_gmg_prolongation_coo` (`src/array/gmg.jl`) assembled
+as sparse `DMatrix`s (`sparse(I, J, V, …, Blocks)` in `SparseArraysExt`),
+then Galerkin `mul!` and a V-cycle that restricts / prolongs with `mul!`
+(`_gmg_vcycle!`). The full contract, and what would have to change in
+`@stencil` to make inter-grid transfers possible (we are not doing that), is
+in [Why restriction / prolongation cannot be a `@stencil`](@ref stencil-no-gmg).
 
 ```julia
 using SparseArrays, Krylov
@@ -443,6 +453,37 @@ r = similar(b); mul!(r, DA, x); axpy!(-1, b, r)
 
 `AMGPreconditioner` and `GlobalAMG` are unchanged: per-tile AMG is still
 additive Schwarz; aggregation AMG is still `GlobalAMG`.
+
+### AMG vs HYPRE BoomerAMG
+
+This is not PETSc/HYPRE parity. Dagger’s AMG is a first cut on
+`AlgebraicMultigrid.jl` plus distributed RAP / V-cycle. Judge quality by the
+un-preconditioned residual `‖Ax−b‖`, not by Krylov `stats.solved` (per-tile
+AMG in particular can report `solved` while `‖Ax−b‖` is O(1)–O(100)).
+
+| Capability | Dagger | BoomerAMG |
+|---|---|---|
+| Across-tile coarse grid | [`GlobalAMG`](@ref) / SA / RS: tiled `P`, Galerkin `P'AP`, V-cycle | Yes (the product) |
+| Per-tile AMG | [`AMGPreconditioner`](@ref): block-diagonal Schwarz, **not** a coarse grid | Not the BoomerAMG model |
+| Geometric MG | [`GeometricMultigrid`](@ref): injection / full-weighting `R`, linear / bilinear `P` | PFMG/SMG (separate) |
+| Overlapping Schwarz | [`AdditiveSchwarzPreconditioner`](@ref) (`:restrict` / `:basic`) | Schwarz as a *smoother* option; also PETSc `PCASM` |
+| Near-nullspace | SA constructor `nullspace=N` (`fit_candidates`); RS rejects it | `InterpVectors` + variants; nodal / unknown-based systems |
+| Coarsening | Per-tile SA / classical RS + leftover interface matching (not a distributed MIS) | HMIS / PMIS / Falgout / CLJP / CGC / aggressive |
+| Interpolation | Tentative SA + Jacobi smooth; classical RS per tile | Classical / extended / ext+i / FF / AIR / multipass / … |
+| Smoother | Damped Jacobi only (`relax=2/3`, default 2+2 sweeps) | Hybrid GS, Schwarz, Chebyshev, ILU, FSAI, ℓ1-Jacobi, … |
+| Cycles | V-cycle only | V / W / F, additive and mult-additive AMG |
+| Complex / nodal systems | No | Yes |
+| Native GPU AMG | Host AlgebraicMultigrid.jl; some *other* PCs apply on-device | PMIS + ext+i (and more) on device |
+| Strength / truncation / Pmax | Whatever AlgebraicMultigrid.jl forwards | First-class HYPRE knobs |
+| Non-Galerkin coarse drop | No | Yes |
+
+Covered in spirit: a global V-cycle, SA with optional rigid-body candidates,
+classical RS as a method flag, geometric transfers on a regular 1-D/2-D
+grid, and RAS as its own preconditioner. Missing the BoomerAMG menu:
+HMIS/PMIS/Falgout/aggressive coarsening, extended / AIR interpolation,
+Chebyshev / hybrid GS / ILU smoothers, W/F and additive cycles, nodal
+systems, complex, and a GPU AMG hierarchy. The longer table lives in
+`LINALG_INTEGRATION.md`.
 
 ### Choosing a preconditioner
 

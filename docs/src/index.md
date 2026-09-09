@@ -434,7 +434,11 @@ x, stats = Krylov.gmres(DA, b; M = P)             # check ‖Ax−b‖, not just
 
 `Dagger.AMGPreconditioner` is the older **per-tile** (additive-Schwarz) AMG.
 On a regular 1-D / 2-D grid, `Dagger.GeometricMultigrid(DA)` is the geometric
-(PFMG-like) V-cycle; it does not change `GlobalAMG`.
+(PFMG-like) V-cycle; it does not change `GlobalAMG`. Those transfers are
+sparse `DMatrix` `R`/`P` (Galerkin `Ac = R A P`), not `@stencil` — a halo
+sweep cannot map a fine grid of size `n` onto a coarse grid of size `n/2`
+(see [Why restriction / prolongation cannot be a `@stencil`](@ref stencil-no-gmg)).
+This is not HYPRE BoomerAMG parity; check `‖Ax−b‖`, not only `stats.solved`.
 Other preconditioners: `Dagger.JacobiPreconditioner`,
 `Dagger.BlockJacobiPreconditioner`, `Dagger.AdditiveSchwarzPreconditioner`
 (core; overlapping ASM, `:restrict` or `:basic`), `Dagger.BlockILUPreconditioner`
@@ -478,6 +482,11 @@ end
 # B now contains the averaged values.
 ```
 In this example, `idx` refers to the coordinates of each element being processed. `@neighbors(A[idx], 1, Wrap())` fetches the 3x3 neighborhood around `A[idx]`. The `1` indicates a neighborhood distance of 1 from the central element, and `Wrap()` specifies the boundary behavior.
+
+`@stencil` is a same-`idx`, same-size, same-chunk halo sweep. Geometric
+restriction / prolongation (fine `n` → coarse `n/2`) is outside that
+contract; use [`GeometricMultigrid`](@ref) instead. The full explanation is
+in [Why restriction / prolongation cannot be a `@stencil`](@ref stencil-no-gmg).
 
 ## Quickstart: Datadeps
 

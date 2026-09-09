@@ -454,7 +454,9 @@ lesson.
    `mul!`. Check `‖Ax−b‖`, not only `stats.solved` (lessons 19 / 32). Two
    Jacobi sweeps each side of the V-cycle (lesson 32). This does not change
    [`AMGPreconditioner`](@ref) or [`GlobalAMG`](@ref). Coarse-grid `\`
-   dispatch is lesson 36.
+   dispatch is lesson 36. User-facing write-up: `docs/src/stencils.md`
+   (`stencil-no-gmg`) and the GMG / BoomerAMG sections of
+   `docs/src/iterative-solving.md`.
 
 38. **`view(::DArray, I...)` is a Base `SubArray`, on purpose.** `de64cb1b`
    removed the DArray-valued `view` that used `lookup_parts`. Restoring it
