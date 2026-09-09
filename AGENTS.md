@@ -645,6 +645,8 @@ lesson.
     those packages still need their own `DArray` tensor backend (a second
     invention; do not add one here). Index names that share a `Blocks` size
     must already match; do not silently repartition. At most three tensor
-    factors per product. `mul!` / `*` / `dot` remain the LinearAlgebra
-    entries for 2-tensor products; `@einsum` is the notation. Check values
-    against `mul!` / `dot`, not only a generated helper.
+    factors per product. Julia parses `α * A[i,k] * B[k,j]` as one n-ary
+    `*` call, not nested binary `*`; the walker must visit every factor or
+    the whole RHS is treated as a scalar. `mul!` / `*` / `dot` remain the
+    LinearAlgebra entries for 2-tensor products; `@einsum` is the notation.
+    Check values against `mul!` / `dot`, not only a generated helper.

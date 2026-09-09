@@ -145,9 +145,12 @@ function _einsum_parse_product(rhs)
 end
 
 function _einsum_walk_product!(ex, terms, scalars)
-    if @capture(ex, A_ * B_)
-        _einsum_walk_product!(A, terms, scalars)
-        _einsum_walk_product!(B, terms, scalars)
+    # Julia parses `α * A[i,k] * B[k,j]` as an n-ary `*` (3+ args), not nested
+    # binary calls. Walk every factor so a leading scalar is not the whole RHS.
+    if Meta.isexpr(ex, :call) && ex.args[1] === :* && length(ex.args) >= 3
+        for i in 2:length(ex.args)
+            _einsum_walk_product!(ex.args[i], terms, scalars)
+        end
     elseif @capture(ex, A_[inds__])
         all(i -> i isa Symbol, inds) || throw(ArgumentError("@einsum: indices must be symbols, got $ex"))
         push!(terms, (A, Symbol[inds...]))
