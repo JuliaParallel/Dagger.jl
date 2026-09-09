@@ -4,8 +4,8 @@ module SparseMatricesCSRExt
 # (SparseMatricesCSR.jl); this extension makes it a first-class `DSparseArray`
 # inner format so tiled `mul!` / SpMV / SpGEMM stay sparse.
 #
-# BSR is a follow-up: Julia has no host block-sparse type (`BlockArrays` is
-# dense mortar; vendor BSR is GPU-only). Do not invent `Dagger.BSR`.
+# Host BSR is `Dagger.SparseMatrixBSR` in core (not this extension). CSC stays
+# the default; this file is CSR only.
 
 import SparseMatricesCSR
 import SparseMatricesCSR: SparseMatrixCSR, sparsecsr

@@ -637,3 +637,17 @@ lesson.
    A sparse-backed `DMatrix` hitting that path is the same densify footgun
    as generic `eigen` (lesson 43) — throw, and leave LOBPCG `eigen` as the
    few-pair entry. This is not ScaLAPACK; `schur!` is not in-place on tiles.
+
+50. **Host BSR is `SparseMatrixBSR`, not `Dagger.BSR` as the type.** There is
+    still no ecosystem BSR package (`BlockArrays` is dense mortar;
+    `CuSparseMatrixBSR` is device-only). The type is block-CSR (`blocksize`,
+    `rowptr`, `colval`, `nzval`) so it can move out later; `Dagger.BSR` is
+    only an alias. CSC stays the default tile; host CSR stays on
+    SparseMatricesCSR; GPU may stay CSC. Wire `mul!` / `*` / `distribute` /
+    `sparsebsr` / `spzeros(SparseMatrixBSR, ...)` — not `Dagger.bsr_mul`.
+    Range `getindex` must return BSR so `distribute` does not densify
+    (lesson 44). SpGEMM / transposed SpMV may gather a *tile* to CSC.
+    Repartition still allocates CSC zeros (`DArray` does not record the
+    inner format); `sparsebsr(A, part, blocksize)` converts back. Block
+    PCs collect a tile to CSC via `_sparse_collect`. Check `‖Ax−b‖`, not
+    only `stats.solved`.

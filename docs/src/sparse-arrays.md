@@ -282,8 +282,26 @@ format. `similar` / `repartition` still allocate empty CSC tiles (the
 restores CSR, and `sparsecsr(A, part)` converts after a re-tile. Empty CSR
 `DMatrix`s are `spzeros(SparseMatrixCSR, Blocks(...), T, m, n)`.
 
-Block-sparse (BSR) is not implemented here: there is no host ecosystem BSR type
-to dispatch on.
+### `SparseMatrixBSR` (host block-CSR)
+
+Dagger ships a host [`SparseMatrixBSR`](@ref) so block-sparse tiles can exist
+before a standalone package owns the type. The name is the ecosystem name;
+`Dagger.BSR` is only an alias. CSC stays the default tile; host CSR stays on
+`SparseMatricesCSR`; GPU tiles may stay CSC.
+
+```julia
+S = Dagger.sparsebsr(A, (2, 2))          # host BSR
+DA = distribute(S, Blocks(8, 8))         # BSR tiles
+mul!(y, DA, x)                           # LinearAlgebra SpMV
+DA * x
+Dagger.sparsebsr(I, J, V, m, n, (2, 2), Blocks(8, 8))
+spzeros(Dagger.SparseMatrixBSR, Blocks(8, 8), Float64, m, n; blocksize=(2, 2))
+```
+
+`similar` / `repartition` still allocate empty CSC tiles (the `DArray` type
+does not record the inner format); `sparsebsr(A, part, blocksize)` converts
+after a re-tile. Per-tile block Jacobi / ILU / AMG collect a tile to CSC
+and are unchanged.
 
 ### `Finch` (experimental)
 
@@ -307,6 +325,8 @@ suite; prefer `SparseArrays` unless you specifically need a Finch format.
 
 ```@docs
 Dagger.DSparseArray
+Dagger.SparseMatrixBSR
+Dagger.sparsebsr
 Dagger.repartition
 Dagger.partition_graph
 Dagger.partition_perm
