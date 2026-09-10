@@ -269,6 +269,7 @@ Priority: **P0 done** / **P1 done** = merged onto `Dagger-linalg-ultra`. **P2** 
 | P2 | bsr-tiles | done | `linalg/bsr` @ `5cfa88cb` | User-approved host `SparseMatrixBSR` (block-CSR; `Dagger.BSR` is only an alias). CSC default; host CSR unchanged; GPU stays CSC. `mul!` / `*` / `distribute` / `spzeros(SparseMatrixBSR,…)`. Lesson 50. Assembly via `sparsebsr(I,J,V,…,part)`; block PCs still collect a tile to CSC. AWS: BSR 27/27 + CSR 83 on job `d951c6a41f5c60d6`. | 2026-09-09 |
 | P2 | stencil-gmg-xfer | skipped | — | **FLAG:** `jps/sparse-stencil` cannot express restriction/prolongation (lesson 37). Matrix `GeometricMultigrid` already landed. Do not grow the stencil stack. | 2026-09-08 |
 | P0 leftover | blas1-fastpath | done | `linalg/blas1-fastpath` @ `69c88672` | Local `ThreadProc`+CPURAM BLAS-1 (`dot`/`axpy!`/`axpby!`/`norm`/`copyto!`/`fill!`/`rmul!`/`lmul!`) skips `spawn_datadeps`; MPI/remote/GPU stay on Datadeps (no second MPI path). Lesson 48. **Sweep may start.** AWS job `50a5dd19ede8a63e`: core 43 (incl. local vs Datadeps), rest green except known NNS 39/40. | 2026-09-09 |
+| P0 | boomeramg-alike | done | `linalg/boomeramg-alike` @ `96712372` | HMIS-lite default coarsening (full PMIS opt-in; 1-D n=128 V-cycle 1.54 vs Jacobi 0.89, HMIS 0.80), deeper RAP, Jacobi/ℓ1/Chebyshev/hybrid-GS/ILU/RAS level smoothers, W/F-cycle, `blocksize`, NNS gathers `N` only. Lesson 51. Q1 elasticity `P`-width green (44/44). Per-tile `AMGPreconditioner` unchanged. AWS job `87eeae0070a22075`: GlobalAMG 170, NNS 44, GMG 158, iterativesolvers 460; full `array/linalg` (no Finch) green. | 2026-09-10 |
 
 ---
 
@@ -316,10 +317,10 @@ Priority: **P0 done** / **P1 done** = merged onto `Dagger-linalg-ultra`. **P2** 
 P0 leftovers are all merged. Honest remaining gathers on GlobalAMG setup (do not treat these as “`P` still collects `A`”):
 
 - coarsest LU (`_gather_sparse`, not `_collect_sparse_dmatrix`)
-- one row of tiles per coarsen task
-- header fetch (`nagg` + interface pairs)
+- one row of tiles per coarsen task (stays on the worker; PMIS iterates on headers)
+- membership / header fetch (`nagg` + C/F / aggregate ids), not `A`
 - GPU tile host-stage
-- `nullspace=N` still gathers `A`+`N` so coarse levels get `R` from `fit_candidates`
+- `nullspace=N` gathers `N` only so coarse levels get `R` from `fit_candidates`
 
 Unassigned leftover from P0:
 
@@ -338,11 +339,11 @@ P2 flags (completeness, not scheduled):
   `docs/src/stencils.md` (`stencil-no-gmg`), plus the GMG / BoomerAMG
   sections in `docs/src/iterative-solving.md`. Short recap below.
 - **Full dense geev / ScaLAPACK Schur** — not required. `eigen` stays LOBPCG; P2 `schur` is gather-then-LAPACK for dense tiles only.
-- **Near-nullspace Q1 elasticity `P`-width assert** — reproduced 2026-09-09 on blas1/einsum/bsr jobs (`24 > 25`, 39/40). Same leftover as `40f75ac4`; not introduced by BLAS-1 / einsum / BSR. Residual/`\\` checks in that testset were not reached. Do not weaken it from this pass.
+- **Near-nullspace Q1 elasticity `P`-width assert** — leftover `24 > 25` was gathered-SA vs tiled-SA using different aggregate counts. **Fixed:** same tiled HMIS/PMIS `AggOp` for scalar and `nullspace=N` (`fit_candidates` injects `nmodes` columns). AWS NNS 44/44. Do not weaken the assert.
 
 AWS labeling (2026-09-08 `vmbench.py` working-tree tweak): EC2 `Name` is now the launch `--label` (was always `vmbench`), plus `vmbench-label` / `vmbench-pid` / `vmbench-started`. `batchd` still calls `provision_vm` without `label=`, so new `batchctl` VMs would tag `Name=vmbench`. Pre-tweak instances (including `i-021ef9ff800fc17a4`) have no `vmbench-label` tag. Filter/teardown by **job id**. Reserved `dagger-distributed` (`2f5b7c978c2a0b3a`) and `dagger-mpi` (`a1e9f3af2f347b8d`) are already `done` in batchd — do not `done` them again.
 
-`AGENTS.md` lessons 27–50 are the union (through dense `schur` 47; BLAS-1 is 48; `@einsum` is 49; BSR is 50). Lesson 20 remains unused (pre-existing gap). Lesson 35 is GPU-PC; do not reuse that number.
+`AGENTS.md` lessons 27–51 are the union (through dense `schur` 47; BLAS-1 is 48; `@einsum` is 49; BSR is 50; BoomerAMG-alike PMIS is 51). Lesson 20 remains unused (pre-existing gap). Lesson 35 is GPU-PC; do not reuse that number.
 
 ---
 
@@ -381,24 +382,24 @@ Jacobi-only).
 
 | BoomerAMG feature | Dagger | Notes |
 |---|---|---|
-| Global V-cycle over a distributed operator | **Partial** | `GlobalAMG` / `SmoothedAggregationPreconditioner` / `RugeStubenPreconditioner`: tiled `P` (lesson 42), Galerkin `P'AP`, damped-Jacobi V-cycle (default 2+2, lesson 32). Typically one coarse grid then gathered LU. Not a distributed MIS. |
+| Global V-cycle over a distributed operator | **Yes** | `GlobalAMG` / `SmoothedAggregationPreconditioner` / `RugeStubenPreconditioner`: tiled HMIS-lite `P` (lessons 42 / 51), Galerkin `P'AP`, V/W/F-cycle. Recurses with distributed RAP until `max_coarse` / `max_levels` (default 10). Gathered LU only at the true coarsest. |
 | Per-subdomain AMG | **Different meaning** | `AMGPreconditioner` is **block-diagonal Schwarz** (one AlgebraicMultigrid.jl hierarchy per diagonal tile). `Blocks(n,n)` is “global” only because there is one tile. Lesson 19. |
 | Geometric / PFMG transfers | **Partial** | `GeometricMultigrid`: injection / full-weighting `R`, linear / bilinear `P`, Galerkin `RAP`, Jacobi V-cycle. 1-D and 2-D only. Not `@stencil`. |
-| Overlapping Schwarz | **As its own PC** | `AdditiveSchwarzPreconditioner` (`:restrict` = `PC_ASM_RESTRICT`, `:basic` = `PC_ASM_BASIC`). Not a BoomerAMG smoother. |
-| Near-nullspace / rigid-body modes | **Partial** | `SmoothedAggregationPreconditioner(A; nullspace=N)` / `GlobalAMG(Projected(A, N))` via `fit_candidates`. RS rejects `nullspace`. `AMGPreconditioner` does not take it. `nullspace=N` still gathers `A`+`N` (lesson 39). No nodal / unknown-based systems AMG. |
-| Coarsening: HMIS / PMIS / Falgout / CLJP / CGC / aggressive | **Missing** | Per-tile `StandardAggregation` or classical RS + leftover matching of *unaggregated* interface nodes. Do not merge already-assigned interface aggregates (tried; residual worse than Jacobi). |
-| Interpolation: classical / extended / ext+i / FF / AIR / multipass | **Missing** (except local classical / SA) | Tiled SA tentative `P` + Jacobi smooth `P ← T − ω D⁻¹ A T`; RS uses AlgebraicMultigrid.jl classical `P` on the tile. No AIR, no ext+i, no FF. |
-| Smoothers: hybrid GS, Schwarz, Chebyshev, ILU, FSAI, ℓ1-Jacobi | **Missing** | Damped Jacobi only (`relax=2/3`). RAS/ILU exist as **separate** preconditioners, not as AMG level smoothers. |
-| Cycle types: W, F, additive / mult-additive AMG | **Missing** | V-cycle only. |
-| Strength threshold / truncation / `Pmax` / non-Galerkin drop | **Missing** as first-class API | AlgebraicMultigrid.jl kwargs may pass through on the gathered / per-tile path; no HYPRE-style level drop or non-Galerkin sparsification. |
+| Overlapping Schwarz | **As its own PC, and as a smoother** | `AdditiveSchwarzPreconditioner` (`:restrict` = `PC_ASM_RESTRICT`, `:basic` = `PC_ASM_BASIC`). Also `smoother=:ras` inside the GlobalAMG V-cycle. |
+| Near-nullspace / rigid-body modes | **Partial** | `SmoothedAggregationPreconditioner(A; nullspace=N)` / `GlobalAMG(Projected(A, N))` via `fit_candidates` on the tiled PMIS `AggOp`. RS rejects `nullspace`. `AMGPreconditioner` does not take it. Gathers `N` only (lesson 39 / 51). `blocksize` / `nvars` is HYPRE `NumFunctions`. |
+| Coarsening: HMIS / PMIS / Falgout / CLJP / CGC / aggressive | **Partial** | Default `coarsen=:hmis` (local SA, then tiled PMIS on leftovers). Full `:pmis` is opt-in — on 1-D Poisson n=128 the V-cycle residual is ~1.5 vs Jacobi ~0.89. `:standard` is the old leftover-pair path. No Falgout / CLJP / CGC / aggressive. Do not merge already-assigned interface aggregates (tried; residual worse than Jacobi). |
+| Interpolation: classical / extended / ext+i / FF / AIR / multipass | **Partial** | Tiled SA tentative `P` + Jacobi smooth; RS classical distance-1 from the row graph. No AIR, no ext+i, no FF, no multipass (`interp=:extended` throws). |
+| Smoothers: hybrid GS, Schwarz, Chebyshev, ILU, FSAI, ℓ1-Jacobi | **Partial** | `smoother=:jacobi` (default, `relax=2/3`), `:l1jacobi`, `:chebyshev`, `:hybrid_gs` (local GS + Jacobi off-tile), `:ilu` / `:ras` as V-cycle level smoothers. No FSAI. |
+| Cycle types: W, F, additive / mult-additive AMG | **Partial** | `cycle=:v` (default), `:w`, `:f`. No additive AMG. |
+| Strength threshold / truncation / `Pmax` / non-Galerkin drop | **Partial** | AlgebraicMultigrid.jl `strength=` / `aggregate=` pass through on the tiled path; no HYPRE `Pmax` or non-Galerkin sparsification. |
 | Complex arithmetic | **Missing** | Real `DMatrix` path. |
-| Nodal / unknown-based systems | **Missing** | Scalar SA default is `ones`. Elasticity needs `nullspace=N` (gathered). |
+| Nodal / unknown-based systems | **Partial** | `blocksize` / `nvars` on SA (per-unknown constants when `nullspace` is omitted). Elasticity still wants `nullspace=N`. |
 | Native GPU AMG setup / apply | **Missing** | AlgebraicMultigrid.jl is host. GPU-PC (lesson 35) keeps *vector* chunks on-device for some block PCs; the AMG hierarchy itself is still host. |
 | Coarsest solve | Gathered LU | Same idea as HYPRE’s sequential coarse solve; we gather (`_gather_sparse`), not a distributed coarse AMG. |
 
-**Covered (short):** global V-cycle with tiled SA/RS `P` and Jacobi; optional SA near-nullspace; geometric RAP V-cycle; RAS as `PCASM`; per-tile AMG as Schwarz (do not call that BoomerAMG).
+**Covered (short):** global V/W/F-cycle with tiled HMIS-lite `P` and distributed RAP; opt-in PMIS; Jacobi / ℓ1-Jacobi / Chebyshev / hybrid GS / ILU / RAS level smoothers; SA near-nullspace (`N` only) and `blocksize`; geometric RAP V-cycle; RAS as `PCASM`; per-tile AMG as Schwarz (do not call that BoomerAMG).
 
-**Missing (short):** HMIS/PMIS/Falgout/aggressive coarsening; extended / AIR interpolation; Chebyshev / hybrid GS / ILU AMG smoothers; W/F and additive cycles; nodal systems; complex; GPU BoomerAMG; HYPRE strength/truncation/non-Galerkin knobs.
+**Missing (short):** Falgout / CLJP / CGC / aggressive coarsening; extended / AIR / FF interpolation; additive cycles; FSAI; complex; GPU BoomerAMG; HYPRE `Pmax` / non-Galerkin knobs.
 
 ---
 

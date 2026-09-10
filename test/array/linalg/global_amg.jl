@@ -10,6 +10,7 @@
 
 using Krylov
 using AlgebraicMultigrid
+using IncompleteLU
 
 # True 1-D / 2-D Poisson (diag 2). The well-conditioned `SPD_DIAG = 4` fixtures
 # in `iterativesolvers.jl` hide the per-tile vs global gap.
@@ -128,6 +129,11 @@ end
         M = Dagger.GlobalAMG(DA; method=:smoothed_aggregation, max_levels=3, max_coarse=32)
         @test !isempty(M.levels)
 
+        y = similar(Db)
+        mul!(y, M, Db)
+        @test all(isfinite, collect(y))
+        @test true_relres(DA, y, Db) < jacobi_only_relres(A, b, M.relax, M.presweeps + M.postsweeps)
+
         x, stats, rel = solve_gmres(DA, Db, M)
         @test rel < 1e-6
         @test collect(x) ≈ Matrix(A) \ b rtol = 1e-5
@@ -236,5 +242,151 @@ end
             push!(niters, stats.niter)
         end
         @test niters[2] <= max(2 * niters[1], niters[1] + 8)
+    end
+
+    @testset "HMIS is the default coarsen and beats Jacobi" begin
+        n, k = 64, 16
+        A = poisson_1d(n)
+        b = rand(n)
+        DA = distribute(A, Blocks(k, k))
+        Db = distribute(b, Blocks(k))
+        M = Dagger.SmoothedAggregationPreconditioner(DA; max_levels=3, max_coarse=16)
+        @test M.coarsen === :hmis
+        @test M.smoother === :jacobi
+        @test M.cycle === :v
+        y = similar(Db)
+        mul!(y, M, Db)
+        @test true_relres(DA, y, Db) < jacobi_only_relres(A, b, M.relax, M.presweeps + M.postsweeps)
+    end
+
+    @testset "opt-in PMIS still beats Jacobi on n=64" begin
+        # Full PMIS on 1-D n=128 loses this gate (V-cycle residual ~1.5 vs
+        # Jacobi ~0.89); HMIS is the default for that reason. n=64 is the
+        # size where a hash-PMIS V-cycle still wins.
+        n, k = 64, 16
+        A = poisson_1d(n)
+        b = rand(n)
+        DA = distribute(A, Blocks(k, k))
+        Db = distribute(b, Blocks(k))
+        M = Dagger.SmoothedAggregationPreconditioner(DA; coarsen=:pmis, max_levels=3, max_coarse=16)
+        @test M.coarsen === :pmis
+        y = similar(Db)
+        mul!(y, M, Db)
+        @test true_relres(DA, y, Db) < jacobi_only_relres(A, b, M.relax, M.presweeps + M.postsweeps)
+    end
+
+    @testset "deeper hierarchy uses distributed RAP, not a gather of A" begin
+        n, k = 128, 16
+        A = poisson_1d(n)
+        b = rand(n)
+        DA = distribute(A, Blocks(k, k))
+        Db = distribute(b, Blocks(k))
+        old = Dagger.COLLECT_SPARSE_DMATRIX_MAXSIZE[]
+        Dagger.COLLECT_SPARSE_DMATRIX_MAXSIZE[] = 0
+        try
+            M = Dagger.SmoothedAggregationPreconditioner(DA; max_levels=10, max_coarse=16)
+            @test length(M.levels) >= 2
+            # The no-collect guard is on `_collect_sparse_dmatrix`; setup already
+            # ran with it at 0. The second RAP is still a distributed product.
+            @test size(M.levels[2].A, 1) == size(M.levels[1].P, 2)
+            y = similar(Db)
+            mul!(y, M, Db)
+            @test true_relres(DA, y, Db) < jacobi_only_relres(A, b, M.relax, M.presweeps + M.postsweeps)
+            _, _, rel = solve_gmres(DA, Db, M)
+            @test rel < 1e-6
+        finally
+            Dagger.COLLECT_SPARSE_DMATRIX_MAXSIZE[] = old
+        end
+    end
+
+    @testset "level smoothers beat Jacobi-only on 1-D Poisson" begin
+        n, k = 64, 16
+        A = poisson_1d(n)
+        b = rand(n)
+        DA = distribute(A, Blocks(k, k))
+        Db = distribute(b, Blocks(k))
+        jrel = jacobi_only_relres(A, b, 2 / 3, 4)
+        for s in (:l1jacobi, :chebyshev, :hybrid_gs)
+            M = Dagger.GlobalAMG(DA; smoother=s, max_levels=3, max_coarse=16)
+            @test M.smoother === s
+            y = similar(Db)
+            mul!(y, M, Db)
+            @test all(isfinite, collect(y))
+            @test true_relres(DA, y, Db) < jrel
+            _, _, rel = solve_gmres(DA, Db, M)
+            @test rel < 1e-6
+        end
+    end
+
+    @testset "ILU and RAS as V-cycle level smoothers" begin
+        n, k = 64, 16
+        A = poisson_1d(n)
+        b = rand(n)
+        DA = distribute(A, Blocks(k, k))
+        Db = distribute(b, Blocks(k))
+        for s in (:ilu, :ras)
+            M = Dagger.GlobalAMG(DA; smoother=s, max_levels=3, max_coarse=16)
+            @test M.smoother === s
+            _, _, rel = solve_gmres(DA, Db, M)
+            @test rel < 1e-6
+        end
+    end
+
+    @testset "W-cycle and F-cycle beat Jacobi-only" begin
+        n, k = 64, 16
+        A = poisson_1d(n)
+        b = rand(n)
+        DA = distribute(A, Blocks(k, k))
+        Db = distribute(b, Blocks(k))
+        jrel = jacobi_only_relres(A, b, 2 / 3, 4)
+        for cyc in (:w, :f)
+            M = Dagger.GlobalAMG(DA; cycle=cyc, max_levels=4, max_coarse=16)
+            @test M.cycle === cyc
+            y = similar(Db)
+            mul!(y, M, Db)
+            @test true_relres(DA, y, Db) < jrel
+            _, _, rel = solve_gmres(DA, Db, M)
+            @test rel < 1e-6
+        end
+    end
+
+    @testset "HMIS and standard coarsen still beat Jacobi" begin
+        n, k = 64, 16
+        A = poisson_1d(n)
+        b = rand(n)
+        DA = distribute(A, Blocks(k, k))
+        Db = distribute(b, Blocks(k))
+        for c in (:hmis, :standard)
+            M = Dagger.SmoothedAggregationPreconditioner(DA; coarsen=c, max_levels=3, max_coarse=16)
+            @test M.coarsen === c
+            y = similar(Db)
+            mul!(y, M, Db)
+            @test true_relres(DA, y, Db) < jacobi_only_relres(A, b, M.relax, M.presweeps + M.postsweeps)
+            _, _, rel = solve_gmres(DA, Db, M)
+            @test rel < 1e-6
+        end
+    end
+
+    @testset "blocksize / nvars unknown-based SA" begin
+        nnode, ncomp, nt = 32, 2, 4
+        n = nnode * ncomp
+        k = n ÷ nt
+        A = SparseArrays.kron(poisson_1d(nnode), SparseArrays.sparse(LinearAlgebra.I, ncomp, ncomp))
+        b = rand(n)
+        DA = distribute(A, Blocks(k, k))
+        Db = distribute(b, Blocks(k))
+        M = Dagger.SmoothedAggregationPreconditioner(DA; blocksize=ncomp, max_levels=3, max_coarse=16)
+        @test M.blocksize == 2
+        @test M.nmodes == 2
+        _, _, rel = solve_gmres(DA, Db, M)
+        @test rel < 1e-6
+        Mn = Dagger.SmoothedAggregationPreconditioner(DA; nvars=ncomp, max_levels=3, max_coarse=16)
+        @test Mn.blocksize == 2
+    end
+
+    @testset "extended interpolation is flagged, not faked" begin
+        DA = distribute(poisson_1d(32), Blocks(16, 16))
+        @test_throws ArgumentError Dagger.GlobalAMG(DA; interp=:extended, max_levels=2)
+        @test_throws ArgumentError Dagger.GlobalAMG(DA; interp=:air, max_levels=2)
     end
 end

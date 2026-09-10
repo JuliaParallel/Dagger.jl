@@ -492,7 +492,8 @@ lesson.
    [`AMGPreconditioner`](@ref) stays per-tile (lesson 19) and does not take
    this keyword. Ruge–Stüben has no candidate injection — reject `nullspace`
    there. Default (scalar `ones`) setup is tiled and does not collect `A`
-   (lesson 42). `nullspace=N` still gathers `N` with `A` so coarse levels
+   (lesson 42). `nullspace=N` gathers `N` only (not `A`): the same tiled
+   PMIS `AggOp` plus `fit_candidates(AggOp, N)` (lesson 51). Coarse levels
    get the `R` from `fit_candidates`, not the fine `N`. Check `‖Ax−b‖`,
    not only `stats.solved`. A 2-component / elasticity problem is where
    scalar SA stalls; Poisson with
@@ -535,26 +536,24 @@ lesson.
    tie-breaker this workstream also hit is already lesson 36
    (`_solve_pinned_dvector`); do not add a second `invoke` method.
 
-42. **GlobalAMG builds `P` from tiles, not a gathered CSC of `A`.** Per-tile
-   StandardAggregation / Ruge–Stüben on the diagonal tile, leftover
-   matching of *unaggregated* interface nodes, then Jacobi-smooth
+42. **GlobalAMG builds `P` from tiles, not a gathered CSC of `A`.** Default
+   coarsening is HMIS-lite (lesson 51); `coarsen=:pmis` is a full tiled
+   independent set; `coarsen=:standard` is the older per-tile SA/RS plus leftover matching
+   of *unaggregated* interface nodes. Then Jacobi-smooth
    `P ← T − ω D⁻¹ A T` via distributed SpGEMM (`Dᵢᵢ` is the row 1-norm,
    matching AMG.jl's `JacobiProlongation`). On 1-D Poisson local SA
-   assigns every node, so leftover matching is a no-op and tentative `P`
-   is block-diagonal; smoothing through `A T` is what couples tiles.
+   assigns every node, so HMIS leftover matching is a no-op and tentative
+   `P` is block-diagonal; smoothing through `A T` is what couples tiles.
    Do **not** merge already-assigned interface aggregates: that produced
    V-cycle residuals of O(1)–O(5) vs Jacobi (union-find collapse, and
-   even pairwise merge). A second tiled coarsening on ≤3 tiles of the
-   RAP product is also worse than Jacobi — skip it and LU that operator
-   (`_gather_sparse`, not `_collect_sparse_dmatrix`). The caller fetches
-   only per-tile headers (`nagg` + interface pairs), not `A`.
-   `COLLECT_SPARSE_DMATRIX_MAXSIZE` lets tests prove setup does not
-   gather the fine operator. Remaining gathers: coarsest LU, one row of
-   tiles per coarsen, header fetch, GPU tile host-stage. `nullspace=N`
-   still gathers (lesson 39). Do not treat `stats.solved` as `Ax≈b`
-   (lessons 19/32). `AMGPreconditioner` is still per-tile Schwarz — do
-   not change it. Aggregates still do not come from a distributed MIS;
-   a row-coarsen task sees one row of tiles.
+   even pairwise merge). The ≤3-tile RAP skip was for that per-tile path;
+   PMIS may recurse until `max_coarse` / `max_levels`. The caller does not
+   fetch `A`. `COLLECT_SPARSE_DMATRIX_MAXSIZE` lets tests prove setup does
+   not gather the fine operator. Remaining gathers: coarsest LU, one row
+   of tiles per coarsen (stays on the worker), header / membership fetch,
+   GPU tile host-stage. `nullspace=N` gathers `N` only (lesson 39 / 51).
+   Do not treat `stats.solved` as `Ax≈b` (lessons 19/32).
+   `AMGPreconditioner` is still per-tile Schwarz — do not change it.
 
 43. **`eigen(::DMatrix)` is LOBPCG for a few pairs, not dense geev.**
    LinearAlgebra's generic `eigen` would collect and run LAPACK. The `DMatrix`
@@ -684,3 +683,24 @@ lesson.
     they must not overwrite a core method of the same signature (Julia
     forbids that during precompilation). Check `‖Ax−b‖`, not only
     `stats.solved`.
+
+51. **GlobalAMG coarsening is HMIS-lite (default), not leftover pairing.** A
+   coarsen task still sees one row of tiles, but leftover interface nodes
+   get a global independent set: each unassigned node whose measure beats
+   every unassigned strong neighbor becomes C, neighbors become F, repeat.
+   HMIS-lite freezes local SA aggregates and runs PMIS only on leftovers;
+   leftover F may *join* a neighboring local aggregate (enlargement), but
+   must not merge two already-assigned aggregates (lesson 42). Full
+   `coarsen=:pmis` (MIS on every node) loses the 1-D Poisson Jacobi gate
+   at n=128 (V-cycle residual ~1.5 vs Jacobi ~0.89; 3+3 sweeps or
+   `smoother=:hybrid_gs` recover it). HMIS on that problem is 0.80.
+   Same AggOp for scalar `ones` and `nullspace=N` — NNS `P` is wider
+   because `fit_candidates` injects `nmodes` columns per aggregate;
+   gathering `A` to run host SA was what made the Q1 elasticity assert
+   `24 > 25`. Recurse with distributed RAP until `max_coarse` /
+   `max_levels` (default 10); gathered LU is only the true coarsest.
+   Level smoothers (`smoother=:jacobi|:l1jacobi|:chebyshev|:hybrid_gs|:ilu|:ras`)
+   compose inside the V/W/F-cycle — do not invent `Dagger.BoomerAMG`.
+   Chebyshev needs its own search-direction workspace; reusing the residual
+   vector silently corrupts the recurrence. Judge by `‖Ax−b‖` vs the same
+   number of Jacobi sweeps (lessons 19 / 32). Keep `_solve_pinned_dvector`.
