@@ -269,7 +269,7 @@ Priority: **P0 done** / **P1 done** = merged onto `Dagger-linalg-ultra`. **P2** 
 | P2 | bsr-tiles | done | `linalg/bsr` @ `5cfa88cb` | User-approved host `SparseMatrixBSR` (block-CSR; `Dagger.BSR` is only an alias). CSC default; host CSR unchanged; GPU stays CSC. `mul!` / `*` / `distribute` / `spzeros(SparseMatrixBSR,…)`. Lesson 50. Assembly via `sparsebsr(I,J,V,…,part)`; block PCs still collect a tile to CSC. AWS: BSR 27/27 + CSR 83 on job `d951c6a41f5c60d6`. | 2026-09-09 |
 | P2 | stencil-gmg-xfer | skipped | — | **FLAG:** `jps/sparse-stencil` cannot express restriction/prolongation (lesson 37). Matrix `GeometricMultigrid` already landed. Do not grow the stencil stack. | 2026-09-08 |
 | P0 leftover | blas1-fastpath | done | `linalg/blas1-fastpath` @ `69c88672` | Local `ThreadProc`+CPURAM BLAS-1 (`dot`/`axpy!`/`axpby!`/`norm`/`copyto!`/`fill!`/`rmul!`/`lmul!`) skips `spawn_datadeps`; MPI/remote/GPU stay on Datadeps (no second MPI path). Lesson 48. **Sweep may start.** AWS job `50a5dd19ede8a63e`: core 43 (incl. local vs Datadeps), rest green except known NNS 39/40. | 2026-09-09 |
-| P0 | boomeramg-alike | in progress | `linalg/boomeramg-alike` | PMIS coarsening, deeper RAP, Jacobi/ℓ1/Chebyshev/hybrid-GS/ILU/RAS level smoothers, W/F-cycle, `blocksize`, NNS gathers `N` only. Lesson 51. Per-tile `AMGPreconditioner` unchanged. | 2026-09-10 |
+| P0 | boomeramg-alike | in progress | `linalg/boomeramg-alike` | HMIS-lite default coarsening (full PMIS opt-in; loses 1-D n=128 Jacobi gate), deeper RAP, Jacobi/ℓ1/Chebyshev/hybrid-GS/ILU/RAS level smoothers, W/F-cycle, `blocksize`, NNS gathers `N` only. Lesson 51. Per-tile `AMGPreconditioner` unchanged. | 2026-09-10 |
 
 ---
 
@@ -382,12 +382,12 @@ Jacobi-only).
 
 | BoomerAMG feature | Dagger | Notes |
 |---|---|---|
-| Global V-cycle over a distributed operator | **Yes** | `GlobalAMG` / `SmoothedAggregationPreconditioner` / `RugeStubenPreconditioner`: tiled PMIS `P` (lessons 42 / 51), Galerkin `P'AP`, V/W/F-cycle. Recurses with distributed RAP until `max_coarse` / `max_levels` (default 10). Gathered LU only at the true coarsest. |
+| Global V-cycle over a distributed operator | **Yes** | `GlobalAMG` / `SmoothedAggregationPreconditioner` / `RugeStubenPreconditioner`: tiled HMIS-lite `P` (lessons 42 / 51), Galerkin `P'AP`, V/W/F-cycle. Recurses with distributed RAP until `max_coarse` / `max_levels` (default 10). Gathered LU only at the true coarsest. |
 | Per-subdomain AMG | **Different meaning** | `AMGPreconditioner` is **block-diagonal Schwarz** (one AlgebraicMultigrid.jl hierarchy per diagonal tile). `Blocks(n,n)` is “global” only because there is one tile. Lesson 19. |
 | Geometric / PFMG transfers | **Partial** | `GeometricMultigrid`: injection / full-weighting `R`, linear / bilinear `P`, Galerkin `RAP`, Jacobi V-cycle. 1-D and 2-D only. Not `@stencil`. |
-| Overlapping Schwarz | **As its own PC** | `AdditiveSchwarzPreconditioner` (`:restrict` = `PC_ASM_RESTRICT`, `:basic` = `PC_ASM_BASIC`). Not a BoomerAMG smoother. |
+| Overlapping Schwarz | **As its own PC, and as a smoother** | `AdditiveSchwarzPreconditioner` (`:restrict` = `PC_ASM_RESTRICT`, `:basic` = `PC_ASM_BASIC`). Also `smoother=:ras` inside the GlobalAMG V-cycle. |
 | Near-nullspace / rigid-body modes | **Partial** | `SmoothedAggregationPreconditioner(A; nullspace=N)` / `GlobalAMG(Projected(A, N))` via `fit_candidates` on the tiled PMIS `AggOp`. RS rejects `nullspace`. `AMGPreconditioner` does not take it. Gathers `N` only (lesson 39 / 51). `blocksize` / `nvars` is HYPRE `NumFunctions`. |
-| Coarsening: HMIS / PMIS / Falgout / CLJP / CGC / aggressive | **Partial** | Default `coarsen=:pmis` (tiled parallel independent set). `:hmis` freezes local SA then PMIS on leftovers. `:standard` is the old leftover-pair path. No Falgout / CLJP / CGC / aggressive. Do not merge already-assigned interface aggregates (tried; residual worse than Jacobi). |
+| Coarsening: HMIS / PMIS / Falgout / CLJP / CGC / aggressive | **Partial** | Default `coarsen=:hmis` (local SA, then tiled PMIS on leftovers). Full `:pmis` is opt-in — on 1-D Poisson n=128 the V-cycle residual is ~1.5 vs Jacobi ~0.89. `:standard` is the old leftover-pair path. No Falgout / CLJP / CGC / aggressive. Do not merge already-assigned interface aggregates (tried; residual worse than Jacobi). |
 | Interpolation: classical / extended / ext+i / FF / AIR / multipass | **Partial** | Tiled SA tentative `P` + Jacobi smooth; RS classical distance-1 from the row graph. No AIR, no ext+i, no FF, no multipass (`interp=:extended` throws). |
 | Smoothers: hybrid GS, Schwarz, Chebyshev, ILU, FSAI, ℓ1-Jacobi | **Partial** | `smoother=:jacobi` (default, `relax=2/3`), `:l1jacobi`, `:chebyshev`, `:hybrid_gs` (local GS + Jacobi off-tile), `:ilu` / `:ras` as V-cycle level smoothers. No FSAI. |
 | Cycle types: W, F, additive / mult-additive AMG | **Partial** | `cycle=:v` (default), `:w`, `:f`. No additive AMG. |
@@ -397,7 +397,7 @@ Jacobi-only).
 | Native GPU AMG setup / apply | **Missing** | AlgebraicMultigrid.jl is host. GPU-PC (lesson 35) keeps *vector* chunks on-device for some block PCs; the AMG hierarchy itself is still host. |
 | Coarsest solve | Gathered LU | Same idea as HYPRE’s sequential coarse solve; we gather (`_gather_sparse`), not a distributed coarse AMG. |
 
-**Covered (short):** global V/W/F-cycle with tiled PMIS `P` and distributed RAP; Jacobi / ℓ1-Jacobi / Chebyshev / hybrid GS / ILU / RAS level smoothers; SA near-nullspace (`N` only) and `blocksize`; geometric RAP V-cycle; RAS as `PCASM`; per-tile AMG as Schwarz (do not call that BoomerAMG).
+**Covered (short):** global V/W/F-cycle with tiled HMIS-lite `P` and distributed RAP; opt-in PMIS; Jacobi / ℓ1-Jacobi / Chebyshev / hybrid GS / ILU / RAS level smoothers; SA near-nullspace (`N` only) and `blocksize`; geometric RAP V-cycle; RAS as `PCASM`; per-tile AMG as Schwarz (do not call that BoomerAMG).
 
 **Missing (short):** Falgout / CLJP / CGC / aggressive coarsening; extended / AIR / FF interpolation; additive cycles; FSAI; complex; GPU BoomerAMG; HYPRE `Pmax` / non-Galerkin knobs.
 

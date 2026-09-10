@@ -5,10 +5,12 @@
 # `Ac = R A P` as a distributed product, and apply a V-cycle (or W/F) over
 # that hierarchy. That is what [`GlobalAMG`](@ref) does.
 #
-# Coarsening is a parallel independent set (PMIS, or HMIS-lite) over the
-# tiled strength graph: a coarsen task still sees one row of tiles, but
-# interface nodes join a *global* C/F or aggregate assignment. That is not
-# leftover pairing of unaggregated interface nodes, and it is not a merge of
+# Default coarsening is HMIS-lite (local SA, then PMIS on leftovers) over
+# the tiled strength graph: a coarsen task still sees one row of tiles, but
+# interface nodes join a *global* C/F or aggregate assignment. Full PMIS
+# (`coarsen=:pmis`) is the same MIS on every node; on 1-D Poisson n=128 that
+# V-cycle loses to Jacobi (do not make it the default). That is not leftover
+# pairing of unaggregated interface nodes, and it is not a merge of
 # already-assigned aggregates (that scheme lost to Jacobi; do not bring it
 # back without a residual check). The Galerkin product and the cycle apply
 # are distributed. The coarsest solve is a gathered LU. Do not treat Krylov
@@ -43,13 +45,15 @@ tile), this coarsens across tiles, forms each Galerkin coarse operator
 `Ac = P' A P` by distributed sparse matmul, and applies a V-cycle (or W/F)
 via `mul!(y, M, x)` (`y ← M⁻¹ x`, Krylov `ldiv=false`).
 
-`method` is `:smoothed_aggregation` (default) or `:ruge_stuben`. Coarsening
-is PMIS over the tiled strength graph (HYPRE-style parallel independent set);
-`coarsen=:hmis` does local SA/RS first and PMIS on the leftovers, and
-`coarsen=:standard` is the older per-tile + leftover-pair path. Interface
-nodes participate in the global C/F or aggregate assignment. On 1-D Poisson
-local SA assigns every node, so HMIS leftover matching is a no-op and
-tentative `P` is block-diagonal, then Jacobi-smoothed
+`method` is `:smoothed_aggregation` (default) or `:ruge_stuben`. Default
+coarsening is HMIS-lite (`coarsen=:hmis`): local SA/RS first, then a
+tiled PMIS on unassigned interface nodes so they join a global C/F or
+aggregate assignment. `coarsen=:pmis` is a full parallel independent set
+(every node); on 1-D Poisson that V-cycle can lose to the same number of
+Jacobi sweeps (n=128: residual ~1.5 vs ~0.89), so it is opt-in.
+`coarsen=:standard` is the older per-tile + leftover-pair path. On 1-D
+Poisson local SA assigns every node, so HMIS leftover matching is a no-op
+and tentative `P` is block-diagonal, then Jacobi-smoothed
 (`P ← T − ω D⁻¹ A T`) via distributed SpGEMM. The expensive RAP and the
 apply are Dagger-distributed.
 
@@ -83,7 +87,7 @@ Keyword arguments:
   correction to beat Jacobi-only on 1-D Poisson; two is the smallest count
   that does.
 - `cycle=:v` — `:v`, `:w`, or `:f`.
-- `coarsen=:pmis` — `:pmis`, `:hmis`, or `:standard`.
+- `coarsen=:hmis` — `:hmis` (default), `:pmis`, or `:standard`.
 - `interp=:sa` — SA tentative + smooth; RS uses `:direct` (classical
   distance-1). AlgebraicMultigrid.jl has no ext+i / AIR / FF hook.
 

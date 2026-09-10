@@ -382,9 +382,11 @@ structure follows the *finer* of the two block sizes.
 [`Dagger.GlobalAMG`](@ref) is a different object. It builds one hierarchy over
 the whole operator: each coarse operator is the distributed Galerkin product
 `Ac = P' * A * P`, and `mul!(y, M, x)` is a V-cycle (or W/F). Interpolation
-`P` comes from a parallel independent set (PMIS) over the tiled strength
-graph — interface nodes join a global C/F or aggregate assignment — then
-optional Jacobi smoothing. Setup does not assemble a global CSC of `A`.
+`P` comes from HMIS-lite (local SA, then a parallel independent set on
+unassigned interface nodes) over the tiled strength graph — leftover
+interface nodes join a global C/F or aggregate assignment — then optional
+Jacobi smoothing. `coarsen=:pmis` is a full MIS (opt-in; can lose to Jacobi
+on 1-D Poisson n=128). Setup does not assemble a global CSC of `A`.
 That is what PDE codes mean by AMG; `AMGPreconditioner` with many tiles is
 not.
 
@@ -399,8 +401,9 @@ r = similar(b); mul!(r, DA, x); axpy!(-1, b, r)
 @assert norm(r) / norm(b) < 1e-8   # do not stop at stats.solved
 ```
 
-Default coarsening is PMIS (`coarsen=:hmis` freezes local SA first;
-`:standard` is the older per-tile + leftover-pair path). Hierarchy recurses
+Default coarsening is HMIS-lite (`coarsen=:hmis`); `:pmis` is a full
+independent set; `:standard` is the older per-tile + leftover-pair path.
+Hierarchy recurses
 with distributed RAP until `max_coarse` / `max_levels` (default 10).
 Remaining gathers: coarsest LU, one row of tiles per coarsen (stays on the
 worker), membership / header fetch, GPU tile host-stage. `nullspace=N`
@@ -472,12 +475,12 @@ AMG in particular can report `solved` while `‖Ax−b‖` is O(1)–O(100)).
 
 | Capability | Dagger | BoomerAMG |
 |---|---|---|
-| Across-tile coarse grid | [`GlobalAMG`](@ref) / SA / RS: tiled PMIS `P`, Galerkin `P'AP`, V/W/F-cycle | Yes (the product) |
+| Across-tile coarse grid | [`GlobalAMG`](@ref) / SA / RS: tiled HMIS-lite `P`, Galerkin `P'AP`, V/W/F-cycle | Yes (the product) |
 | Per-tile AMG | [`AMGPreconditioner`](@ref): block-diagonal Schwarz, **not** a coarse grid | Not the BoomerAMG model |
 | Geometric MG | [`GeometricMultigrid`](@ref): injection / full-weighting `R`, linear / bilinear `P` | PFMG/SMG (separate) |
 | Overlapping Schwarz | [`AdditiveSchwarzPreconditioner`](@ref) (`:restrict` / `:basic`); also `smoother=:ras` | Schwarz as a *smoother* option; also PETSc `PCASM` |
 | Near-nullspace | SA constructor `nullspace=N` (`fit_candidates`); RS rejects it; `blocksize`/`nvars` | `InterpVectors` + variants; nodal / unknown-based systems |
-| Coarsening | PMIS (default), HMIS-lite, or `:standard` leftover pairing. No Falgout / CLJP / CGC / aggressive | HMIS / PMIS / Falgout / CLJP / CGC / aggressive |
+| Coarsening | HMIS-lite (default), opt-in PMIS, or `:standard` leftover pairing. No Falgout / CLJP / CGC / aggressive | HMIS / PMIS / Falgout / CLJP / CGC / aggressive |
 | Interpolation | Tentative SA + Jacobi smooth; classical distance-1 RS. No ext+i / AIR / FF | Classical / extended / ext+i / FF / AIR / multipass / … |
 | Smoother | Jacobi (default), ℓ1-Jacobi, Chebyshev, hybrid GS, ILU, RAS | Hybrid GS, Schwarz, Chebyshev, ILU, FSAI, ℓ1-Jacobi, … |
 | Cycles | V (default), W, F. No additive AMG | V / W / F, additive and mult-additive AMG |
@@ -486,7 +489,7 @@ AMG in particular can report `solved` while `‖Ax−b‖` is O(1)–O(100)).
 | Strength / truncation / Pmax | AlgebraicMultigrid.jl `strength=` / `aggregate=` passthrough; no HYPRE `Pmax` | First-class HYPRE knobs |
 | Non-Galerkin coarse drop | No | Yes |
 
-Covered in spirit: a global V/W/F-cycle, PMIS coarsening, SA with optional
+Covered in spirit: a global V/W/F-cycle, HMIS-lite coarsening (opt-in PMIS), SA with optional
 rigid-body candidates and `blocksize`, classical RS, Jacobi / ℓ1-Jacobi /
 Chebyshev / hybrid GS / ILU / RAS level smoothers, geometric transfers on a
 regular 1-D/2-D grid, and RAS as its own preconditioner. Still missing:

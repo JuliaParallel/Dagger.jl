@@ -129,6 +129,11 @@ end
         M = Dagger.GlobalAMG(DA; method=:smoothed_aggregation, max_levels=3, max_coarse=32)
         @test !isempty(M.levels)
 
+        y = similar(Db)
+        mul!(y, M, Db)
+        @test all(isfinite, collect(y))
+        @test true_relres(DA, y, Db) < jacobi_only_relres(A, b, M.relax, M.presweeps + M.postsweeps)
+
         x, stats, rel = solve_gmres(DA, Db, M)
         @test rel < 1e-6
         @test collect(x) ≈ Matrix(A) \ b rtol = 1e-5
@@ -239,16 +244,32 @@ end
         @test niters[2] <= max(2 * niters[1], niters[1] + 8)
     end
 
-    @testset "PMIS is the default coarsen and beats Jacobi" begin
+    @testset "HMIS is the default coarsen and beats Jacobi" begin
         n, k = 64, 16
         A = poisson_1d(n)
         b = rand(n)
         DA = distribute(A, Blocks(k, k))
         Db = distribute(b, Blocks(k))
         M = Dagger.SmoothedAggregationPreconditioner(DA; max_levels=3, max_coarse=16)
-        @test M.coarsen === :pmis
+        @test M.coarsen === :hmis
         @test M.smoother === :jacobi
         @test M.cycle === :v
+        y = similar(Db)
+        mul!(y, M, Db)
+        @test true_relres(DA, y, Db) < jacobi_only_relres(A, b, M.relax, M.presweeps + M.postsweeps)
+    end
+
+    @testset "opt-in PMIS still beats Jacobi on n=64" begin
+        # Full PMIS on 1-D n=128 loses this gate (V-cycle residual ~1.5 vs
+        # Jacobi ~0.89); HMIS is the default for that reason. n=64 is the
+        # size where a hash-PMIS V-cycle still wins.
+        n, k = 64, 16
+        A = poisson_1d(n)
+        b = rand(n)
+        DA = distribute(A, Blocks(k, k))
+        Db = distribute(b, Blocks(k))
+        M = Dagger.SmoothedAggregationPreconditioner(DA; coarsen=:pmis, max_levels=3, max_coarse=16)
+        @test M.coarsen === :pmis
         y = similar(Db)
         mul!(y, M, Db)
         @test true_relres(DA, y, Db) < jacobi_only_relres(A, b, M.relax, M.presweeps + M.postsweeps)

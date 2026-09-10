@@ -35,7 +35,7 @@ function Dagger.AMGPreconditioner(A::DMatrix; method::Symbol=:ruge_stuben, kwarg
 end
 
 # ---------------------------------------------------------------------------
-# Global AMG: PMIS (or HMIS / standard) interpolation `P`, Galerkin
+# Global AMG: HMIS-lite (default) / PMIS / standard interpolation `P`, Galerkin
 # `Ac = P' A P` (distributed), cycle apply in `src/array/amg.jl`.
 # Per-tile `AMGPreconditioner` above is unchanged. `nullspace=N` gathers `N`
 # only — not `A` — so coarse levels get `R` from `fit_candidates` (lesson 39).
@@ -991,7 +991,7 @@ function _amg_prolongation_standard(A::DMatrix{T}; method::Symbol, smooth::Bool,
 end
 
 function _amg_prolongation(A::DMatrix{T}, B; method::Symbol, smooth::Bool,
-                           jacobi_ω=4 / 3, coarsen::Symbol=:pmis,
+                           jacobi_ω=4 / 3, coarsen::Symbol=:hmis,
                            interp::Symbol=:sa, blocksize::Int=1, kwargs...) where T
     method === :smoothed_aggregation || method === :ruge_stuben || throw(ArgumentError(
         "GlobalAMG: unknown method $(method); use :smoothed_aggregation or :ruge_stuben"))
@@ -1150,7 +1150,7 @@ function Dagger.GlobalAMG(A::DMatrix;
                           B=nothing,
                           smoother::Symbol=:jacobi,
                           cycle::Symbol=:v,
-                          coarsen::Symbol=:pmis,
+                          coarsen::Symbol=:hmis,
                           blocksize::Integer=1,
                           nvars::Union{Integer,Nothing}=nothing,
                           chebyshev_degree::Integer=2,
@@ -1167,6 +1167,17 @@ function Dagger.GlobalAMG(A::DMatrix;
         "GlobalAMG: cycle must be :v, :w, or :f, got $(repr(cycle))"))
     smoother ∈ (:jacobi, :l1jacobi, :chebyshev, :hybrid_gs, :ilu, :ras) || throw(ArgumentError(
         "GlobalAMG: unknown smoother $(repr(smoother))"))
+    coarsen === :pmis || coarsen === :hmis || coarsen === :standard || throw(ArgumentError(
+        "GlobalAMG: coarsen must be :pmis, :hmis, or :standard, got $(repr(coarsen))"))
+    if interp === :extended || interp === :exti || interp === :air ||
+            interp === :ff || interp === :multipass
+        throw(ArgumentError("GlobalAMG: interp=$(repr(interp)) is not implemented \
+            (AlgebraicMultigrid.jl has no ext+i / AIR / FF / multipass hook, and a \
+            tiled distance-2 interpolant would need a 2-hop gather of A). Use \
+            interp=:sa or interp=:direct."))
+    end
+    interp === :sa || interp === :direct || throw(ArgumentError(
+        "GlobalAMG: interp must be :sa or :direct, got $(repr(interp))"))
 
     bs = nvars === nothing ? Int(blocksize) : Int(nvars)
     bs >= 1 || throw(ArgumentError("blocksize / nvars must be ≥ 1"))
