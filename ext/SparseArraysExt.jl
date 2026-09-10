@@ -31,6 +31,8 @@ end
 # without densifying. Offsets are relative to the bounding box of the
 # intersecting tiles; the result is then sliced down to `Ω`.
 function Dagger._asm_assemble_sparse(Ω::UnitRange{Int}, row_ranges, col_ranges, hosts)
+    row_ranges = Dagger._pc_host_vec(row_ranges)
+    col_ranges = Dagger._pc_host_vec(col_ranges)
     T = eltype(first(hosts))
     r0 = first(first(row_ranges))
     r1 = last(last(row_ranges))
@@ -274,6 +276,11 @@ end
 # identity; GPU extensions upload to CuSparse / ROCSparse / DeviceSparseMatrixCSC.
 function Dagger._store_assembled_tile(S::SparseMatrixCSC)
     return Dagger.move(Dagger.OSProc(), Dagger.task_processor(), Dagger.DSparseArray(S))
+end
+# GPU `move` of a host CSC argument already uploaded the tile; restamp onto
+# this processor rather than requiring the CSC method (lesson 52).
+function Dagger._store_assembled_tile(S::Dagger.DSparseArray)
+    return Dagger.move(Dagger.OSProc(), Dagger.task_processor(), S)
 end
 
 function _buckets_to_csc(::Type{T}, tm::Integer, tn::Integer, combine, buckets) where T

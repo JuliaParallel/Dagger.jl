@@ -704,3 +704,27 @@ lesson.
    Chebyshev needs its own search-direction workspace; reusing the residual
    vector silently corrupts the recurrence. Judge by `‖Ax−b‖` vs the same
    number of Jacobi sweeps (lessons 19 / 32). Keep `_solve_pinned_dvector`.
+
+52. **GlobalAMG on GPU tiles keeps vectors in VRAM; setup still host-stages tiles.**
+   AlgebraicMultigrid.jl is host, so coarsening / `fit_candidates` / hybrid GS
+   Adapt a *tile* (or a temporary vector) inside a GPU-scoped task. The DArray
+   chunk stays on-device (lesson 35). Returning a host `Vector` from a
+   GPU-scoped `_amg_row_abs_inv` spawn restamps `dinv` as CPURAM (or a
+   VRAM-labelled `Array` — lesson 26) and the next SpMV gathers; write into a
+   tile allocated with `AllocateUndef` on the operator's `memory_space_scope`
+   (`_pc_alloc_vec` / `_pc_undef_vec`). V-cycle Jacobi / ℓ1-Jacobi / Chebyshev
+   / sparse `mul!` stay on-device. Coarsest LU is still gathered
+   (`_solve_pinned_dvector`). `_select_factor_scope` must use
+   `root_worker_id` — GPU tiles have an `ExactScope`, which has no `.wid` —
+   and must return `scope(worker=wid)` (ThreadProc-only). Bare
+   `ProcessScope` also contains GPU processors; affinity then runs UMFPACK
+   on `ROCArrayDeviceProc` and segfaults. `_direct_solve` Adapt-stages the
+   RHS before `fact \\ b`.
+   Per-tile `AMGPreconditioner` is still Schwarz (lesson 19). Do not pin apply
+   to `ProcessScope`. GPU `move` also uploads host *metadata* `Vector`s
+   (`col_starts`, C/F `splitting`, ASM `UnitRange` lists, a CSC `P` slice)
+   to `ROCArray`/`CuArray`; setup kernels must `_pc_host_vec` them (or they
+   MethodError / scalar-index), and `_store_assembled_tile` must accept an
+   already-uploaded `DSparseArray`. Graph follow-ups that only need the host
+   `AMGTileGraph` pin to `ProcessScope` so ambient GPU scope does not upload
+   the C/F vector every PMIS pass.

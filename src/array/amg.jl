@@ -13,8 +13,10 @@
 # pairing of unaggregated interface nodes, and it is not a merge of
 # already-assigned aggregates (that scheme lost to Jacobi; do not bring it
 # back without a residual check). The Galerkin product and the cycle apply
-# are distributed. The coarsest solve is a gathered LU. Do not treat Krylov
-# `stats.solved` as `Ax ≈ b`; check the un-preconditioned residual.
+# are distributed. The coarsest solve is a gathered LU. On GPU tiles, setup
+# host-stages each tile inside a device `ExactScope`; V-cycle vectors stay
+# in VRAM (lesson 52). Do not treat Krylov `stats.solved` as `Ax ≈ b`;
+# check the un-preconditioned residual.
 
 """
     GlobalAMGLevel
@@ -228,8 +230,8 @@ function _jacobi_smooth!(u::DVector, A::DMatrix, dinv::DVector, b::DVector,
             uc, dc, rc, bc = u.chunks, dinv.chunks, r.chunks, b.chunks
             Dagger.spawn_datadeps() do
                 for i in eachindex(uc)
-                    Dagger.@spawn _jacobi_smooth_chunk!(InOut(uc[i]), In(dc[i]),
-                                                        In(rc[i]), In(bc[i]), ωT)
+                    Dagger.@spawn compute_scope=_tile_scope(uc[i]) _jacobi_smooth_chunk!(
+                        InOut(uc[i]), In(dc[i]), In(rc[i]), In(bc[i]), ωT)
                 end
             end
         end
@@ -243,7 +245,8 @@ function _amg_scale_vec!(y::DVector, dinv::DVector, x::DVector)
         yc, dc, xc = y.chunks, dinv.chunks, x.chunks
         Dagger.spawn_datadeps() do
             for i in eachindex(yc)
-                Dagger.@spawn _amg_scale_chunk!(Out(yc[i]), In(dc[i]), In(xc[i]))
+                Dagger.@spawn compute_scope=_tile_scope(yc[i]) _amg_scale_chunk!(
+                    Out(yc[i]), In(dc[i]), In(xc[i]))
             end
         end
     end
@@ -256,7 +259,8 @@ function _amg_scale_inplace!(y::DVector, dinv::DVector)
         yc, dc = y.chunks, dinv.chunks
         Dagger.spawn_datadeps() do
             for i in eachindex(yc)
-                Dagger.@spawn _amg_scale_inplace_chunk!(InOut(yc[i]), In(dc[i]))
+                Dagger.@spawn compute_scope=_tile_scope(yc[i]) _amg_scale_inplace_chunk!(
+                    InOut(yc[i]), In(dc[i]))
             end
         end
     end
@@ -282,7 +286,8 @@ function _chebyshev_smooth!(u::DVector, A::DMatrix, dinv::DVector, b::DVector,
             rc, bc = r.chunks, b.chunks
             Dagger.spawn_datadeps() do
                 for i in eachindex(rc)
-                    Dagger.@spawn _amg_residual!(InOut(rc[i]), In(bc[i]))
+                    Dagger.@spawn compute_scope=_tile_scope(rc[i]) _amg_residual!(
+                        InOut(rc[i]), In(bc[i]))
                 end
             end
         end
@@ -295,7 +300,8 @@ function _chebyshev_smooth!(u::DVector, A::DMatrix, dinv::DVector, b::DVector,
                 rc, bc = r.chunks, b.chunks
                 Dagger.spawn_datadeps() do
                     for i in eachindex(rc)
-                        Dagger.@spawn _amg_residual!(InOut(rc[i]), In(bc[i]))
+                        Dagger.@spawn compute_scope=_tile_scope(rc[i]) _amg_residual!(
+                            InOut(rc[i]), In(bc[i]))
                     end
                 end
             end
@@ -308,8 +314,8 @@ function _chebyshev_smooth!(u::DVector, A::DMatrix, dinv::DVector, b::DVector,
                 dc, wc = d.chunks, w.chunks
                 Dagger.spawn_datadeps() do
                     for i in eachindex(dc)
-                        Dagger.@spawn _cheby_d_update_chunk!(InOut(dc[i]), In(wc[i]),
-                                                             a, bcoef)
+                        Dagger.@spawn compute_scope=_tile_scope(dc[i]) _cheby_d_update_chunk!(
+                            InOut(dc[i]), In(wc[i]), a, bcoef)
                     end
                 end
             end
@@ -331,8 +337,8 @@ function _hybrid_gs_smooth!(u::DVector, A::DMatrix, b::DVector, r::DVector, nswe
             uc, rc, bc = u.chunks, r.chunks, b.chunks
             Dagger.spawn_datadeps() do
                 for i in 1:mt
-                    Dagger.@spawn _hybrid_gs_tile!(InOut(uc[i]), In(Ac[i, i]),
-                                                   In(rc[i]), In(bc[i]))
+                    Dagger.@spawn compute_scope=_tile_scope(uc[i]) _hybrid_gs_tile!(
+                        InOut(uc[i]), In(Ac[i, i]), In(rc[i]), In(bc[i]))
                 end
             end
         end
@@ -350,7 +356,8 @@ function _pc_smooth!(u::DVector, A::DMatrix, Pc, b::DVector, r::DVector,
             rc, bc = r.chunks, b.chunks
             Dagger.spawn_datadeps() do
                 for i in eachindex(rc)
-                    Dagger.@spawn _amg_residual!(InOut(rc[i]), In(bc[i]))
+                    Dagger.@spawn compute_scope=_tile_scope(rc[i]) _amg_residual!(
+                        InOut(rc[i]), In(bc[i]))
                 end
             end
         end
@@ -385,7 +392,8 @@ function _amg_restrict_residual!(res::DVector, A::DMatrix, u::DVector, b::DVecto
         rc, bc = res.chunks, b.chunks
         Dagger.spawn_datadeps() do
             for i in eachindex(rc)
-                Dagger.@spawn _amg_residual!(InOut(rc[i]), In(bc[i]))
+                Dagger.@spawn compute_scope=_tile_scope(rc[i]) _amg_residual!(
+                    InOut(rc[i]), In(bc[i]))
             end
         end
     end

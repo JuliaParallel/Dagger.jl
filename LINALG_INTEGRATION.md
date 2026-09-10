@@ -395,12 +395,12 @@ Jacobi-only).
 | Strength threshold / truncation / `Pmax` / non-Galerkin drop | **Partial** | AlgebraicMultigrid.jl `strength=` / `aggregate=` pass through on the tiled path; no HYPRE `Pmax` or non-Galerkin sparsification. |
 | Complex arithmetic | **Missing** | Real `DMatrix` path. |
 | Nodal / unknown-based systems | **Partial** | `blocksize` / `nvars` on SA (per-unknown constants when `nullspace` is omitted). Elasticity still wants `nullspace=N`. |
-| Native GPU AMG setup / apply | **Missing** | AlgebraicMultigrid.jl is host. GPU-PC (lesson 35) keeps *vector* chunks on-device for some block PCs; the AMG hierarchy itself is still host. |
+| Native GPU AMG setup / apply | **Partial** | AlgebraicMultigrid.jl is still host: setup host-stages *tiles* inside a GPU `ExactScope`. V-cycle Jacobi / ℓ1-Jacobi / Chebyshev / SpMV keep Krylov vectors in VRAM (`_pc_alloc_vec` / `AllocateUndef`, not a host `Vector` restamp). GPU `move` of offset / C/F / ASM-range `Vector`s is `_pc_host_vec`'d; `_store_assembled_tile` accepts an already-uploaded `DSparseArray`. Hybrid GS, per-tile `AMGPreconditioner`, RAS, and the coarsest LU Adapt a temporary inside the GPU-scoped task. Coarse LU compute_scope is `scope(worker=wid)` (ThreadProc-only) — bare `ProcessScope` also matches GPU procs and UMFPACK segfaults. Not HYPRE device PMIS + ext+i. |
 | Coarsest solve | Gathered LU | Same idea as HYPRE’s sequential coarse solve; we gather (`_gather_sparse`), not a distributed coarse AMG. |
 
 **Covered (short):** global V/W/F-cycle with tiled HMIS-lite `P` and distributed RAP; opt-in PMIS; Jacobi / ℓ1-Jacobi / Chebyshev / hybrid GS / ILU / RAS level smoothers; SA near-nullspace (`N` only) and `blocksize`; geometric RAP V-cycle; RAS as `PCASM`; per-tile AMG as Schwarz (do not call that BoomerAMG).
 
-**Missing (short):** Falgout / CLJP / CGC / aggressive coarsening; extended / AIR / FF interpolation; additive cycles; FSAI; complex; GPU BoomerAMG; HYPRE `Pmax` / non-Galerkin knobs.
+**Missing (short):** Falgout / CLJP / CGC / aggressive coarsening; extended / AIR / FF interpolation; additive cycles; FSAI; complex; fully device-side AMG setup (tiles still host-stage); HYPRE `Pmax` / non-Galerkin knobs.
 
 ---
 

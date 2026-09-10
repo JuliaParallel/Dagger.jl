@@ -174,11 +174,15 @@ end
 
 function _jacobi_dinv(A::DMatrix{T}) where T
     n, Ac, mt, mb = _square_tiled_layout(A)
-    dinv = DVector{T}(undef, Blocks(mb), n)
+    # Allocate `dinv` on each diagonal tile's processor (GPU ExactScope when
+    # the operator lives in VRAM). `DVector(undef)` follows ambient
+    # acceleration only; a host Vector chunk here would gather Krylov
+    # vectors on the next apply (lesson 35 / 52).
+    dinv = _pc_alloc_vec(T, view(Ac, :, 1), Blocks(mb), n)
     dc = dinv.chunks
     Dagger.spawn_datadeps() do
         for i in 1:mt
-            Dagger.@spawn _set_inv_diag!(Out(dc[i]), In(Ac[i, i]))
+            Dagger.@spawn compute_scope=_tile_scope(Ac[i, i]) _set_inv_diag!(Out(dc[i]), In(Ac[i, i]))
         end
     end
     return dinv
@@ -190,7 +194,7 @@ function LinearAlgebra.mul!(y::DVector, P::JacobiPreconditioner, x::DVector)
         dc, xc, yc = dinv.chunks, x.chunks, y.chunks
         Dagger.spawn_datadeps() do
             for i in eachindex(yc)
-                Dagger.@spawn _jacobi_apply!(Out(yc[i]), In(dc[i]), In(xc[i]))
+                Dagger.@spawn compute_scope=_tile_scope(yc[i]) _jacobi_apply!(Out(yc[i]), In(dc[i]), In(xc[i]))
             end
         end
     end
@@ -249,6 +253,47 @@ end
 function _tile_scope(t::DTask)
     raw = fetch(t; raw=true)
     return raw isa Chunk ? _tile_scope(raw) : ProcessScope(root_worker_id(raw))
+end
+
+# Dense vector tile on the executing processor. GPU processors override
+# `AllocateUndef` (ROCArray / CuArray / …); a bare `Vector` return from a
+# GPU-scoped spawn would be stamped CPURAM (or VRAM-labelled host Array —
+# lesson 26) and the next SpMV would gather.
+_pc_undef_vec(::Type{T}, len::Int) where T =
+    allocate_array(AllocateUndef{T}(), T, (len,))
+
+# GPU `move` uploads a host `Vector` of offsets / C/F labels / tile ranges
+# to a device array. Setup kernels index those on the CPU (lesson 52).
+_pc_host_vec(::Nothing) = nothing
+_pc_host_vec(x::Array) = x
+_pc_host_vec(x) = Adapt.adapt(Array, x)
+function _pc_host_vec(::Type{T}, x) where T
+    x isa Vector{T} && return x
+    return convert(Vector{T}, Adapt.adapt(Array, x))
+end
+
+"""
+    _pc_alloc_vec(T, proto_chunks, part, n) -> DVector
+
+Allocate a dense `DVector{T}` whose tiles live on the same processors as
+`proto_chunks` (one prototype chunk per result tile, recycled if shorter).
+Used for Jacobi `dinv` and GlobalAMG V-cycle workspaces so GPU operators
+do not pick up host `Array` work vectors.
+"""
+function _pc_alloc_vec(::Type{T}, proto_chunks, part::Blocks{1}, n::Int) where T
+    d = ArrayDomain((1:n,))
+    sd = partition(part, d)
+    ntiles = length(sd)
+    ntiles >= 1 || throw(ArgumentError("cannot allocate a 0-tile DVector"))
+    np = length(proto_chunks)
+    np >= 1 || throw(ArgumentError("workspace allocation needs a prototype chunk"))
+    chunks = Vector{Any}(undef, ntiles)
+    for i in 1:ntiles
+        len = length(sd[i].indexes[1])
+        scope = _tile_scope(proto_chunks[min(i, np)])
+        chunks[i] = Dagger.@spawn compute_scope=scope _pc_undef_vec(T, len)
+    end
+    return DArray(T, d, sd, chunks, part)
 end
 
 """
@@ -758,6 +803,8 @@ function _asm_assemble_dense(Ω::UnitRange{Int}, row_ranges, col_ranges, hosts)
 end
 
 function _asm_assemble(Ω::UnitRange{Int}, row_ranges, col_ranges, tiles...)
+    row_ranges = _pc_host_vec(row_ranges)
+    col_ranges = _pc_host_vec(col_ranges)
     nr = length(row_ranges)
     nc = length(col_ranges)
     length(tiles) == nr * nc || throw(DimensionMismatch(
@@ -882,6 +929,7 @@ function _asm_vecs_match_y(y, xs)
 end
 
 function _asm_apply!(y, op, Ω, interior, ranges, xs...)
+    ranges = _pc_host_vec(ranges)
     if _supports_device_apply(op, y) && _asm_vecs_match_y(y, xs)
         _asm_apply_native!(y, op, Ω, interior, ranges, xs)
     elseif y isa Array && _asm_all_host_vecs(xs)
@@ -942,6 +990,7 @@ _asm_apply_add!(P::PinnedTileOperator, Ω, ranges, ny::Int, extras...) =
     _asm_apply_add!(P.op, Ω, ranges, ny, extras...)
 
 function _asm_apply_add!(op, Ω, ranges, ny::Int, extras...)
+    ranges = _pc_host_vec(ranges)
     length(extras) == 2 * ny || throw(DimensionMismatch(
         "overlapping ASM BASIC apply expected $ny y chunks and $ny x chunks, \
         got $(length(extras))"))

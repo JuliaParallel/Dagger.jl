@@ -31,7 +31,7 @@
 #       test_ipc      :: Bool     also assert !ipc_eligible(space, space)
 #       extra         :: Function or absent — extra backend-specific checks
 
-using Dagger, MPI, LinearAlgebra, Random, SparseArrays, Krylov, Test
+using Dagger, MPI, LinearAlgebra, Random, SparseArrays, Krylov, AlgebraicMultigrid, Test
 using Dagger: In, Out, InOut, Deps
 
 const MPIExt = Base.get_extension(Dagger, :MPIExt)
@@ -41,6 +41,7 @@ include(joinpath(@__DIR__, "array", "stencil_defs.jl"))
 include(joinpath(@__DIR__, "array", "sparse_defs.jl"))
 include(joinpath(@__DIR__, "array", "sparse_solve_defs.jl"))
 include(joinpath(@__DIR__, "array", "gpu_pc_defs.jl"))
+include(joinpath(@__DIR__, "array", "gpu_amg_defs.jl"))
 
 # Broadcast-only mutation helpers (scalar indexing is illegal on GPU arrays)
 add1!(X) = (X .+= 1; nothing)
@@ -332,6 +333,7 @@ if get(cfg, :sparse, false)
                 return !(Dagger.value_memory_space(v) isa Dagger.CPURAMMemorySpace)
             end
             test_gpu_pc_apply(; T=elt, check_vec)
+            test_gpu_global_amg(; T=elt, check_vec)
         end
     end
 end

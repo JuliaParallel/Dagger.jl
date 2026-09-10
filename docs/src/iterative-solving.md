@@ -409,6 +409,14 @@ Remaining gathers: coarsest LU, one row of tiles per coarsen (stays on the
 worker), membership / header fetch, GPU tile host-stage. `nullspace=N`
 gathers `N` only.
 
+On GPU tiles, construct `GlobalAMG` under the same device scope as the
+operator (`Dagger.scope(rocm_gpu=1)` / `cuda_gpu=1`). Setup still host-stages
+each *tile* inside that scope so AlgebraicMultigrid.jl can build `P`; the
+V-cycle then applies with device `mul!` / Jacobi / ℓ1-Jacobi / Chebyshev.
+Hybrid GS, per-tile [`AMGPreconditioner`](@ref), and the coarsest LU Adapt a
+temporary *inside* the GPU-scoped task — the DArray chunk stays in VRAM
+(lesson 35 / 52). Do not pin apply to `ProcessScope`. Check `‖Ax−b‖`.
+
 Elasticity and other systems whose low-energy modes are not the scalar
 constant need those modes as SA candidates — the PETSc
 `MatSetNearNullSpace` / rigid-body set. Attach them on the constructor;
@@ -485,7 +493,7 @@ AMG in particular can report `solved` while `‖Ax−b‖` is O(1)–O(100)).
 | Smoother | Jacobi (default), ℓ1-Jacobi, Chebyshev, hybrid GS, ILU, RAS | Hybrid GS, Schwarz, Chebyshev, ILU, FSAI, ℓ1-Jacobi, … |
 | Cycles | V (default), W, F. No additive AMG | V / W / F, additive and mult-additive AMG |
 | Complex / nodal systems | Nodal via `blocksize`; no complex AMG | Yes |
-| Native GPU AMG | Host AlgebraicMultigrid.jl; some *other* PCs apply on-device | PMIS + ext+i (and more) on device |
+| Native GPU AMG | Setup host-stages *tiles* (AlgebraicMultigrid.jl). V-cycle Jacobi / ℓ1-Jacobi / Chebyshev / SpMV keep vectors in VRAM; hybrid GS / per-tile AMG / coarse LU Adapt a temporary inside a GPU-scoped task | PMIS + ext+i (and more) on device |
 | Strength / truncation / Pmax | AlgebraicMultigrid.jl `strength=` / `aggregate=` passthrough; no HYPRE `Pmax` | First-class HYPRE knobs |
 | Non-Galerkin coarse drop | No | Yes |
 
@@ -494,7 +502,8 @@ rigid-body candidates and `blocksize`, classical RS, Jacobi / ℓ1-Jacobi /
 Chebyshev / hybrid GS / ILU / RAS level smoothers, geometric transfers on a
 regular 1-D/2-D grid, and RAS as its own preconditioner. Still missing:
 Falgout / CLJP / CGC / aggressive coarsening, extended / AIR / FF
-interpolation, additive cycles, complex AMG, FSAI, and a GPU AMG hierarchy.
+interpolation, additive cycles, complex AMG, FSAI, and a fully device-side
+AMG hierarchy (setup is still host-staged per tile).
 The longer table lives in `LINALG_INTEGRATION.md`.
 
 ### Choosing a preconditioner

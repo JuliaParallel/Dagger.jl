@@ -2,6 +2,7 @@ using Random
 using LinearAlgebra
 using SparseArrays
 using Krylov
+using AlgebraicMultigrid
 
 @everywhere begin
     using Distributed, Dagger
@@ -14,6 +15,7 @@ end
 include(joinpath(@__DIR__, "array", "sparse_defs.jl"))
 include(joinpath(@__DIR__, "array", "sparse_solve_defs.jl"))
 include(joinpath(@__DIR__, "array", "gpu_pc_defs.jl"))
+include(joinpath(@__DIR__, "array", "gpu_amg_defs.jl"))
 
 @everywhere begin
     function isongpu(X)
@@ -257,6 +259,7 @@ end
             end
             check_device_lu = F -> F isa LinearAlgebra.LU && F.factors isa CUDA.CuArray
             test_gpu_pc_apply(; scope, check_vec, check_device_lu, T=Float32)
+            test_gpu_global_amg(; scope, check_vec, T=Float32)
         end
     end
 end
@@ -450,6 +453,7 @@ end
             end
             check_device_lu = F -> F isa LinearAlgebra.LU && F.factors isa AMDGPU.ROCArray
             test_gpu_pc_apply(; scope, check_vec, check_device_lu, T=Float32)
+            test_gpu_global_amg(; scope, check_vec, T=Float32)
         end
     end
 end
@@ -642,6 +646,7 @@ end
                 return v isa oneArray && chunk.space isa IntelExt.IntelVRAMMemorySpace
             end
             test_gpu_pc_apply(; scope, check_vec, T=Float32)
+            test_gpu_global_amg(; scope, check_vec, T=Float32)
         end
     end
 end
@@ -808,6 +813,7 @@ end
                 return v isa MtlArray && chunk.space isa MetalExt.MetalVRAMMemorySpace
             end
             test_gpu_pc_apply(; scope, check_vec, T=Float32)
+            test_gpu_global_amg(; scope, check_vec, T=Float32)
         end
     end
 end
@@ -935,6 +941,7 @@ end
                 return v isa CLArray && chunk.space isa OpenCLExt.CLMemorySpace
             end
             test_gpu_pc_apply(; scope, check_vec, T=Float32)
+            test_gpu_global_amg(; scope, check_vec, T=Float32)
         end
     end
 end
