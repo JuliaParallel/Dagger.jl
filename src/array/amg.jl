@@ -13,20 +13,24 @@
 # pairing of unaggregated interface nodes, and it is not a merge of
 # already-assigned aggregates (that scheme lost to Jacobi; do not bring it
 # back without a residual check). The Galerkin product and the cycle apply
-# are distributed. The coarsest solve is a gathered LU. Do not treat Krylov
-# `stats.solved` as `Ax ≈ b`; check the un-preconditioned residual.
+# are distributed. The coarsest solve is a gathered LU. On GPU tiles, setup
+# host-stages each tile inside a device `ExactScope`; V-cycle vectors stay
+# in VRAM (lesson 52). Do not treat Krylov `stats.solved` as `Ax ≈ b`;
+# check the un-preconditioned residual.
 
 """
     GlobalAMGLevel
 
 One level of a [`GlobalAMG`](@ref) hierarchy: the level operator `A`, the
-prolongation `P` (restriction is `P'`), a Jacobi-family `dinv`, apply
-workspaces, and optional smoother state (`extra`: Chebyshev bounds or a
-level ILU/RAS preconditioner).
+prolongation `P`, an optional restriction `R` (`nothing` means `P'`), a
+Jacobi-family `dinv`, apply workspaces, and optional smoother state
+(`extra`: Chebyshev bounds, a level ILU/RAS preconditioner, or an FSAI
+`DMatrix`).
 """
-struct GlobalAMGLevel{TA,TP,V,S}
+struct GlobalAMGLevel{TA,TP,TR,V,S}
     A::TA
     P::TP
+    R::TR
     dinv::V
     res::V
     coarse_x::V
@@ -81,15 +85,35 @@ Keyword arguments:
   (polynomial; `chebyshev_degree`, `chebyshev_ratio`), `:hybrid_gs`
   (processor-local GS on the diagonal tile, Jacobi off-tile), `:ilu`
   (existing [`BlockILUPreconditioner`](@ref) as a level smoother), `:ras`
-  (existing [`AdditiveSchwarzPreconditioner`](@ref); default overlap 0).
+  (existing [`AdditiveSchwarzPreconditioner`](@ref); default overlap 0),
+  `:fsai` (factorized sparse approximate inverse of each diagonal tile;
+  apply is `G'G`, not a new solver type).
 - `relax=2/3`, `presweeps=2`, `postsweeps=2` — Jacobi-family damping and
   sweep counts. One Jacobi sweep each side is not enough for the coarse
   correction to beat Jacobi-only on 1-D Poisson; two is the smallest count
   that does.
-- `cycle=:v` — `:v`, `:w`, or `:f`.
-- `coarsen=:hmis` — `:hmis` (default), `:pmis`, or `:standard`.
-- `interp=:sa` — SA tentative + smooth; RS uses `:direct` (classical
-  distance-1). AlgebraicMultigrid.jl has no ext+i / AIR / FF hook.
+- `cycle=:v` — `:v`, `:w`, `:f`, `:additive` (fine smoother plus a
+  `1/n`-damped coarsest solve of the *original* residual), or
+  `:multadditive` (pre-smooth, damped coarsest of the *updated*
+  residual, post-smooth). Unscaled `P (Ac \\ R b)` overshoots on 1-D
+  Poisson (‖r‖/‖b‖ ~ 8 vs Jacobi ~ 0.98); a residual line search would
+  make `mul!` nonlinear. Prefer `:v` for Krylov.
+- `coarsen=:hmis` — `:hmis` (default), `:pmis`, `:standard`, `:falgout`
+  (local RS, then CLJP on the interface), `:cljp` (measure-weighted
+  independent set), `:cgc` (compatible-relaxation C-points), or
+  `:aggressive` (PMIS on the distance-2 strength graph). Full PMIS / CLJP
+  / aggressive can lose to Jacobi on 1-D Poisson n=128; they stay opt-in
+  unless a residual gate says otherwise.
+- `interp=:sa` — SA tentative + smooth; RS default is `:direct` (classical
+  distance-1). Also `:extended`, `:exti` (`:extended_i` / `Symbol("ext+i")`),
+  `:ff`, `:multipass`, `:air`. AIR stores a distributed restriction `R`
+  (one-point approximate ideal restriction); it does not collect fine `A`.
+  Classical distance-2 interpolants use a compact C-neighbor map, not a
+  gather of `A`.
+- `pmax=0`, `trunc_factor=0`, `coarse_drop=0` — first-class sparsity knobs.
+  `pmax` keeps that many largest entries per row of `P`; `trunc_factor`
+  drops `|p_ij| < θ max_k |p_ik|`; `coarse_drop` drops small off-diagonals
+  of each Galerkin `Ac`. Zero means off (no silent HYPRE default).
 
 Requires `AlgebraicMultigrid.jl`. Default setup does not collect `A` to
 build `P`. `nullspace=N` gathers `N` only. This is not HYPRE BoomerAMG.
@@ -113,6 +137,10 @@ struct GlobalAMG{L,C,A} <: AbstractDaggerPreconditioner
     coarsen::Symbol
     blocksize::Int
     chebyshev_degree::Int
+    interp::Symbol
+    pmax::Int
+    trunc_factor::Float64
+    coarse_drop::Float64
 end
 
 # Friendly fallback (shadowed by the `::DMatrix` method in AlgebraicMultigridExt).
@@ -142,6 +170,8 @@ RugeStubenPreconditioner(A; kwargs...) =
 
 function Base.show(io::IO, M::GlobalAMG)
     print(io, "GlobalAMG(method=", M.method,
+          ", coarsen=", M.coarsen,
+          ", interp=", M.interp,
           ", smoother=", M.smoother,
           ", cycle=", M.cycle,
           ", levels=", length(M.levels) + 1,
@@ -193,6 +223,19 @@ function _amg_sa_membership end
 function _amg_rs_interp_tile end
 function _amg_local_sa_header end
 function _hybrid_gs_tile! end
+function _amg_cljp_measure end
+function _amg_strong_nbrs end
+function _amg_cneigh_frag end
+function _amg_extended_interp_tile end
+function _amg_injection_tile end
+function _amg_air_r_tile end
+function _amg_fill_r_tile end
+function _amg_local_rs_header end
+function _amg_zero_c_chunk! end
+function _amg_fsai_tile end
+function _amg_trunc_p_row end
+function _amg_drop_ac_row end
+function _amg_store_sparse_tile end
 
 # Per-tile kernels (named, so workers resolve them without closure capture).
 _amg_residual!(r, b) = (r .= b .- r; nothing)
@@ -228,8 +271,8 @@ function _jacobi_smooth!(u::DVector, A::DMatrix, dinv::DVector, b::DVector,
             uc, dc, rc, bc = u.chunks, dinv.chunks, r.chunks, b.chunks
             Dagger.spawn_datadeps() do
                 for i in eachindex(uc)
-                    Dagger.@spawn _jacobi_smooth_chunk!(InOut(uc[i]), In(dc[i]),
-                                                        In(rc[i]), In(bc[i]), ωT)
+                    Dagger.@spawn compute_scope=_tile_scope(uc[i]) _jacobi_smooth_chunk!(
+                        InOut(uc[i]), In(dc[i]), In(rc[i]), In(bc[i]), ωT)
                 end
             end
         end
@@ -243,7 +286,8 @@ function _amg_scale_vec!(y::DVector, dinv::DVector, x::DVector)
         yc, dc, xc = y.chunks, dinv.chunks, x.chunks
         Dagger.spawn_datadeps() do
             for i in eachindex(yc)
-                Dagger.@spawn _amg_scale_chunk!(Out(yc[i]), In(dc[i]), In(xc[i]))
+                Dagger.@spawn compute_scope=_tile_scope(yc[i]) _amg_scale_chunk!(
+                    Out(yc[i]), In(dc[i]), In(xc[i]))
             end
         end
     end
@@ -256,7 +300,8 @@ function _amg_scale_inplace!(y::DVector, dinv::DVector)
         yc, dc = y.chunks, dinv.chunks
         Dagger.spawn_datadeps() do
             for i in eachindex(yc)
-                Dagger.@spawn _amg_scale_inplace_chunk!(InOut(yc[i]), In(dc[i]))
+                Dagger.@spawn compute_scope=_tile_scope(yc[i]) _amg_scale_inplace_chunk!(
+                    InOut(yc[i]), In(dc[i]))
             end
         end
     end
@@ -282,7 +327,8 @@ function _chebyshev_smooth!(u::DVector, A::DMatrix, dinv::DVector, b::DVector,
             rc, bc = r.chunks, b.chunks
             Dagger.spawn_datadeps() do
                 for i in eachindex(rc)
-                    Dagger.@spawn _amg_residual!(InOut(rc[i]), In(bc[i]))
+                    Dagger.@spawn compute_scope=_tile_scope(rc[i]) _amg_residual!(
+                        InOut(rc[i]), In(bc[i]))
                 end
             end
         end
@@ -295,7 +341,8 @@ function _chebyshev_smooth!(u::DVector, A::DMatrix, dinv::DVector, b::DVector,
                 rc, bc = r.chunks, b.chunks
                 Dagger.spawn_datadeps() do
                     for i in eachindex(rc)
-                        Dagger.@spawn _amg_residual!(InOut(rc[i]), In(bc[i]))
+                        Dagger.@spawn compute_scope=_tile_scope(rc[i]) _amg_residual!(
+                            InOut(rc[i]), In(bc[i]))
                     end
                 end
             end
@@ -308,8 +355,8 @@ function _chebyshev_smooth!(u::DVector, A::DMatrix, dinv::DVector, b::DVector,
                 dc, wc = d.chunks, w.chunks
                 Dagger.spawn_datadeps() do
                     for i in eachindex(dc)
-                        Dagger.@spawn _cheby_d_update_chunk!(InOut(dc[i]), In(wc[i]),
-                                                             a, bcoef)
+                        Dagger.@spawn compute_scope=_tile_scope(dc[i]) _cheby_d_update_chunk!(
+                            InOut(dc[i]), In(wc[i]), a, bcoef)
                     end
                 end
             end
@@ -331,8 +378,8 @@ function _hybrid_gs_smooth!(u::DVector, A::DMatrix, b::DVector, r::DVector, nswe
             uc, rc, bc = u.chunks, r.chunks, b.chunks
             Dagger.spawn_datadeps() do
                 for i in 1:mt
-                    Dagger.@spawn _hybrid_gs_tile!(InOut(uc[i]), In(Ac[i, i]),
-                                                   In(rc[i]), In(bc[i]))
+                    Dagger.@spawn compute_scope=_tile_scope(uc[i]) _hybrid_gs_tile!(
+                        InOut(uc[i]), In(Ac[i, i]), In(rc[i]), In(bc[i]))
                 end
             end
         end
@@ -350,7 +397,8 @@ function _pc_smooth!(u::DVector, A::DMatrix, Pc, b::DVector, r::DVector,
             rc, bc = r.chunks, b.chunks
             Dagger.spawn_datadeps() do
                 for i in eachindex(rc)
-                    Dagger.@spawn _amg_residual!(InOut(rc[i]), In(bc[i]))
+                    Dagger.@spawn compute_scope=_tile_scope(rc[i]) _amg_residual!(
+                        InOut(rc[i]), In(bc[i]))
                 end
             end
         end
@@ -372,10 +420,33 @@ function _level_smooth!(u::DVector, L::GlobalAMGLevel, M::GlobalAMG, b::DVector,
         return _hybrid_gs_smooth!(u, L.A, b, L.res, nsweeps)
     elseif s === :ilu || s === :ras
         return _pc_smooth!(u, L.A, L.extra, b, L.res, L.work, nsweeps)
+    elseif s === :fsai
+        return _fsai_smooth!(u, L.A, L.extra, b, L.res, L.work, L.dir, nsweeps)
     else
         throw(ArgumentError("GlobalAMG: unknown smoother $(s); use :jacobi, \
-            :l1jacobi, :chebyshev, :hybrid_gs, :ilu, or :ras"))
+            :l1jacobi, :chebyshev, :hybrid_gs, :ilu, :ras, or :fsai"))
     end
+end
+
+function _fsai_smooth!(u::DVector, A::DMatrix, G, b::DVector, r::DVector,
+                       work::DVector, dir::DVector, nsweeps)
+    nsweeps <= 0 && return u
+    for _ in 1:nsweeps
+        _amg_restrict_residual!(r, A, u, b)
+        LinearAlgebra.mul!(work, G, r)
+        LinearAlgebra.mul!(dir, G', work)
+        LinearAlgebra.axpy!(one(eltype(u)), dir, u)
+    end
+    return u
+end
+
+function _amg_restrict_apply!(dest::DVector, L::GlobalAMGLevel, src::DVector)
+    if L.R === nothing
+        LinearAlgebra.mul!(dest, L.P', src)
+    else
+        LinearAlgebra.mul!(dest, L.R, src)
+    end
+    return dest
 end
 
 function _amg_restrict_residual!(res::DVector, A::DMatrix, u::DVector, b::DVector)
@@ -385,7 +456,8 @@ function _amg_restrict_residual!(res::DVector, A::DMatrix, u::DVector, b::DVecto
         rc, bc = res.chunks, b.chunks
         Dagger.spawn_datadeps() do
             for i in eachindex(rc)
-                Dagger.@spawn _amg_residual!(InOut(rc[i]), In(bc[i]))
+                Dagger.@spawn compute_scope=_tile_scope(rc[i]) _amg_residual!(
+                    InOut(rc[i]), In(bc[i]))
             end
         end
     end
@@ -393,6 +465,11 @@ function _amg_restrict_residual!(res::DVector, A::DMatrix, u::DVector, b::DVecto
 end
 
 function _mgcycle!(u::DVector, M::GlobalAMG, b::DVector, ℓ::Int, cycle::Symbol)
+    if cycle === :additive && ℓ == 1
+        return _additive_cycle!(u, M, b)
+    elseif cycle === :multadditive && ℓ == 1
+        return _multadditive_cycle!(u, M, b)
+    end
     if ℓ > length(M.levels)
         copyto!(u, M.coarse \ b)
         return u
@@ -400,7 +477,7 @@ function _mgcycle!(u::DVector, M::GlobalAMG, b::DVector, ℓ::Int, cycle::Symbol
     L = M.levels[ℓ]
     _level_smooth!(u, L, M, b, M.presweeps)
     _amg_restrict_residual!(L.res, L.A, u, b)
-    LinearAlgebra.mul!(L.coarse_b, L.P', L.res)
+    _amg_restrict_apply!(L.coarse_b, L, L.res)
     fill!(L.coarse_x, zero(eltype(L.coarse_x)))
     nL = length(M.levels)
     if cycle === :w && ℓ < nL
@@ -418,16 +495,88 @@ function _mgcycle!(u::DVector, M::GlobalAMG, b::DVector, ℓ::Int, cycle::Symbol
     return u
 end
 
+# Nested restriction of `src` from level `ℓ0` downward into each `coarse_b`.
+function _amg_restrict_nested!(M::GlobalAMG, src::DVector, ℓ0::Int)
+    nL = length(M.levels)
+    ℓ0 > nL && return
+    _amg_restrict_apply!(M.levels[ℓ0].coarse_b, M.levels[ℓ0], src)
+    for ℓ in (ℓ0 + 1):nL
+        _amg_restrict_apply!(M.levels[ℓ].coarse_b, M.levels[ℓ],
+                             M.levels[ℓ - 1].coarse_b)
+    end
+    return
+end
+
+# Prolong the coarsest correction (`levels[end].coarse_x`) to level `ℓ0`
+# into `dest` (overwrite). Intermediate `coarse_x` / `res` are scratch.
+function _amg_store_coarse_into!(dest::DVector, M::GlobalAMG, ℓ0::Int)
+    nL = length(M.levels)
+    ℓ0 > nL && return dest
+    for ℓ in nL:-1:(ℓ0 + 1)
+        LinearAlgebra.mul!(M.levels[ℓ].res, M.levels[ℓ].P, M.levels[ℓ].coarse_x)
+        copyto!(M.levels[ℓ - 1].coarse_x, M.levels[ℓ].res)
+    end
+    LinearAlgebra.mul!(dest, M.levels[ℓ0].P, M.levels[ℓ0].coarse_x)
+    return dest
+end
+
+# Fixed linear damping for the coarsest additive correction. Unscaled
+# `P (Ac \ R b)` is O(10³) on 1-D Poisson (‖r‖/‖b‖ ~ 8). A residual
+# line search would fix that *and* make `mul!` nonlinear (GMRES
+# stagnates). `1/n` matches the 1-D n=64 residual-optimal scale (~0.013).
+_amg_additive_ω(M::GlobalAMG, ::Type{T}) where T = inv(T(M.n))
+
+# Additive AMG: independent fine smoother (original residual) plus a
+# damped coarsest solve of `R b`. Linear in `b`. Not a V-cycle.
+function _additive_cycle!(u::DVector, M::GlobalAMG, b::DVector)
+    nL = length(M.levels)
+    fill!(u, zero(eltype(u)))
+    if nL == 0
+        copyto!(u, M.coarse \ b)
+        return u
+    end
+    L1 = M.levels[1]
+    T = eltype(u)
+    _level_smooth!(u, L1, M, b, M.presweeps + M.postsweeps)
+    _amg_restrict_nested!(M, b, 1)
+    copyto!(M.levels[end].coarse_x, M.coarse \ M.levels[end].coarse_b)
+    _amg_store_coarse_into!(L1.dir, M, 1)
+    LinearAlgebra.axpy!(_amg_additive_ω(M, T), L1.dir, u)
+    return u
+end
+
+# Mult-additive: multiplicative pre-smooth, damped coarsest solve of the
+# *updated* residual, then post-smooth. Intermediate levels stay additive
+# (no residual update on the way down). Linear in `b`.
+function _multadditive_cycle!(u::DVector, M::GlobalAMG, b::DVector)
+    nL = length(M.levels)
+    fill!(u, zero(eltype(u)))
+    if nL == 0
+        copyto!(u, M.coarse \ b)
+        return u
+    end
+    L1 = M.levels[1]
+    T = eltype(u)
+    _level_smooth!(u, L1, M, b, M.presweeps)
+    _amg_restrict_residual!(L1.res, L1.A, u, b)
+    _amg_restrict_nested!(M, L1.res, 1)
+    copyto!(M.levels[end].coarse_x, M.coarse \ M.levels[end].coarse_b)
+    _amg_store_coarse_into!(L1.dir, M, 1)
+    LinearAlgebra.axpy!(_amg_additive_ω(M, T), L1.dir, u)
+    _level_smooth!(u, L1, M, b, M.postsweeps)
+    return u
+end
+
 _vcycle!(u::DVector, M::GlobalAMG, b::DVector, ℓ::Int) =
     _mgcycle!(u, M, b, ℓ, M.cycle)
 
 """
     mul!(y, M::GlobalAMG, x)
 
-One V-cycle (or W/F): `y ← M⁻¹ x` with a zero initial guess. This is the
-Krylov `ldiv=false` apply. Krylov `stats.solved` is the *preconditioned*
-residual; check `‖A y − x‖` (un-preconditioned) when `x` is the right-hand
-side.
+One V-cycle (or W/F/additive/mult-additive): `y ← M⁻¹ x` with a zero
+initial guess. This is the Krylov `ldiv=false` apply. Krylov
+`stats.solved` is the *preconditioned* residual; check `‖A y − x‖`
+(un-preconditioned) when `x` is the right-hand side.
 """
 function LinearAlgebra.mul!(y::DVector, M::GlobalAMG, x::DVector)
     length(x) == M.n || throw(DimensionMismatch(
