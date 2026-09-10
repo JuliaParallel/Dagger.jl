@@ -395,19 +395,41 @@ using AlgebraicMultigrid, Krylov
 
 M = Dagger.SmoothedAggregationPreconditioner(DA)   # or RugeStubenPreconditioner(DA)
 # also: M = aspreconditioner(smoothed_aggregation(DA))
-# smoother=:l1jacobi|:chebyshev|:hybrid_gs|:ilu|:ras, cycle=:w|:f
+# smoother=:l1jacobi|:chebyshev|:hybrid_gs|:ilu|:ras|:fsai
+# cycle=:w|:f|:additive|:multadditive
+# coarsen=:falgout|:cljp|:cgc|:aggressive  (default :hmis)
+# interp=:extended|:exti|:ff|:air|:multipass
 x, stats = Krylov.gmres(DA, b; M)
 r = similar(b); mul!(r, DA, x); axpy!(-1, b, r)
 @assert norm(r) / norm(b) < 1e-8   # do not stop at stats.solved
 ```
 
 Default coarsening is HMIS-lite (`coarsen=:hmis`); `:pmis` is a full
-independent set; `:standard` is the older per-tile + leftover-pair path.
+independent set; `:standard` is the older per-tile + leftover-pair path;
+`:falgout` / `:cljp` / `:cgc` / `:aggressive` are HYPRE-named opt-in
+coarseners. Falgout / CLJP / aggressive / PMIS lose the 1-D n=128 Jacobi
+gate and stay opt-in; they beat Jacobi on 2-D Poisson. CGC beats both.
+`interp=:extended` / `:exti` / `:ff` / `:multipass` / `:air` are
+distributed classical interpolants (AIR stores its own `R`). `pmax` /
+`trunc_factor` / `coarse_drop` change `P` / `Ac` sparsity (zero = off).
+`cycle=:additive` / `:multadditive` add a `1/n`-damped coarsest
+correction (unscaled `R b` overshoots; a line search would make `mul!`
+nonlinear). Prefer `:v` for Krylov. `smoother=:fsai` is a
+block-diagonal sparse approximate inverse, not a new solver type.
+`ComplexF64` operators work; the default path is still real.
 Hierarchy recurses
 with distributed RAP until `max_coarse` / `max_levels` (default 10).
 Remaining gathers: coarsest LU, one row of tiles per coarsen (stays on the
 worker), membership / header fetch, GPU tile host-stage. `nullspace=N`
-gathers `N` only.
+gathers `N` only. Default setup still does not collect fine `A`.
+
+On GPU tiles, construct `GlobalAMG` under the same device scope as the
+operator (`Dagger.scope(rocm_gpu=1)` / `cuda_gpu=1`). Setup still host-stages
+each *tile* inside that scope so AlgebraicMultigrid.jl can build `P`; the
+V-cycle then applies with device `mul!` / Jacobi / ℓ1-Jacobi / Chebyshev.
+Hybrid GS, per-tile [`AMGPreconditioner`](@ref), and the coarsest LU Adapt a
+temporary *inside* the GPU-scoped task — the DArray chunk stays in VRAM
+(lesson 35 / 52). Do not pin apply to `ProcessScope`. Check `‖Ax−b‖`.
 
 On GPU tiles, construct `GlobalAMG` under the same device scope as the
 operator (`Dagger.scope(rocm_gpu=1)` / `cuda_gpu=1`). Setup still host-stages
@@ -488,22 +510,22 @@ AMG in particular can report `solved` while `‖Ax−b‖` is O(1)–O(100)).
 | Geometric MG | [`GeometricMultigrid`](@ref): injection / full-weighting `R`, linear / bilinear `P` | PFMG/SMG (separate) |
 | Overlapping Schwarz | [`AdditiveSchwarzPreconditioner`](@ref) (`:restrict` / `:basic`); also `smoother=:ras` | Schwarz as a *smoother* option; also PETSc `PCASM` |
 | Near-nullspace | SA constructor `nullspace=N` (`fit_candidates`); RS rejects it; `blocksize`/`nvars` | `InterpVectors` + variants; nodal / unknown-based systems |
-| Coarsening | HMIS-lite (default), opt-in PMIS, or `:standard` leftover pairing. No Falgout / CLJP / CGC / aggressive | HMIS / PMIS / Falgout / CLJP / CGC / aggressive |
-| Interpolation | Tentative SA + Jacobi smooth; classical distance-1 RS. No ext+i / AIR / FF | Classical / extended / ext+i / FF / AIR / multipass / … |
-| Smoother | Jacobi (default), ℓ1-Jacobi, Chebyshev, hybrid GS, ILU, RAS | Hybrid GS, Schwarz, Chebyshev, ILU, FSAI, ℓ1-Jacobi, … |
-| Cycles | V (default), W, F. No additive AMG | V / W / F, additive and mult-additive AMG |
-| Complex / nodal systems | Nodal via `blocksize`; no complex AMG | Yes |
+| Coarsening | HMIS-lite (default); opt-in PMIS / Falgout / CLJP / CGC / aggressive; `:standard` leftover pairing | HMIS / PMIS / Falgout / CLJP / CGC / aggressive |
+| Interpolation | Tentative SA + Jacobi smooth; RS `:direct`; opt-in `:extended` / `:exti` / `:ff` / `:multipass` / `:air` (distributed, no collect of `A`) | Classical / extended / ext+i / FF / AIR / multipass / … |
+| Smoother | Jacobi (default), ℓ1-Jacobi, Chebyshev, hybrid GS, ILU, RAS, FSAI | Hybrid GS, Schwarz, Chebyshev, ILU, FSAI, ℓ1-Jacobi, … |
+| Cycles | V (default), W, F, additive, mult-additive | V / W / F, additive and mult-additive AMG |
+| Complex / nodal systems | Nodal via `blocksize`; `ComplexF64` `GlobalAMG` + GMRES | Yes |
 | Native GPU AMG | Setup host-stages *tiles* (AlgebraicMultigrid.jl). V-cycle Jacobi / ℓ1-Jacobi / Chebyshev / SpMV keep vectors in VRAM; hybrid GS / per-tile AMG / coarse LU Adapt a temporary inside a GPU-scoped task | PMIS + ext+i (and more) on device |
-| Strength / truncation / Pmax | AlgebraicMultigrid.jl `strength=` / `aggregate=` passthrough; no HYPRE `Pmax` | First-class HYPRE knobs |
-| Non-Galerkin coarse drop | No | Yes |
+| Strength / truncation / Pmax | AlgebraicMultigrid.jl `strength=` / `aggregate=` passthrough; `pmax` / `trunc_factor` / `coarse_drop` | First-class HYPRE knobs |
+| Non-Galerkin coarse drop | `coarse_drop` on each Galerkin `Ac` | Yes |
 
-Covered in spirit: a global V/W/F-cycle, HMIS-lite coarsening (opt-in PMIS), SA with optional
-rigid-body candidates and `blocksize`, classical RS, Jacobi / ℓ1-Jacobi /
-Chebyshev / hybrid GS / ILU / RAS level smoothers, geometric transfers on a
+Covered in spirit: a global V/W/F/additive/mult-additive cycle, HMIS-lite
+coarsening (opt-in PMIS / Falgout / CLJP / CGC / aggressive), SA with optional
+rigid-body candidates and `blocksize`, classical / extended / AIR interpolants,
+Jacobi / ℓ1-Jacobi / Chebyshev / hybrid GS / ILU / RAS / FSAI level smoothers,
+`pmax` / truncation / coarse drop, ComplexF64 AMG, geometric transfers on a
 regular 1-D/2-D grid, and RAS as its own preconditioner. Still missing:
-Falgout / CLJP / CGC / aggressive coarsening, extended / AIR / FF
-interpolation, additive cycles, complex AMG, FSAI, and a fully device-side
-AMG hierarchy (setup is still host-staged per tile).
+a fully device-side AMG hierarchy (setup is still host-staged per tile).
 The longer table lives in `LINALG_INTEGRATION.md`.
 
 ### Choosing a preconditioner

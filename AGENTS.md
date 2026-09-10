@@ -728,3 +728,24 @@ lesson.
    already-uploaded `DSparseArray`. Graph follow-ups that only need the host
    `AMGTileGraph` pin to `ProcessScope` so ambient GPU scope does not upload
    the C/F vector every PMIS pass.
+
+53. **Remaining HYPRE-alike GlobalAMG is opt-in; unscaled additive overshoots.**
+   Keep default `coarsen=:hmis` / `interp=:sa` / `cycle=:v` / `smoother=:jacobi`
+   — nothing beat HMIS on *both* 1-D n=128 and 2-D Poisson. Falgout / CLJP /
+   aggressive / PMIS lose the 1-D n=128 Jacobi gate (V-cycle residuals ~2.24 /
+   ~2.15 / ~1.73 / ~1.81 vs HMIS ~0.93 / Jacobi ~0.99) and stay opt-in; they
+   beat Jacobi on 2-D 8×8. CGC beats both. Classical `interp=:extended` /
+   `:exti` / `:ff` / `:multipass` / `:air` stay distributed (C-neighbor map or
+   a one-point AIR `R`; do not collect fine `A`, lesson 42). They lose 1-D
+   n=64 vs Jacobi and win on 2-D. `cycle=:additive` / `:multadditive` damp
+   the coarsest correction by `1/n`: unscaled `P (Ac \\ R b)` is O(10³) on
+   1-D Poisson and *increases* `‖Ax−b‖` to ~7.7, and a residual line search
+   makes `mul!` nonlinear so GMRES stagnates. `smoother=:fsai`
+   is a block-diagonal `G'G` of each diagonal tile — not a new solver type —
+   and loses 1-D (~1.95) while winning 2-D (~0.11 vs Jacobi ~0.78).
+   `pmax` / `trunc_factor` / `coarse_drop` are first-class and must change
+   `nnz(P)` / `nnz(Ac)` (zero means off). `ComplexF64` needs a real
+   Euclidean `fit_candidates` (AMG.jl compares Complex norms with `>`).
+   Do not invent `Dagger.hypre` / `Dagger.BoomerAMG`. Do not merge
+   already-assigned interface aggregates (lesson 42). Check `‖Ax−b‖`, not
+   `stats.solved` (lessons 19 / 32). Keep `_solve_pinned_dvector`.

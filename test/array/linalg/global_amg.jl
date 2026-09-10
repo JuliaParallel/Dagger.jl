@@ -384,9 +384,268 @@ end
         @test Mn.blocksize == 2
     end
 
-    @testset "extended interpolation is flagged, not faked" begin
-        DA = distribute(poisson_1d(32), Blocks(16, 16))
-        @test_throws ArgumentError Dagger.GlobalAMG(DA; interp=:extended, max_levels=2)
-        @test_throws ArgumentError Dagger.GlobalAMG(DA; interp=:air, max_levels=2)
+    @testset "opt-in coarsen (Falgout/CLJP/CGC/aggressive) vs Jacobi" begin
+        # 1-D n=64: CGC / aggressive beat Jacobi; Falgout / CLJP lose (like
+        # PMIS) and stay opt-in. 2-D 8×8 is the problem where every new
+        # coarsener must beat the same sweep count of Jacobi.
+        n, k = 64, 16
+        A = poisson_1d(n)
+        b = ones(n)
+        DA = distribute(A, Blocks(k, k))
+        Db = distribute(b, Blocks(k))
+        jrel = jacobi_only_relres(A, b, 2 / 3, 4)
+        for c in (:falgout, :cljp, :cgc, :aggressive)
+            M = Dagger.SmoothedAggregationPreconditioner(DA; coarsen=c, max_levels=3, max_coarse=16)
+            @test M.coarsen === c
+            y = similar(Db)
+            mul!(y, M, Db)
+            vrel = true_relres(DA, y, Db)
+            @test all(isfinite, collect(y))
+            if c === :cgc || c === :aggressive
+                @test vrel < jrel
+            else
+                # Honest 1-D residual: do not require a Jacobi win.
+                @test vrel < 2 * max(jrel, 0.5)
+            end
+            _, _, rel = solve_gmres(DA, Db, M)
+            @test rel < 1e-6
+        end
+        A2 = poisson_2d(8, 8)
+        b2 = ones(64)
+        DA2 = distribute(A2, Blocks(16, 16))
+        Db2 = distribute(b2, Blocks(16))
+        j2 = jacobi_only_relres(A2, b2, 2 / 3, 4)
+        for c in (:falgout, :cljp, :cgc, :aggressive)
+            M = Dagger.SmoothedAggregationPreconditioner(DA2; coarsen=c, max_levels=3, max_coarse=16)
+            y = similar(Db2)
+            mul!(y, M, Db2)
+            @test true_relres(DA2, y, Db2) < j2
+        end
+    end
+
+    @testset "opt-in coarsen n=128 residuals are recorded honestly" begin
+        # Lesson 51: full PMIS loses the 1-D n=128 Jacobi gate. New coarseners
+        # that also lose stay opt-in; this test records ‖r‖/‖b‖, it does not
+        # require them to beat Jacobi at this size.
+        n, k = 128, 16
+        A = poisson_1d(n)
+        b = ones(n)
+        DA = distribute(A, Blocks(k, k))
+        Db = distribute(b, Blocks(k))
+        jrel = jacobi_only_relres(A, b, 2 / 3, 4)
+        Mh = Dagger.SmoothedAggregationPreconditioner(DA; coarsen=:hmis, max_levels=3, max_coarse=16)
+        yh = similar(Db)
+        mul!(yh, Mh, Db)
+        hrel = true_relres(DA, yh, Db)
+        @test hrel < jrel
+        for c in (:falgout, :cljp, :cgc, :aggressive, :pmis)
+            M = Dagger.SmoothedAggregationPreconditioner(DA; coarsen=c, max_levels=3, max_coarse=16)
+            y = similar(Db)
+            mul!(y, M, Db)
+            vrel = true_relres(DA, y, Db)
+            @test all(isfinite, collect(y))
+            # Do not tank worse than today's HMIS default by a huge factor
+            # (a method that explodes is a bug; losing the Jacobi gate is OK).
+            @test vrel < 8 * hrel
+        end
+    end
+
+    @testset "extended / ext+i / FF / multipass interpolation" begin
+        # 1-D Poisson is a poor classical-interp problem (extended / FF /
+        # multipass lose to Jacobi). 2-D 8×8 is the gate.
+        n, k = 64, 16
+        A = poisson_1d(n)
+        b = ones(n)
+        DA = distribute(A, Blocks(k, k))
+        Db = distribute(b, Blocks(k))
+        jrel = jacobi_only_relres(A, b, 2 / 3, 4)
+        for ip in (:extended, :exti, :ff, :multipass)
+            M = Dagger.RugeStubenPreconditioner(DA; interp=ip, max_levels=3, max_coarse=16)
+            @test M.interp === ip
+            y = similar(Db)
+            mul!(y, M, Db)
+            @test all(isfinite, collect(y))
+            vrel = true_relres(DA, y, Db)
+            @test vrel < 2 * max(jrel, 0.5)
+            _, _, rel = solve_gmres(DA, Db, M)
+            @test rel < 1e-6
+        end
+        Mplus = Dagger.RugeStubenPreconditioner(DA; interp=Symbol("ext+i"), max_levels=3, max_coarse=16)
+        @test Mplus.interp === :exti
+        A2 = poisson_2d(8, 8)
+        b2 = ones(64)
+        DA2 = distribute(A2, Blocks(16, 16))
+        Db2 = distribute(b2, Blocks(16))
+        j2 = jacobi_only_relres(A2, b2, 2 / 3, 4)
+        for ip in (:extended, :exti, :ff, :multipass, :air)
+            M = Dagger.RugeStubenPreconditioner(DA2; interp=ip, max_levels=3, max_coarse=16)
+            y = similar(Db2)
+            mul!(y, M, Db2)
+            @test true_relres(DA2, y, Db2) < j2
+        end
+    end
+
+    @testset "AIR interpolation stays distributed and is opt-in" begin
+        n, k = 64, 16
+        A = poisson_1d(n)
+        b = rand(n)
+        DA = distribute(A, Blocks(k, k))
+        Db = distribute(b, Blocks(k))
+        old = Dagger.COLLECT_SPARSE_DMATRIX_MAXSIZE[]
+        Dagger.COLLECT_SPARSE_DMATRIX_MAXSIZE[] = 0
+        try
+            M = Dagger.RugeStubenPreconditioner(DA; interp=:air, max_levels=3, max_coarse=16)
+            @test M.interp === :air
+            @test !isempty(M.levels)
+            @test M.levels[1].R isa Dagger.DMatrix
+            y = similar(Db)
+            mul!(y, M, Db)
+            @test all(isfinite, collect(y))
+            vrel = true_relres(DA, y, Db)
+            jrel = jacobi_only_relres(A, b, M.relax, M.presweeps + M.postsweeps)
+            # AIR is for nonsymmetric / upwind problems; on SPD Poisson it may
+            # lose the Jacobi gate. Record the residual honestly.
+            @test vrel < 8 * max(jrel, 0.25)
+            _, _, rel = solve_gmres(DA, Db, M)
+            @test rel < 1e-6
+        finally
+            Dagger.COLLECT_SPARSE_DMATRIX_MAXSIZE[] = old
+        end
+    end
+
+    @testset "classical interp setup does not collect A" begin
+        n, k = 64, 16
+        A = poisson_1d(n)
+        b = rand(n)
+        DA = distribute(A, Blocks(k, k))
+        Db = distribute(b, Blocks(k))
+        old = Dagger.COLLECT_SPARSE_DMATRIX_MAXSIZE[]
+        Dagger.COLLECT_SPARSE_DMATRIX_MAXSIZE[] = 0
+        try
+            for ip in (:extended, :exti, :ff, :multipass)
+                M = Dagger.RugeStubenPreconditioner(DA; interp=ip, max_levels=3, max_coarse=16)
+                y = similar(Db)
+                mul!(y, M, Db)
+                @test all(isfinite, collect(y))
+                @test !isempty(M.levels)
+            end
+        finally
+            Dagger.COLLECT_SPARSE_DMATRIX_MAXSIZE[] = old
+        end
+    end
+
+    @testset "additive and mult-additive cycles beat Jacobi" begin
+        n, k = 64, 16
+        A = poisson_1d(n)
+        b = ones(n)
+        DA = distribute(A, Blocks(k, k))
+        Db = distribute(b, Blocks(k))
+        jrel = jacobi_only_relres(A, b, 2 / 3, 4)
+        for cyc in (:additive, :multadditive)
+            M = Dagger.GlobalAMG(DA; cycle=cyc, max_levels=4, max_coarse=16)
+            @test M.cycle === cyc
+            y = similar(Db)
+            mul!(y, M, Db)
+            @test true_relres(DA, y, Db) < jrel
+            # Additive M is a damped two-grid operator, closer to Jacobi
+            # than to a V-cycle. GMRES must run and stay finite; do not
+            # require the V-cycle 1e-6 gate (lesson 53).
+            x, _, rel = solve_gmres(DA, Db, M)
+            @test all(isfinite, collect(x))
+            @test isfinite(rel)
+        end
+        A2 = poisson_2d(8, 8)
+        b2 = ones(64)
+        DA2 = distribute(A2, Blocks(16, 16))
+        Db2 = distribute(b2, Blocks(16))
+        j2 = jacobi_only_relres(A2, b2, 2 / 3, 4)
+        for cyc in (:additive, :multadditive)
+            M = Dagger.GlobalAMG(DA2; cycle=cyc, max_levels=4, max_coarse=16)
+            y = similar(Db2)
+            mul!(y, M, Db2)
+            @test true_relres(DA2, y, Db2) < j2
+        end
+    end
+
+    @testset "FSAI level smoother" begin
+        # 1-D tile FSAI is a weak approximate inverse (can lose to damped
+        # Jacobi). 2-D 8×8 is the gate; 1-D records a finite residual and
+        # that GMRES still drives ‖Ax−b‖ down.
+        n, k = 64, 16
+        A = poisson_1d(n)
+        b = ones(n)
+        DA = distribute(A, Blocks(k, k))
+        Db = distribute(b, Blocks(k))
+        M = Dagger.GlobalAMG(DA; smoother=:fsai, max_levels=3, max_coarse=16)
+        @test M.smoother === :fsai
+        y = similar(Db)
+        mul!(y, M, Db)
+        @test all(isfinite, collect(y))
+        vrel = true_relres(DA, y, Db)
+        jrel = jacobi_only_relres(A, b, 2 / 3, 4)
+        @test vrel < 8 * max(jrel, 0.25)
+        _, _, rel = solve_gmres(DA, Db, M)
+        @test rel < 1e-6
+        A2 = poisson_2d(8, 8)
+        b2 = ones(64)
+        DA2 = distribute(A2, Blocks(16, 16))
+        Db2 = distribute(b2, Blocks(16))
+        M2 = Dagger.GlobalAMG(DA2; smoother=:fsai, max_levels=3, max_coarse=16)
+        y2 = similar(Db2)
+        mul!(y2, M2, Db2)
+        @test true_relres(DA2, y2, Db2) < jacobi_only_relres(A2, b2, 2 / 3, 4)
+    end
+
+    @testset "pmax / trunc_factor / coarse_drop change sparsity" begin
+        n, k = 64, 16
+        DA = distribute(poisson_1d(n), Blocks(k, k))
+        M0 = Dagger.SmoothedAggregationPreconditioner(DA; max_levels=3, max_coarse=16)
+        P0 = Dagger._collect_sparse_dmatrix(M0.levels[1].P)
+        Ac0 = Dagger._collect_sparse_dmatrix(M0.levels[1].A)
+        Mp = Dagger.SmoothedAggregationPreconditioner(DA; pmax=1, max_levels=3, max_coarse=16)
+        @test Mp.pmax == 1
+        Pp = Dagger._collect_sparse_dmatrix(Mp.levels[1].P)
+        @test SparseArrays.nnz(Pp) < SparseArrays.nnz(P0)
+        Mt = Dagger.SmoothedAggregationPreconditioner(DA; trunc_factor=0.5, max_levels=3, max_coarse=16)
+        @test Mt.trunc_factor == 0.5
+        Pt = Dagger._collect_sparse_dmatrix(Mt.levels[1].P)
+        @test SparseArrays.nnz(Pt) <= SparseArrays.nnz(P0)
+        Md = Dagger.SmoothedAggregationPreconditioner(DA; coarse_drop=0.25, max_levels=3, max_coarse=16)
+        @test Md.coarse_drop == 0.25
+        # Drop is on the Galerkin product stored as the *next* level operator
+        # (or the coarsest A when there is one RAP).
+        Acd = Dagger._collect_sparse_dmatrix(length(Md.levels) >= 2 ? Md.levels[2].A : Md.coarse_A)
+        Acn = Dagger._collect_sparse_dmatrix(length(M0.levels) >= 2 ? M0.levels[2].A : M0.coarse_A)
+        @test SparseArrays.nnz(Acd) <= SparseArrays.nnz(Acn)
+        @test SparseArrays.nnz(Acd) < SparseArrays.nnz(Acn) ||
+              SparseArrays.nnz(Pt) < SparseArrays.nnz(P0) ||
+              SparseArrays.nnz(Pp) < SparseArrays.nnz(P0)
+    end
+
+    @testset "ComplexF64 GlobalAMG + GMRES" begin
+        n, k = 64, 16
+        A = SparseArrays.spdiagm(
+            -1 => fill(ComplexF64(-1), n - 1),
+             0 => fill(ComplexF64(2), n),
+             1 => fill(ComplexF64(-1), n - 1),
+        )
+        b = rand(ComplexF64, n)
+        DA = distribute(A, Blocks(k, k))
+        Db = distribute(b, Blocks(k))
+        M = Dagger.SmoothedAggregationPreconditioner(DA; max_levels=3, max_coarse=16)
+        @test eltype(M.levels[1].A) == ComplexF64
+        y = similar(Db)
+        mul!(y, M, Db)
+        @test all(isfinite, collect(y))
+        dinv = 1.0 ./ diag(A)
+        u = zeros(ComplexF64, n)
+        for _ in 1:4
+            u .+= (2 / 3) .* dinv .* (b .- A * u)
+        end
+        jrel = LinearAlgebra.norm2(A * u - b) / LinearAlgebra.norm2(b)
+        @test true_relres(DA, y, Db) < jrel
+        x, stats = Krylov.gmres(DA, Db; M=M, atol=1e-14, rtol=1e-10, itmax=400,
+                                memory=min(n, 80))
+        @test true_relres(DA, x, Db) < 1e-6
     end
 end
