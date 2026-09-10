@@ -269,7 +269,7 @@ Priority: **P0 done** / **P1 done** = merged onto `Dagger-linalg-ultra`. **P2** 
 | P2 | bsr-tiles | done | `linalg/bsr` @ `5cfa88cb` | User-approved host `SparseMatrixBSR` (block-CSR; `Dagger.BSR` is only an alias). CSC default; host CSR unchanged; GPU stays CSC. `mul!` / `*` / `distribute` / `spzeros(SparseMatrixBSR,…)`. Lesson 50. Assembly via `sparsebsr(I,J,V,…,part)`; block PCs still collect a tile to CSC. AWS: BSR 27/27 + CSR 83 on job `d951c6a41f5c60d6`. | 2026-09-09 |
 | P2 | stencil-gmg-xfer | skipped | — | **FLAG:** `jps/sparse-stencil` cannot express restriction/prolongation (lesson 37). Matrix `GeometricMultigrid` already landed. Do not grow the stencil stack. | 2026-09-08 |
 | P0 leftover | blas1-fastpath | done | `linalg/blas1-fastpath` @ `69c88672` | Local `ThreadProc`+CPURAM BLAS-1 (`dot`/`axpy!`/`axpby!`/`norm`/`copyto!`/`fill!`/`rmul!`/`lmul!`) skips `spawn_datadeps`; MPI/remote/GPU stay on Datadeps (no second MPI path). Lesson 48. **Sweep may start.** AWS job `50a5dd19ede8a63e`: core 43 (incl. local vs Datadeps), rest green except known NNS 39/40. | 2026-09-09 |
-| P0 | boomeramg-alike | in progress | `linalg/boomeramg-alike` | HMIS-lite default coarsening (full PMIS opt-in; loses 1-D n=128 Jacobi gate), deeper RAP, Jacobi/ℓ1/Chebyshev/hybrid-GS/ILU/RAS level smoothers, W/F-cycle, `blocksize`, NNS gathers `N` only. Lesson 51. Per-tile `AMGPreconditioner` unchanged. | 2026-09-10 |
+| P0 | boomeramg-alike | done | `linalg/boomeramg-alike` @ `96712372` | HMIS-lite default coarsening (full PMIS opt-in; 1-D n=128 V-cycle 1.54 vs Jacobi 0.89, HMIS 0.80), deeper RAP, Jacobi/ℓ1/Chebyshev/hybrid-GS/ILU/RAS level smoothers, W/F-cycle, `blocksize`, NNS gathers `N` only. Lesson 51. Q1 elasticity `P`-width green (44/44). Per-tile `AMGPreconditioner` unchanged. AWS job `87eeae0070a22075`: GlobalAMG 170, NNS 44, GMG 158, iterativesolvers 460; full `array/linalg` (no Finch) green. | 2026-09-10 |
 
 ---
 
@@ -339,7 +339,7 @@ P2 flags (completeness, not scheduled):
   `docs/src/stencils.md` (`stencil-no-gmg`), plus the GMG / BoomerAMG
   sections in `docs/src/iterative-solving.md`. Short recap below.
 - **Full dense geev / ScaLAPACK Schur** — not required. `eigen` stays LOBPCG; P2 `schur` is gather-then-LAPACK for dense tiles only.
-- **Near-nullspace Q1 elasticity `P`-width assert** — leftover `24 > 25` was gathered-SA vs tiled-SA using different aggregate counts. `linalg/boomeramg-alike` uses the same tiled PMIS `AggOp` for scalar and `nullspace=N` (`fit_candidates` injects `nmodes` columns). Do not weaken the assert.
+- **Near-nullspace Q1 elasticity `P`-width assert** — leftover `24 > 25` was gathered-SA vs tiled-SA using different aggregate counts. **Fixed:** same tiled HMIS/PMIS `AggOp` for scalar and `nullspace=N` (`fit_candidates` injects `nmodes` columns). AWS NNS 44/44. Do not weaken the assert.
 
 AWS labeling (2026-09-08 `vmbench.py` working-tree tweak): EC2 `Name` is now the launch `--label` (was always `vmbench`), plus `vmbench-label` / `vmbench-pid` / `vmbench-started`. `batchd` still calls `provision_vm` without `label=`, so new `batchctl` VMs would tag `Name=vmbench`. Pre-tweak instances (including `i-021ef9ff800fc17a4`) have no `vmbench-label` tag. Filter/teardown by **job id**. Reserved `dagger-distributed` (`2f5b7c978c2a0b3a`) and `dagger-mpi` (`a1e9f3af2f347b8d`) are already `done` in batchd — do not `done` them again.
 
