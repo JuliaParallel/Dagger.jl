@@ -3,6 +3,7 @@ module AlgebraicMultigridExt
 import AlgebraicMultigrid
 import SparseArrays
 import SparseArrays: SparseMatrixCSC
+import Adapt
 import Dagger
 import Dagger: DMatrix, DVector, Blocks, GlobalAMG, GlobalAMGLevel, Projected
 import Dagger: AMGTileInterp, AMGTileHeader, AMGTileGraph
@@ -17,7 +18,7 @@ _as_sparse(A::SparseMatrixCSC) = A
 _as_sparse(A::AbstractMatrix) = SparseArrays.sparse(A)
 
 function _amg_operator(tile, method::Symbol; kwargs...)
-    S = _as_sparse(Dagger._tile_matrix(tile))
+    S = _amg_tile_csc(tile)
     ml = if method === :ruge_stuben
         AlgebraicMultigrid.ruge_stuben(S; kwargs...)
     elseif method === :smoothed_aggregation
@@ -110,8 +111,39 @@ end
 # Tile strength graph (one row of tiles). Not a gather of `A`.
 # ---------------------------------------------------------------------------
 
+# Pin a per-row setup task to the tile's processor so GPU `A` is host-staged
+# *inside* the device-scoped task (lesson 35 / 52). The DArray chunk stays
+# in VRAM; AlgebraicMultigrid.jl still sees a host CSC.
+_amg_row_scope(A::DMatrix, i::Int) = Dagger._tile_scope(A.chunks[i, 1])
+
+# Graph follow-ups (PMIS, membership, local SA) only need the host
+# `AMGTileGraph`. Pin them to CPU threads of that worker — `ProcessScope`
+# also matches GPU processors (lesson 52).
+_amg_host_scope(t) = Dagger.scope(; worker=Dagger._chunk_worker_id(t))
+
+# Host CSC of one tile. GPU sparse already goes through `_tile_matrix` →
+# `_sparse_collect`; dense device tiles need Adapt (scalar `sparse` would
+# index them).
 function _amg_tile_csc(tile)
-    return _as_sparse(Dagger._tile_matrix(tile))
+    raw = Dagger._tile_matrix(tile)
+    S = if raw isa SparseMatrixCSC
+        raw
+    elseif raw isa Array
+        _as_sparse(raw)
+    else
+        collected = try
+            Dagger._sparse_collect(raw)
+        catch
+            Adapt.adapt(Array, raw)
+        end
+        collected isa SparseMatrixCSC ? collected : _as_sparse(collected isa Array ?
+            collected : Adapt.adapt(Array, collected))
+    end
+    # Vendor `_sparse_collect` often returns `Int32` CSC; AMG.jl indexes as `Int`.
+    if S isa SparseMatrixCSC && eltype(S.colptr) !== Int
+        return SparseMatrixCSC{eltype(S),Int}(S.m, S.n, Int.(S.colptr), Int.(S.rowval), S.nzval)
+    end
+    return S
 end
 
 function _amg_tile_starts(A::DMatrix)
@@ -163,8 +195,10 @@ end
 
 _amg_node(i::Int, bs::Int) = bs == 1 ? i : (i - 1) ÷ bs + 1
 
-function Dagger._amg_row_graph(row0::Int, col_starts::Vector{Int}, n::Int,
+function Dagger._amg_row_graph(row0::Int, col_starts, n::Int,
                                θ::Float64, kind::Symbol, diags, tiles...)
+    col_starts = Dagger._pc_host_vec(Int, col_starts)
+    diags = diags === nothing ? nothing : Dagger._pc_host_vec(diags)
     S0 = _amg_tile_csc(tiles[1])
     k = size(S0, 1)
     T = eltype(S0)
@@ -224,7 +258,8 @@ function Dagger._amg_row_graph(row0::Int, col_starts::Vector{Int}, n::Int,
     return AMGTileGraph{T}(row0, k, rowptr, colval, nzval, strong, diagv)
 end
 
-function Dagger._amg_pmis_propose(g::AMGTileGraph, splitting::Vector{UInt8}, bs::Int)
+function Dagger._amg_pmis_propose(g::AMGTileGraph, splitting, bs::Int)
+    splitting = Dagger._pc_host_vec(UInt8, splitting)
     out = Int[]
     if bs == 1
         for i in 1:g.k
@@ -270,8 +305,9 @@ function Dagger._amg_pmis_propose(g::AMGTileGraph, splitting::Vector{UInt8}, bs:
     return out
 end
 
-function Dagger._amg_pmis_mark_f(g::AMGTileGraph, splitting::Vector{UInt8},
-                                 newC::Vector{Int}, bs::Int)
+function Dagger._amg_pmis_mark_f(g::AMGTileGraph, splitting, newC, bs::Int)
+    splitting = Dagger._pc_host_vec(UInt8, splitting)
+    newC = Dagger._pc_host_vec(Int, newC)
     Cset = Set(newC)
     out = Int[]
     if bs == 1
@@ -317,7 +353,7 @@ function _amg_pmis_splitting(g_tasks, n_idx::Int, bs::Int)
     for _ in 1:n_idx
         props = Vector{Vector{Int}}(undef, length(g_tasks))
         for i in eachindex(g_tasks)
-            props[i] = fetch(Dagger.@spawn Dagger._amg_pmis_propose(g_tasks[i], splitting, bs))
+            props[i] = fetch(Dagger.@spawn compute_scope=_amg_host_scope(g_tasks[i]) Dagger._amg_pmis_propose(g_tasks[i], splitting, bs))
         end
         newC = Int[]
         for p in props
@@ -330,7 +366,7 @@ function _amg_pmis_splitting(g_tasks, n_idx::Int, bs::Int)
             splitting[i] = _PMIS_C
         end
         for i in eachindex(g_tasks)
-            fs = fetch(Dagger.@spawn Dagger._amg_pmis_mark_f(g_tasks[i], splitting, newC, bs))
+            fs = fetch(Dagger.@spawn compute_scope=_amg_host_scope(g_tasks[i]) Dagger._amg_pmis_mark_f(g_tasks[i], splitting, newC, bs))
             for j in fs
                 (1 <= j <= n_idx && splitting[j] == _PMIS_U) && (splitting[j] = _PMIS_F)
             end
@@ -342,8 +378,9 @@ function _amg_pmis_splitting(g_tasks, n_idx::Int, bs::Int)
     return splitting
 end
 
-function Dagger._amg_sa_membership(g::AMGTileGraph{T}, splitting::Vector{UInt8},
-                                   c_to_agg::Vector{Int}, bs::Int) where T
+function Dagger._amg_sa_membership(g::AMGTileGraph{T}, splitting, c_to_agg, bs::Int) where T
+    splitting = Dagger._pc_host_vec(UInt8, splitting)
+    c_to_agg = Dagger._pc_host_vec(Int, c_to_agg)
     out = Vector{Tuple{Int,Int,T}}()
     if bs == 1
         for i in 1:g.k
@@ -408,8 +445,9 @@ end
 # Classical distance-1 interpolation (AlgebraicMultigrid.jl `direct_interpolation`)
 # on the local rows, given a global C/F splitting. C-points of a nodal split
 # expand to every DOF of that node.
-function Dagger._amg_rs_interp_tile(g::AMGTileGraph{T}, splitting::Vector{UInt8},
-                                    c_to_col::Vector{Int}, bs::Int) where T
+function Dagger._amg_rs_interp_tile(g::AMGTileGraph{T}, splitting, c_to_col, bs::Int) where T
+    splitting = Dagger._pc_host_vec(UInt8, splitting)
+    c_to_col = Dagger._pc_host_vec(Int, c_to_col)
     I = Int[]
     J = Int[]
     V = T[]
@@ -504,15 +542,24 @@ function _gs_pass!(A::SparseMatrixCSC, b, x, start, step, stop)
 end
 
 function Dagger._hybrid_gs_tile!(u, Adiag, Au, b)
+    # Host CSC × GS. If the V-cycle vectors are device arrays, Adapt a
+    # temporary here (GPU-scoped spawn) and copy back so the DArray chunk
+    # stays in VRAM (lesson 35 / 52).
+    uh = u isa Array ? u : Adapt.adapt(Array, u)
+    Auh = Au isa Array ? Au : Adapt.adapt(Array, Au)
+    bh = b isa Array ? b : Adapt.adapt(Array, b)
     S = _amg_tile_csc(Adiag)
-    n = length(u)
-    aii_u = S * (u isa AbstractVector ? u : vec(u))
+    n = length(uh)
+    aii_u = S * uh
     rhs = similar(aii_u)
     @inbounds for i in 1:n
-        rhs[i] = b[i] - Au[i] + aii_u[i]
+        rhs[i] = bh[i] - Auh[i] + aii_u[i]
     end
-    _gs_pass!(S, rhs, u, 1, 1, n)
-    _gs_pass!(S, rhs, u, n, -1, 1)
+    _gs_pass!(S, rhs, uh, 1, 1, n)
+    _gs_pass!(S, rhs, uh, n, -1, 1)
+    if uh !== u
+        copyto!(u, uh)
+    end
     return nothing
 end
 
@@ -538,8 +585,9 @@ function _amg_iface_from_row!(iface_local, iface_nbr, assigned, diag_j, col_star
     return nothing
 end
 
-function _amg_row_coarsen_sa(diag_j::Int, col_starts::Vector{Int},
+function _amg_row_coarsen_sa(diag_j::Int, col_starts,
                              strength, aggregate, tiles...)
+    col_starts = Dagger._pc_host_vec(Int, col_starts)
     Ad = _amg_tile_csc(tiles[diag_j])
     k = size(Ad, 1)
     T = eltype(Ad)
@@ -568,7 +616,8 @@ function _amg_row_coarsen_sa(diag_j::Int, col_starts::Vector{Int},
     return AMGTileInterp{T}(I, J, V, nagg, iface_local, iface_nbr)
 end
 
-function _amg_row_coarsen_rs(diag_j::Int, col_starts::Vector{Int}, extra, tiles...)
+function _amg_row_coarsen_rs(diag_j::Int, col_starts, extra, tiles...)
+    col_starts = Dagger._pc_host_vec(Int, col_starts)
     Ad = _amg_tile_csc(tiles[diag_j])
     k = size(Ad, 1)
     T = eltype(Ad)
@@ -602,8 +651,9 @@ function _amg_row_coarsen_rs(diag_j::Int, col_starts::Vector{Int}, extra, tiles.
     return AMGTileInterp{T}(I, J, V, nagg, iface_local, iface_nbr)
 end
 
-function Dagger._amg_row_coarsen(method::Symbol, diag_j::Int, col_starts::Vector{Int},
+function Dagger._amg_row_coarsen(method::Symbol, diag_j::Int, col_starts,
                                  strength, aggregate, extra, tiles...)
+    col_starts = Dagger._pc_host_vec(Int, col_starts)
     if method === :smoothed_aggregation
         return _amg_row_coarsen_sa(diag_j, col_starts, strength, aggregate, tiles...)
     elseif method === :ruge_stuben
@@ -705,6 +755,7 @@ end
 
 function Dagger._amg_fill_p_tile(interp::AMGTileInterp{T}, match, offset::Int,
                                  col0::Int, ncols::Int, tm::Int, tn::Int) where T
+    match = Dagger._pc_host_vec(match)
     I = Int[]
     J = Int[]
     V = T[]
@@ -748,7 +799,7 @@ function _amg_assemble_p(A::DMatrix{T}, interp_tasks, offsets, matches, nc) wher
     for i in 1:mt, j in 1:nt
         tm = length(P0.subdomains[i, j].indexes[1])
         tn = length(P0.subdomains[i, j].indexes[2])
-        new_chunks[i, j] = Dagger.@spawn return_type=Dagger.DSparseArray{T,2} Dagger._amg_fill_p_tile(
+        new_chunks[i, j] = Dagger.@spawn compute_scope=_amg_row_scope(A, i) return_type=Dagger.DSparseArray{T,2} Dagger._amg_fill_p_tile(
             interp_tasks[i], matches[i], offsets[i], col0s[j], colns[j], tm, tn)
     end
     return _amg_replace_chunks(P0, new_chunks)
@@ -757,7 +808,17 @@ end
 function _amg_distribute_p(A::DMatrix{T}, P_csc::SparseMatrixCSC) where T
     n, nc = size(P_csc)
     k = Int(A.partitioning.blocksize[1])
-    return Dagger.distribute(P_csc, Blocks(k, k))
+    TT = Dagger.is_sparse_backed(A) ? Dagger.darray_tiletype(A) : Dagger.DSparseArray{T,2}
+    P0 = Dagger.allocate_tiled(TT, T, Blocks(k, k), (n, nc))
+    mt, nt = size(P0.chunks)
+    new_chunks = Matrix{Dagger.DTask}(undef, mt, nt)
+    for i in 1:mt, j in 1:nt
+        I = P0.subdomains[i, j].indexes[1]
+        J = P0.subdomains[i, j].indexes[2]
+        Sij = P_csc[I, J]
+        new_chunks[i, j] = Dagger.@spawn compute_scope=_amg_row_scope(A, i) return_type=Dagger.DSparseArray{T,2} Dagger._store_assembled_tile(Sij)
+    end
+    return _amg_replace_chunks(P0, new_chunks)
 end
 
 # LocalWeighting Jacobi prolongation: `P = T − ω D⁻¹ A T` with
@@ -778,30 +839,36 @@ function Dagger._amg_row_abs_inv_chunk(tiles...)
             end
         end
     end
-    out = similar(s)
+    host = similar(s)
     @inbounds for i in 1:k
-        out[i] = s[i] == 0 ? zero(T) : inv(s[i])
+        host[i] = s[i] == 0 ? zero(T) : inv(s[i])
     end
-    return out
+    # Allocate on the executing processor so a GPU-scoped spawn returns a
+    # device vector, not a host `Vector` restamped as the workspace (lesson 26 / 52).
+    dest = Dagger._pc_undef_vec(T, k)
+    copyto!(dest, host)
+    return dest
 end
 
 function _amg_row_abs_inv(A::DMatrix{T}) where T
     n = size(A, 1)
     k = Int(A.partitioning.blocksize[1])
     mt, nt = size(A.chunks)
-    d0 = DVector{T}(undef, Blocks(k), n)
+    d = Dagger.ArrayDomain((1:n,))
+    sd = Dagger.partition(Blocks(k), d)
     new_chunks = Vector{Dagger.DTask}(undef, mt)
     for i in 1:mt
-        new_chunks[i] = Dagger.@spawn Dagger._amg_row_abs_inv_chunk((A.chunks[i, j] for j in 1:nt)...)
+        new_chunks[i] = Dagger.@spawn compute_scope=_amg_row_scope(A, i) Dagger._amg_row_abs_inv_chunk(
+            (A.chunks[i, j] for j in 1:nt)...)
     end
-    return Dagger.DArray(T, d0.domain, d0.subdomains, new_chunks, d0.partitioning, d0.concat)
+    return Dagger.DArray(T, d, sd, new_chunks, Blocks(k))
 end
 
 function Dagger._amg_smooth_p_tile(tent, ap, dscale, ω)
     Tm = _amg_tile_csc(tent)
     Am = copy(_amg_tile_csc(ap))
     ωT = eltype(Am)(ω)
-    ds = Vector{eltype(Am)}(dscale)
+    ds = Dagger._pc_host_vec(eltype(Am), dscale)
     for col in 1:size(Am, 2)
         for p in SparseArrays.nzrange(Am, col)
             r = Am.rowval[p]
@@ -823,7 +890,7 @@ function _amg_smooth_prolongation(A::DMatrix{T}, Tent::DMatrix{T}, ω) where T
     mt, nt = size(P0.chunks)
     new_chunks = Matrix{Dagger.DTask}(undef, mt, nt)
     for i in 1:mt, j in 1:nt
-        new_chunks[i, j] = Dagger.@spawn return_type=Dagger.DSparseArray{T,2} Dagger._amg_smooth_p_tile(
+        new_chunks[i, j] = Dagger.@spawn compute_scope=_amg_row_scope(A, i) return_type=Dagger.DSparseArray{T,2} Dagger._amg_smooth_p_tile(
             Tent.chunks[i, j], AP.chunks[i, j], dscale.chunks[i], ω)
     end
     return _amg_replace_chunks(P0, new_chunks)
@@ -837,7 +904,7 @@ function _amg_spawn_row_graphs(A::DMatrix{T}, strength) where T
     diags = (kind === :symmetric && θ != 0) ? _amg_host_diag(A) : nothing
     g_tasks = Vector{Dagger.DTask}(undef, mt)
     for i in 1:mt
-        g_tasks[i] = Dagger.@spawn return_type=AMGTileGraph{T} Dagger._amg_row_graph(
+        g_tasks[i] = Dagger.@spawn compute_scope=_amg_row_scope(A, i) return_type=AMGTileGraph{T} Dagger._amg_row_graph(
             row_starts[i], col_starts, n, θ, kind, diags,
             (A.chunks[i, j] for j in 1:nt)...)
     end
@@ -896,7 +963,7 @@ function _amg_hmis_sa_members(g_tasks, n::Int, bs::Int, strength, aggregate, ::T
     mt = length(g_tasks)
     headers = Vector{Any}(undef, mt)
     for i in 1:mt
-        headers[i] = fetch(Dagger.@spawn Dagger._amg_local_sa_header(g_tasks[i], strength, aggregate))
+        headers[i] = fetch(Dagger.@spawn compute_scope=_amg_host_scope(g_tasks[i]) Dagger._amg_local_sa_header(g_tasks[i], strength, aggregate))
     end
     n_idx = n ÷ bs
     offsets = Vector{Int}(undef, mt)
@@ -930,7 +997,7 @@ function _amg_hmis_sa_members(g_tasks, n::Int, bs::Int, strength, aggregate, ::T
     end
     nagg = acc + extra
     for i in eachindex(g_tasks)
-        part = fetch(Dagger.@spawn Dagger._amg_sa_membership(g_tasks[i], splitting, c_to_agg, bs))
+        part = fetch(Dagger.@spawn compute_scope=_amg_host_scope(g_tasks[i]) Dagger._amg_sa_membership(g_tasks[i], splitting, c_to_agg, bs))
         for (gi, agg, w) in part
             _amg_node(gi, bs) in assigned_nodes && continue
             push!(members, (gi, agg, w))
@@ -943,7 +1010,7 @@ function _amg_pmis_splitting_from(g_tasks, splitting::Vector{UInt8}, n_idx::Int,
     for _ in 1:n_idx
         props = Vector{Vector{Int}}(undef, length(g_tasks))
         for i in eachindex(g_tasks)
-            props[i] = fetch(Dagger.@spawn Dagger._amg_pmis_propose(g_tasks[i], splitting, bs))
+            props[i] = fetch(Dagger.@spawn compute_scope=_amg_host_scope(g_tasks[i]) Dagger._amg_pmis_propose(g_tasks[i], splitting, bs))
         end
         newC = Int[]
         for p in props
@@ -956,7 +1023,7 @@ function _amg_pmis_splitting_from(g_tasks, splitting::Vector{UInt8}, n_idx::Int,
             splitting[i] = _PMIS_C
         end
         for i in eachindex(g_tasks)
-            fs = fetch(Dagger.@spawn Dagger._amg_pmis_mark_f(g_tasks[i], splitting, newC, bs))
+            fs = fetch(Dagger.@spawn compute_scope=_amg_host_scope(g_tasks[i]) Dagger._amg_pmis_mark_f(g_tasks[i], splitting, newC, bs))
             for j in fs
                 (1 <= j <= n_idx && splitting[j] == _PMIS_U) && (splitting[j] = _PMIS_F)
             end
@@ -975,13 +1042,13 @@ function _amg_prolongation_standard(A::DMatrix{T}; method::Symbol, smooth::Bool,
     row_starts, col_starts = _amg_tile_starts(A)
     interp_tasks = Vector{Dagger.DTask}(undef, mt)
     for i in 1:mt
-        interp_tasks[i] = Dagger.@spawn return_type=Dagger.AMGTileInterp{T} Dagger._amg_row_coarsen(
+        interp_tasks[i] = Dagger.@spawn compute_scope=_amg_row_scope(A, i) return_type=Dagger.AMGTileInterp{T} Dagger._amg_row_coarsen(
             method, i, col_starts, strength, aggregate, extra,
             (A.chunks[i, j] for j in 1:nt)...)
     end
     headers = Vector{AMGTileHeader}(undef, mt)
     for i in 1:mt
-        headers[i] = fetch(Dagger.@spawn return_type=AMGTileHeader Dagger._amg_interp_header(interp_tasks[i]))
+        headers[i] = fetch(Dagger.@spawn compute_scope=_amg_host_scope(interp_tasks[i]) return_type=AMGTileHeader Dagger._amg_interp_header(interp_tasks[i]))
     end
     offsets, matches, nc = _amg_match_interface(headers, row_starts, T)
     (nc == 0 || nc >= n) && return nothing
@@ -1042,7 +1109,7 @@ function _amg_prolongation(A::DMatrix{T}, B; method::Symbol, smooth::Bool,
     if use_sa
         members = Vector{Tuple{Int,Int,T}}()
         for i in eachindex(g_tasks)
-            part = fetch(Dagger.@spawn Dagger._amg_sa_membership(g_tasks[i], splitting, c_to_col, bs))
+            part = fetch(Dagger.@spawn compute_scope=_amg_host_scope(g_tasks[i]) Dagger._amg_sa_membership(g_tasks[i], splitting, c_to_col, bs))
             append!(members, part)
         end
         isempty(members) && return nothing
@@ -1060,7 +1127,7 @@ function _amg_prolongation(A::DMatrix{T}, B; method::Symbol, smooth::Bool,
     # Classical RS interpolation from the tiled graph (no gather of A).
     interp_tasks = Vector{Dagger.DTask}(undef, length(g_tasks))
     for i in eachindex(g_tasks)
-        interp_tasks[i] = Dagger.@spawn return_type=AMGTileInterp{T} Dagger._amg_rs_interp_tile(
+        interp_tasks[i] = Dagger.@spawn compute_scope=_amg_host_scope(g_tasks[i]) return_type=AMGTileInterp{T} Dagger._amg_rs_interp_tile(
             g_tasks[i], splitting, c_to_col, bs)
     end
     mt = length(g_tasks)
@@ -1088,8 +1155,9 @@ end
 function _amg_estimate_lmax(A::DMatrix{T}, dinv::DVector{T}; iters::Int=12) where T
     n = size(A, 1)
     k = Int(A.partitioning.blocksize[1])
-    v = DVector{T}(undef, Blocks(k), n)
-    w = DVector{T}(undef, Blocks(k), n)
+    proto = view(A.chunks, :, 1)
+    v = Dagger._pc_alloc_vec(T, proto, Blocks(k), n)
+    w = Dagger._pc_alloc_vec(T, proto, Blocks(k), n)
     fill!(v, one(T))
     nv = LinearAlgebra.norm2(v)
     LinearAlgebra.rmul!(v, inv(nv))
@@ -1114,11 +1182,13 @@ function _amg_level(A::DMatrix{T}, P::DMatrix{T}, smoother::Symbol;
     k = Int(A.partitioning.blocksize[1])
     kc = Int(P.partitioning.blocksize[2])
     dinv = smoother === :l1jacobi ? _amg_row_abs_inv(A) : Dagger._jacobi_dinv(A)
-    res = DVector{T}(undef, Blocks(k), n)
-    work = DVector{T}(undef, Blocks(k), n)
-    dir = DVector{T}(undef, Blocks(k), n)
-    coarse_x = DVector{T}(undef, Blocks(kc), nc)
-    coarse_b = DVector{T}(undef, Blocks(kc), nc)
+    proto = view(A.chunks, :, 1)
+    res = Dagger._pc_alloc_vec(T, proto, Blocks(k), n)
+    work = Dagger._pc_alloc_vec(T, proto, Blocks(k), n)
+    dir = Dagger._pc_alloc_vec(T, proto, Blocks(k), n)
+    coarse_proto = view(P.chunks, 1, :)
+    coarse_x = Dagger._pc_alloc_vec(T, coarse_proto, Blocks(kc), nc)
+    coarse_b = Dagger._pc_alloc_vec(T, coarse_proto, Blocks(kc), nc)
     extra = if smoother === :chebyshev
         λ_max = _amg_estimate_lmax(A, dinv)
         (chebyshev_ratio * λ_max, λ_max)

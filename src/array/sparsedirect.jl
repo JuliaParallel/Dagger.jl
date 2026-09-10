@@ -366,10 +366,19 @@ _extract_lu_factors(F) = throw(ArgumentError(
 
 # Choose the worker that already owns the most tiles of `A` (minimizes gather
 # traffic). Ties break toward the lowest worker id.
+# Worker that owns a tile chunk. GPU tiles have an `ExactScope` (no `.wid`).
+# The coarsest LU is a host factor: `ProcessScope` also contains GPU
+# processors, and affinity then places UMFPACK on `ROCArrayDeviceProc`
+# (segfault in `umfpack_*_wsolve`). Constrain to `ThreadProc` (lesson 52).
+function _chunk_worker_id(c)
+    raw = c isa Chunk ? c : fetch(c; raw=true)
+    return raw isa Chunk ? root_worker_id(raw) : myid()
+end
+
 function _select_factor_scope(A::DMatrix)
     counts = Dict{Int,Int}()
     for c in A.chunks
-        wid = _tile_scope(c).wid
+        wid = _chunk_worker_id(c)
         counts[wid] = get(counts, wid, 0) + 1
     end
     best_wid, best_count = 0, -1
@@ -378,7 +387,7 @@ function _select_factor_scope(A::DMatrix)
             best_wid, best_count = wid, cnt
         end
     end
-    return ProcessScope(best_wid)
+    return Dagger.scope(; worker=best_wid)
 end
 
 # Runs on the chosen worker: assemble from tiles (already moved here by the
@@ -473,8 +482,14 @@ function LinearAlgebra.cholesky!(F::DaggerSparseCholesky, A::DMatrix; kwargs...)
 end
 
 # Gather RHS chunks, solve against the pinned factor, return the dense solution.
+# Host-stage GPU tiles: even on a CPU `compute_scope`, a stray device chunk
+# must not reach UMFPACK/KLU (lesson 52).
 function _direct_solve(fact, bparts...)
-    b = length(bparts) == 1 ? bparts[1] : reduce(vcat, bparts)
+    hosts = ntuple(i -> begin
+        p = bparts[i]
+        p isa Array ? p : Adapt.adapt(Array, p)
+    end, length(bparts))
+    b = length(hosts) == 1 ? hosts[1] : reduce(vcat, hosts)
     return fact \ b
 end
 

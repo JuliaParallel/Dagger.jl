@@ -1,4 +1,6 @@
 # Shared GPU-resident preconditioner-apply bodies.
+import Distributed
+
 #
 # Block-PC apply used to pin to ProcessScope and gather every GPU vector
 # chunk to host, which restamped the Krylov workspace as `Array` and killed
@@ -9,8 +11,11 @@
 #   2. After apply, vector chunks are still device-resident (`check_vec`).
 #   3. Dense block-Jacobi factors are vendor `LU` with device `factors`
 #      (`check_device_lu`), not a host gather-then-UMFPACK.
+#   4. RAS (overlap 0) and per-tile `AMGPreconditioner` Adapt a host
+#      temporary; the DArray chunk stays on-device. Per-tile AMG is
+#      Schwarz, not a coarse grid (lesson 19).
 #
-# Host-only factors (sparse block-Jacobi → UMFPACK, AMG) still gather a
+# Host-only factors (sparse block-Jacobi → UMFPACK, AMG, RAS) still gather a
 # temporary RHS inside the GPU-scoped apply; the DArray chunk stays on-device.
 #
 # Entry points:
@@ -30,7 +35,7 @@ _gpu_pc_unwrap(op) = op isa Dagger.PinnedTileOperator ? op.op : op
 function _gpu_pc_inner_op(P, i::Int=1)
     raw = fetch(P.ops[i]; raw=true)
     raw isa Dagger.Chunk || return _gpu_pc_unwrap(raw)
-    Dagger.root_worker_id(raw) == myid() || return nothing
+    Dagger.root_worker_id(raw) == Distributed.myid() || return nothing
     return _gpu_pc_unwrap(Dagger.MemPool.poolget(raw.handle))
 end
 
@@ -160,10 +165,55 @@ function test_gpu_pc_apply(; scope=nothing, check_vec=nothing,
                 end
                 if inner isa Dagger.DeviceILU0 && check_vec !== nothing
                     raw = _gpu_pc_chunk(Db.chunks[1])
-                    if raw isa Dagger.Chunk && Dagger.root_worker_id(raw) == myid()
+                    if raw isa Dagger.Chunk && Dagger.root_worker_id(raw) == Distributed.myid()
                         @test Dagger._supports_device_apply(inner,
                             Dagger.MemPool.poolget(raw.handle))
                     end
+                end
+            end
+        end
+
+        @testset "RAS (overlap 0 / host-factor fallback)" begin
+            # Overlap 0 is block Jacobi. The subdomain factor is host LU;
+            # apply Adapts a temporary inside the GPU-scoped task (lesson 35).
+            DA = distribute(Asp, A_part)
+            Db = distribute(b, b_part)
+            P = Dagger.AdditiveSchwarzPreconditioner(DA; overlap=0)
+            y = similar(Db)
+            mul!(y, P, Db)
+            @test collect(y) ≈ yref rtol=cmp_rtol
+            if check_vec !== nothing
+                @test check_vec(_gpu_pc_chunk(y.chunks[1]))
+            end
+        end
+
+        @testset "AMGPreconditioner (per-tile Schwarz, not a coarse grid)" begin
+            # Lesson 19: this is block-diagonal AMG. Host AlgebraicMultigrid.jl
+            # Adapts a temporary; the DArray chunk must stay on-device.
+            # Use 1-D Poisson (diag 2): Ruge–Stüben on the block-Jacobi
+            # `diag=4` tile is NaN even on the host (QR coarse solver).
+            if Base.get_extension(Dagger, :AlgebraicMultigridExt) === nothing
+                @test true
+            else
+                Aamg = SparseArrays.spdiagm(
+                    -1 => fill(-one(T), n - 1),
+                     0 => fill(T(2), n),
+                     1 => fill(-one(T), n - 1),
+                )
+                DA = distribute(Aamg, A_part)
+                Db = distribute(b, b_part)
+                P = Dagger.AMGPreconditioner(DA)
+                foreach(wait, P.ops)
+                @test !isempty(P.ops)
+                y = similar(Db)
+                mul!(y, P, Db)
+                # AlgebraicMultigrid.jl's QR coarse solver can NaN on small
+                # Float32 tiles even on the host. The GPU contract is that
+                # apply Adapts a temporary and the DArray chunk stays in VRAM.
+                if check_vec !== nothing
+                    @test check_vec(_gpu_pc_chunk(y.chunks[1]))
+                else
+                    @test length(collect(y)) == n
                 end
             end
         end
