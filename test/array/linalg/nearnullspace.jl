@@ -324,4 +324,26 @@ end
         @test collect(xn) ≈ Matrix(A) \ b rtol = 1e-4
         @test last(rels_n) < 0.95 * last(rels_s) || stn.niter < sts.niter || rels > 10 * reln
     end
+
+    @testset "nullspace=N does not collect A" begin
+        nnode, ncomp, nt = 24, 2, 4
+        n = nnode * ncomp
+        k = n ÷ nt
+        A = vector_laplacian_1d(nnode, ncomp)
+        N = component_modes(nnode, ncomp)
+        b = rand(n)
+        DA, Db, DN = distribute_system(A, b, N, k)
+        old = Dagger.COLLECT_SPARSE_DMATRIX_MAXSIZE[]
+        Dagger.COLLECT_SPARSE_DMATRIX_MAXSIZE[] = 0
+        try
+            Mn = Dagger.SmoothedAggregationPreconditioner(DA; nullspace=DN, max_levels=3, max_coarse=16)
+            @test Mn.nmodes == 2
+            @test !isempty(Mn.levels)
+            @test size(Mn.levels[1].P, 2) > 1
+            _, _, rel = solve_gmres(DA, Db, Mn)
+            @test rel < 1e-6
+        finally
+            Dagger.COLLECT_SPARSE_DMATRIX_MAXSIZE[] = old
+        end
+    end
 end

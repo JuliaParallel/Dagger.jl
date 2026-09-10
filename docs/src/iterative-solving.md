@@ -381,35 +381,38 @@ structure follows the *finer* of the two block sizes.
 
 [`Dagger.GlobalAMG`](@ref) is a different object. It builds one hierarchy over
 the whole operator: each coarse operator is the distributed Galerkin product
-`Ac = P' * A * P`, and `mul!(y, M, x)` is a V-cycle. Interpolation `P` is
-built from tiled data (per-tile aggregation or classical interpolation, plus
-leftover matching of unaggregated interface nodes) — setup does not assemble
-a global CSC of `A`. That is what PDE codes mean by AMG;
-`AMGPreconditioner` with many tiles is not.
+`Ac = P' * A * P`, and `mul!(y, M, x)` is a V-cycle (or W/F). Interpolation
+`P` comes from a parallel independent set (PMIS) over the tiled strength
+graph — interface nodes join a global C/F or aggregate assignment — then
+optional Jacobi smoothing. Setup does not assemble a global CSC of `A`.
+That is what PDE codes mean by AMG; `AMGPreconditioner` with many tiles is
+not.
 
 ```julia
 using AlgebraicMultigrid, Krylov
 
 M = Dagger.SmoothedAggregationPreconditioner(DA)   # or RugeStubenPreconditioner(DA)
 # also: M = aspreconditioner(smoothed_aggregation(DA))
+# smoother=:l1jacobi|:chebyshev|:hybrid_gs|:ilu|:ras, cycle=:w|:f
 x, stats = Krylov.gmres(DA, b; M)
 r = similar(b); mul!(r, DA, x); axpy!(-1, b, r)
 @assert norm(r) / norm(b) < 1e-8   # do not stop at stats.solved
 ```
 
-This is a first cut (per-tile aggregation, typically one coarse grid, two
-damped-Jacobi sweeps each side, gathered LU on the coarsest operator). Setup
-of `P` and RAP are tiled for the default scalar SA — setup does not collect
-`A` to build `P`. A later tiled coarsening on only a handful of tiles is
-skipped. Remaining gathers: coarsest LU, one row of tiles per coarsen,
-header fetch, GPU tile host-stage.
+Default coarsening is PMIS (`coarsen=:hmis` freezes local SA first;
+`:standard` is the older per-tile + leftover-pair path). Hierarchy recurses
+with distributed RAP until `max_coarse` / `max_levels` (default 10).
+Remaining gathers: coarsest LU, one row of tiles per coarsen (stays on the
+worker), membership / header fetch, GPU tile host-stage. `nullspace=N`
+gathers `N` only.
 
 Elasticity and other systems whose low-energy modes are not the scalar
 constant need those modes as SA candidates — the PETSc
 `MatSetNearNullSpace` / rigid-body set. Attach them on the constructor;
 [`AMGPreconditioner`](@ref) stays per-tile and does not take this.
-`nullspace=N` still gathers `N` with `A` so coarse levels get the `R` from
-`fit_candidates`:
+`nullspace=N` gathers `N` (not `A`) so coarse levels get the `R` from
+`fit_candidates`. `blocksize` / `nvars` is HYPRE `NumFunctions` (nodal
+coarsening of interleaved unknowns):
 
 ```julia
 # N is n×k (e.g. 2 translations + 1 rotation). Default is ones (scalar SA).
@@ -469,27 +472,27 @@ AMG in particular can report `solved` while `‖Ax−b‖` is O(1)–O(100)).
 
 | Capability | Dagger | BoomerAMG |
 |---|---|---|
-| Across-tile coarse grid | [`GlobalAMG`](@ref) / SA / RS: tiled `P`, Galerkin `P'AP`, V-cycle | Yes (the product) |
+| Across-tile coarse grid | [`GlobalAMG`](@ref) / SA / RS: tiled PMIS `P`, Galerkin `P'AP`, V/W/F-cycle | Yes (the product) |
 | Per-tile AMG | [`AMGPreconditioner`](@ref): block-diagonal Schwarz, **not** a coarse grid | Not the BoomerAMG model |
 | Geometric MG | [`GeometricMultigrid`](@ref): injection / full-weighting `R`, linear / bilinear `P` | PFMG/SMG (separate) |
-| Overlapping Schwarz | [`AdditiveSchwarzPreconditioner`](@ref) (`:restrict` / `:basic`) | Schwarz as a *smoother* option; also PETSc `PCASM` |
-| Near-nullspace | SA constructor `nullspace=N` (`fit_candidates`); RS rejects it | `InterpVectors` + variants; nodal / unknown-based systems |
-| Coarsening | Per-tile SA / classical RS + leftover interface matching (not a distributed MIS) | HMIS / PMIS / Falgout / CLJP / CGC / aggressive |
-| Interpolation | Tentative SA + Jacobi smooth; classical RS per tile | Classical / extended / ext+i / FF / AIR / multipass / … |
-| Smoother | Damped Jacobi only (`relax=2/3`, default 2+2 sweeps) | Hybrid GS, Schwarz, Chebyshev, ILU, FSAI, ℓ1-Jacobi, … |
-| Cycles | V-cycle only | V / W / F, additive and mult-additive AMG |
-| Complex / nodal systems | No | Yes |
+| Overlapping Schwarz | [`AdditiveSchwarzPreconditioner`](@ref) (`:restrict` / `:basic`); also `smoother=:ras` | Schwarz as a *smoother* option; also PETSc `PCASM` |
+| Near-nullspace | SA constructor `nullspace=N` (`fit_candidates`); RS rejects it; `blocksize`/`nvars` | `InterpVectors` + variants; nodal / unknown-based systems |
+| Coarsening | PMIS (default), HMIS-lite, or `:standard` leftover pairing. No Falgout / CLJP / CGC / aggressive | HMIS / PMIS / Falgout / CLJP / CGC / aggressive |
+| Interpolation | Tentative SA + Jacobi smooth; classical distance-1 RS. No ext+i / AIR / FF | Classical / extended / ext+i / FF / AIR / multipass / … |
+| Smoother | Jacobi (default), ℓ1-Jacobi, Chebyshev, hybrid GS, ILU, RAS | Hybrid GS, Schwarz, Chebyshev, ILU, FSAI, ℓ1-Jacobi, … |
+| Cycles | V (default), W, F. No additive AMG | V / W / F, additive and mult-additive AMG |
+| Complex / nodal systems | Nodal via `blocksize`; no complex AMG | Yes |
 | Native GPU AMG | Host AlgebraicMultigrid.jl; some *other* PCs apply on-device | PMIS + ext+i (and more) on device |
-| Strength / truncation / Pmax | Whatever AlgebraicMultigrid.jl forwards | First-class HYPRE knobs |
+| Strength / truncation / Pmax | AlgebraicMultigrid.jl `strength=` / `aggregate=` passthrough; no HYPRE `Pmax` | First-class HYPRE knobs |
 | Non-Galerkin coarse drop | No | Yes |
 
-Covered in spirit: a global V-cycle, SA with optional rigid-body candidates,
-classical RS as a method flag, geometric transfers on a regular 1-D/2-D
-grid, and RAS as its own preconditioner. Missing the BoomerAMG menu:
-HMIS/PMIS/Falgout/aggressive coarsening, extended / AIR interpolation,
-Chebyshev / hybrid GS / ILU smoothers, W/F and additive cycles, nodal
-systems, complex, and a GPU AMG hierarchy. The longer table lives in
-`LINALG_INTEGRATION.md`.
+Covered in spirit: a global V/W/F-cycle, PMIS coarsening, SA with optional
+rigid-body candidates and `blocksize`, classical RS, Jacobi / ℓ1-Jacobi /
+Chebyshev / hybrid GS / ILU / RAS level smoothers, geometric transfers on a
+regular 1-D/2-D grid, and RAS as its own preconditioner. Still missing:
+Falgout / CLJP / CGC / aggressive coarsening, extended / AIR / FF
+interpolation, additive cycles, complex AMG, FSAI, and a GPU AMG hierarchy.
+The longer table lives in `LINALG_INTEGRATION.md`.
 
 ### Choosing a preconditioner
 
