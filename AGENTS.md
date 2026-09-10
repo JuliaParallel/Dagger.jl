@@ -704,3 +704,38 @@ lesson.
    Chebyshev needs its own search-direction workspace; reusing the residual
    vector silently corrupts the recurrence. Judge by `‖Ax−b‖` vs the same
    number of Jacobi sweeps (lessons 19 / 32). Keep `_solve_pinned_dvector`.
+
+52. **GlobalAMG on GPU tiles keeps vectors in VRAM; setup still host-stages tiles.**
+   AlgebraicMultigrid.jl is host, so coarsening / `fit_candidates` / hybrid GS
+   Adapt a *tile* (or a temporary vector) inside a GPU-scoped task. The DArray
+   chunk stays on-device (lesson 35). Returning a host `Vector` from a
+   GPU-scoped `_amg_row_abs_inv` spawn restamps `dinv` as CPURAM (or a
+   VRAM-labelled `Array` — lesson 26) and the next SpMV gathers; write into a
+   tile allocated with `AllocateUndef` on the operator's `memory_space_scope`
+   (`_pc_alloc_vec` / `_pc_undef_vec`). V-cycle Jacobi / ℓ1-Jacobi / Chebyshev
+   / sparse `mul!` stay on-device. Coarsest LU is still gathered
+   (`_solve_pinned_dvector`). `_select_factor_scope` must use
+   `root_worker_id` — GPU tiles have an `ExactScope`, which has no `.wid`.
+   Per-tile `AMGPreconditioner` is still Schwarz (lesson 19). Do not pin apply
+   to `ProcessScope`.
+
+53. **Remaining HYPRE-alike GlobalAMG is opt-in; unscaled additive overshoots.**
+   Keep default `coarsen=:hmis` / `interp=:sa` / `cycle=:v` / `smoother=:jacobi`
+   — nothing beat HMIS on *both* 1-D n=128 and 2-D Poisson. Falgout / CLJP /
+   aggressive / PMIS lose the 1-D n=128 Jacobi gate (V-cycle residuals ~2.24 /
+   ~2.15 / ~1.73 / ~1.81 vs HMIS ~0.93 / Jacobi ~0.99) and stay opt-in; they
+   beat Jacobi on 2-D 8×8. CGC beats both. Classical `interp=:extended` /
+   `:exti` / `:ff` / `:multipass` / `:air` stay distributed (C-neighbor map or
+   a one-point AIR `R`; do not collect fine `A`, lesson 42). They lose 1-D
+   n=64 vs Jacobi and win on 2-D. `cycle=:additive` / `:multadditive` damp
+   the coarsest correction by `1/n`: unscaled `P (Ac \\ R b)` is O(10³) on
+   1-D Poisson and *increases* `‖Ax−b‖` to ~7.7, and a residual line search
+   makes `mul!` nonlinear so GMRES stagnates. `smoother=:fsai`
+   is a block-diagonal `G'G` of each diagonal tile — not a new solver type —
+   and loses 1-D (~1.95) while winning 2-D (~0.11 vs Jacobi ~0.78).
+   `pmax` / `trunc_factor` / `coarse_drop` are first-class and must change
+   `nnz(P)` / `nnz(Ac)` (zero means off). `ComplexF64` needs a real
+   Euclidean `fit_candidates` (AMG.jl compares Complex norms with `>`).
+   Do not invent `Dagger.hypre` / `Dagger.BoomerAMG`. Do not merge
+   already-assigned interface aggregates (lesson 42). Check `‖Ax−b‖`, not
+   `stats.solved` (lessons 19 / 32). Keep `_solve_pinned_dvector`.
