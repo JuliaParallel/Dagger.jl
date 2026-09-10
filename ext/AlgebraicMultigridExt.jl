@@ -839,9 +839,9 @@ function Dagger._amg_row_abs_inv_chunk(tiles...)
     end
     # Allocate on the executing processor so a GPU-scoped spawn returns a
     # device vector, not a host `Vector` restamped as the workspace (lesson 26 / 52).
-    dest = Dagger._pc_undef_vec(T, k)
-    copyto!(dest, host)
-    return dest
+    # Host vector: `_pc_undef_vec` is a GPU-AMG helper (lesson 52) and is
+    # not on this branch. ` _amg_smooth_p_tile` copies `dscale` to `Vector`.
+    return host
 end
 
 function _amg_row_abs_inv(A::DMatrix{T}) where T
@@ -1419,11 +1419,10 @@ function _amg_cgc_splitting(A::DMatrix{T}, g_tasks, n_idx::Int, bs::Int) where T
     n = size(A, 1)
     k = Int(A.partitioning.blocksize[1])
     dinv = Dagger._jacobi_dinv(A)
-    proto = view(A.chunks, :, 1)
-    z = Dagger._pc_alloc_vec(T, proto, Blocks(k), n)
+    z = DVector{T}(undef, Blocks(k), n)
     fill!(z, zero(T))
-    work = Dagger._pc_alloc_vec(T, proto, Blocks(k), n)
-    e = Dagger._pc_alloc_vec(T, proto, Blocks(k), n)
+    work = DVector{T}(undef, Blocks(k), n)
+    e = DVector{T}(undef, Blocks(k), n)
     RT = real(T)
     for _ in 1:4
         eh = T <: Complex ? (randn(RT, n) .+ im .* randn(RT, n)) : randn(T, n)
@@ -2192,9 +2191,8 @@ end
 function _amg_estimate_lmax(A::DMatrix{T}, dinv::DVector{T}; iters::Int=12) where T
     n = size(A, 1)
     k = Int(A.partitioning.blocksize[1])
-    proto = view(A.chunks, :, 1)
-    v = Dagger._pc_alloc_vec(T, proto, Blocks(k), n)
-    w = Dagger._pc_alloc_vec(T, proto, Blocks(k), n)
+    v = DVector{T}(undef, Blocks(k), n)
+    w = DVector{T}(undef, Blocks(k), n)
     fill!(v, one(T))
     nv = LinearAlgebra.norm2(v)
     LinearAlgebra.rmul!(v, inv(nv))
@@ -2219,13 +2217,11 @@ function _amg_level(A::DMatrix{T}, P::DMatrix{T}, smoother::Symbol;
     k = Int(A.partitioning.blocksize[1])
     kc = Int(P.partitioning.blocksize[2])
     dinv = smoother === :l1jacobi ? _amg_row_abs_inv(A) : Dagger._jacobi_dinv(A)
-    proto = view(A.chunks, :, 1)
-    res = Dagger._pc_alloc_vec(T, proto, Blocks(k), n)
-    work = Dagger._pc_alloc_vec(T, proto, Blocks(k), n)
-    dir = Dagger._pc_alloc_vec(T, proto, Blocks(k), n)
-    coarse_proto = view(P.chunks, 1, :)
-    coarse_x = Dagger._pc_alloc_vec(T, coarse_proto, Blocks(kc), nc)
-    coarse_b = Dagger._pc_alloc_vec(T, coarse_proto, Blocks(kc), nc)
+    res = DVector{T}(undef, Blocks(k), n)
+    work = DVector{T}(undef, Blocks(k), n)
+    dir = DVector{T}(undef, Blocks(k), n)
+    coarse_x = DVector{T}(undef, Blocks(kc), nc)
+    coarse_b = DVector{T}(undef, Blocks(kc), nc)
     extra = if smoother === :chebyshev
         λ_max = _amg_estimate_lmax(A, dinv)
         (chebyshev_ratio * λ_max, λ_max)
