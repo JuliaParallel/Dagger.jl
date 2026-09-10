@@ -312,6 +312,7 @@ Priority: **P0 done** / **P1 done** = merged onto `Dagger-linalg-ultra`. **P2** 
 | 2026-09-09 | `3bfcebf6` `linalg/einsum` @ `245f68df` | Conflicts: `AGENTS.md` (inserted lesson 49 between 48 and 50), `docs/src/darray.md` / `index.md` (union BLAS-1 + stencil-no-gmg + einsum). **FLAG:** no TensorOperations/OMEinsum/Tullio backend. AWS `a332fb32a54319f5`: einsum 16/16 after n-ary `*` + `LinearAlgebra.transpose` fixes. |
 | 2026-09-09 | sweep numbers | Job `f74175e59a65e3ec` (`c6i.4xlarge`) measured SHA `6bf9aa2b` (post BLAS-1 / BSR / einsum). Best-config + compact 2-D grid in Performance. 1drow SpMV OOM; rest of 1drow/1dcol/auto aborted. MPI sweep not launched. |
 | 2026-09-10 | `72d17e6e` `linalg/boomeramg-alike` @ `f5a864bf` | No conflicts. Lesson 51. Default coarsen HMIS-lite (full PMIS opt-in; 1-D n=128 V-cycle 1.54 vs Jacobi 0.89, HMIS 0.80). Kept `_solve_pinned_dvector`. AWS `87eeae0070a22075`: GlobalAMG 170, NNS 44 (Q1 `P`-width green), GMG 158, iterativesolvers 460; full `array/linalg` (no Finch) green. |
+| 2026-09-10 | `a68c1503` `linalg/gpu-amg` @ `dda18291` | No conflicts. Lesson 52. ROC smoke 30/30; CUDA smoke 30/30 on `i-029babd72a0984f4b` (`g4dn.xlarge`, label `linalg-gpu-amg-cuda`, terminated). Kept `_solve_pinned_dvector`. Pitch-videos `72714ecd` did not edit this file. HYPRE-alike not yet on origin — union later. |
 
 ## Remaining follow-ups
 
