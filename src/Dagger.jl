@@ -27,7 +27,7 @@ if !isdefined(Base, :get_extension)
 end
 
 import TimespanLogging
-import TimespanLogging: timespan_start, timespan_finish
+import TimespanLogging: timespan_start, timespan_finish, @logstart, @logfinish
 
 import Adapt
 
@@ -241,6 +241,8 @@ function __init__()
     catch err
         @warn "Error parsing JULIA_DAGGER_DEBUG" exception=err
     end
+
+    HIER_TIMING[] = parse(Bool, get(ENV, "JULIA_DAGGER_HIER_TIMING", "0"))
 end
 
 end # module
