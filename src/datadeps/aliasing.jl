@@ -1379,7 +1379,7 @@ function generate_slot!(state::DataDepsState, dest_space, data)
     ctx = Sch.eager_context()
     logging = !(ctx.log_sink isa TimespanLogging.NoOpLog)
     id = logging ? rand(Int) : 0
-    logging && timespan_start(ctx, :move, (;thunk_id=0, id, position=ArgPosition(), processor=to_proc), (;f=nothing, data))
+    logging && @logstart ctx LogMove LogMoveId(0, ArgPosition(), to_proc, id) data
     tid = something(DATADEPS_CURRENT_TASK[], (;uid=0)).uid
     t0 = time_ns()
     reused = reusable_slot(data, orig_space, dest_space)
@@ -1407,7 +1407,7 @@ function generate_slot!(state::DataDepsState, dest_space, data)
         moved
     end
     hier_stat_add!(:slot_ns, time_ns() - t0)
-    logging && timespan_finish(ctx, :move, (;thunk_id=0, id, position=ArgPosition(), processor=to_proc), (;f=nothing, data=data_chunk))
+    logging && @logfinish ctx LogMove LogMoveId(0, ArgPosition(), to_proc, id) data_chunk
     @assert memory_space(data_chunk) == dest_space "space mismatch! $dest_space (dest) != $(memory_space(data_chunk)) (actual) ($(typeof(data)) (data) vs. $(typeof(data_chunk)) (chunk)), spaces ($orig_space -> $dest_space)"
     dest_space_args[data] = data_chunk
     state.remote_arg_to_original[data_chunk] = data
