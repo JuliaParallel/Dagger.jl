@@ -278,94 +278,121 @@ const DATADEPS_UNIFORM_DEFER = Ref(true)
 # is the thing that limits datadeps at scale -- especially under MPI, where every
 # rank replays the whole plan -- and it is hard to attribute from a profile,
 # because the expensive parts are blocking waits inside communication rather than
-# hot loops. Off by default and costs one `Ref` read per phase.
+# hot loops.
+#
+# Built on TimespanLogging's typed categories (`LogHierPhase`/`LogHierSlot`/
+# `LogHierAinfo` in `logging-categories.jl`) for their lock-free per-thread
+# storage, which is what makes leaving this on cheap -- but gated by
+# `HIER_TIMING` rather than the shared `enable!`/`enable_logging!` bits:
+# planning cost is a standing question independent of whatever else logging is
+# on for, and `Dagger.disable_logging!()` should not silently turn it off.
+# `TimespanLogging.steal_typed` drains exactly the events produced since the
+# last steal, which is exactly this region's as long as one region plans at a
+# time (true today -- `distribute_tasks_hierarchical!` runs synchronously on
+# its caller); concurrent regions would interleave into one report.
 
 const HIER_TIMING = Ref(false)
 "Whether `HIER_TIMING` also logs each region's report (vs. only recording it)."
 const HIER_TIMING_REPORT = Ref(true)
 
-mutable struct HierPlanStats
-    ntasks::Int
-    nargs::Int
-    npartitions::Int
-    prescan_ns::UInt64
-    aliasing_ns::UInt64
-    dag_ns::UInt64
-    partition_ns::UInt64
-    schedule_ns::UInt64
-    epilogue_ns::UInt64
-    # Touched from `generate_slot!` / `aliasing`, which run under parallel
-    # partition planning, so these are atomic while the phase fields are not.
-    slot_ns::Threads.Atomic{UInt64}
-    slot_count::Threads.Atomic{Int}
-    slot_moved_ns::Threads.Atomic{UInt64}
-    slot_moved_count::Threads.Atomic{Int}
-    # Slots whose data was moved even though it was already in the destination
-    # space: pure overhead, and the reason `slot_is_already_in_place` exists.
-    slot_samespace_ns::Threads.Atomic{UInt64}
-    slot_samespace_count::Threads.Atomic{Int}
-    ainfo_ns::Threads.Atomic{UInt64}
-    ainfo_count::Threads.Atomic{Int}
-    # Per-event durations (ns), for distribution rather than just totals.
-    samples::Dict{Symbol,Vector{UInt64}}
-    samples_lock::ReentrantLock
-end
-HierPlanStats() = HierPlanStats(0, 0, 0, 0, 0, 0, 0, 0, 0,
-                                Threads.Atomic{UInt64}(0), Threads.Atomic{Int}(0),
-                                Threads.Atomic{UInt64}(0), Threads.Atomic{Int}(0),
-                                Threads.Atomic{UInt64}(0), Threads.Atomic{Int}(0),
-                                Threads.Atomic{UInt64}(0), Threads.Atomic{Int}(0),
-                                Dict{Symbol,Vector{UInt64}}(), ReentrantLock())
-
-# A `ScopedValue`, not a task-local: the parallel partition path calls
-# `generate_slot!` from tasks spawned inside the region, which inherit scoped
-# values but not task-locals.
-const HIER_STATS = ScopedValue{Union{HierPlanStats,Nothing}}(nothing)
-
-"Stats for the most recently planned region, for programmatic inspection."
-const LAST_HIER_STATS = Ref{Union{HierPlanStats,Nothing}}(nothing)
-
-"Accumulate `ns` (and one event) into field `f` of the enclosing region's stats, if enabled."
-@inline function hier_stat_add!(f::Symbol, ns::Integer, count::Integer=1)
-    HIER_TIMING[] || return
-    stats = HIER_STATS[]
-    stats === nothing && return
-    Threads.atomic_add!(getfield(stats, f), UInt64(ns))
-    Threads.atomic_add!(getfield(stats, Symbol(String(f)[1:end-3] * "_count")), Int(count))
-    @lock stats.samples_lock push!(get!(Vector{UInt64}, stats.samples, f), UInt64(ns))
-    return
+"Record `id`/`data` under category `C` when `HIER_TIMING[]` is set."
+@inline function hier_log!(::Type{C}, phase::UInt8, id, data) where C <: TimespanLogging.LogCategory
+    HIER_TIMING[] || return nothing
+    TimespanLogging._emit(C, phase, id, data)
+    return nothing
 end
 
-macro hier_phase(stats, field, ex)
+"Time `ex` as phase `field` of the enclosing region's `HIER_TIMING` report."
+macro hier_phase(field, ex)
+    id = :(LogHierPhaseId($(QuoteNode(field))))
     quote
-        local _stats = $(esc(stats))
-        if _stats === nothing
-            $(esc(ex))
-        else
-            local _t0 = time_ns()
-            local _res = $(esc(ex))
-            setfield!(_stats, $(QuoteNode(field)), getfield(_stats, $(QuoteNode(field))) + (time_ns() - _t0))
-            _res
-        end
+        hier_log!(LogHierPhase, 0x00, $id, nothing)
+        local _res = $(esc(ex))
+        hier_log!(LogHierPhase, 0x01, $id, nothing)
+        _res
     end
 end
 
-hier_stats_total_ns(stats::HierPlanStats) =
-    stats.prescan_ns + stats.aliasing_ns + stats.dag_ns + stats.partition_ns +
-    stats.schedule_ns + stats.epilogue_ns
+"Pair up `LogHierPhase` start/finish events (one region, single-threaded) into total ns per phase."
+function _hier_phase_ns(events)
+    open = Dict{Symbol,UInt64}()
+    ns = Dict{Symbol,UInt64}()
+    for ev in events
+        phase = ev.id.phase
+        if ev.phase == 0x00
+            open[phase] = ev.timestamp
+        else
+            ns[phase] = get(ns, phase, UInt64(0)) + (ev.timestamp - get(open, phase, ev.timestamp))
+        end
+    end
+    return ns
+end
 
-function report_hier_stats(stats::HierPlanStats)
-    total = hier_stats_total_ns(stats)
+"Stats for the most recently planned region, for programmatic inspection."
+const LAST_HIER_STATS = Ref{Union{NamedTuple,Nothing}}(nothing)
+
+"""
+    report_hier_stats(ntasks, nargs, npartitions)
+
+Steal this region's `LogHier*` events (recorded only when `HIER_TIMING[]`),
+print a breakdown (unless `HIER_TIMING_REPORT[]` is false), and record it in
+`LAST_HIER_STATS[]` for programmatic inspection. No-op unless `HIER_TIMING[]`.
+"""
+function report_hier_stats(ntasks::Int, nargs::Int, npartitions::Int)
+    HIER_TIMING[] || return nothing
+
+    phase_ns = _hier_phase_ns(TimespanLogging.steal_typed(LogHierPhase))
+    ns(phase) = get(phase_ns, phase, UInt64(0))
+
+    slot_ns = UInt64(0); slot_count = 0
+    moved_ns = UInt64(0); moved_count = 0
+    samespace_ns = UInt64(0); samespace_count = 0
+    # Per-event durations (ns), for distribution rather than just totals.
+    slot_samples = Dict{Symbol,Vector{UInt64}}()
+    for ev in TimespanLogging.steal_typed(LogHierSlot)
+        kind, d = ev.id.kind, ev.data
+        push!(get!(Vector{UInt64}, slot_samples, kind), d)
+        if kind === :total
+            slot_ns += d; slot_count += 1
+        elseif kind === :moved
+            moved_ns += d; moved_count += 1
+        elseif kind === :samespace
+            samespace_ns += d; samespace_count += 1
+        end
+    end
+
+    ainfo_ns = UInt64(0); ainfo_count = 0
+    ainfo_samples = UInt64[]
+    for ev in TimespanLogging.steal_typed(LogHierAinfo)
+        this_ns, this_count = ev.data
+        ainfo_ns += this_ns; ainfo_count += this_count
+        push!(ainfo_samples, this_ns)
+    end
+    slot_samples[:ainfo] = ainfo_samples
+
+    stats = (;ntasks, nargs, npartitions,
+             prescan_ns=ns(:prescan), aliasing_ns=ns(:aliasing), dag_ns=ns(:dag),
+             partition_ns=ns(:partition), schedule_ns=ns(:schedule), epilogue_ns=ns(:epilogue),
+             slot_ns, slot_count, moved_ns, moved_count, samespace_ns, samespace_count,
+             ainfo_ns, ainfo_count, samples=slot_samples)
+    LAST_HIER_STATS[] = stats
+    HIER_TIMING_REPORT[] && _print_hier_stats(stats)
+    return stats
+end
+
+function _print_hier_stats(stats)
+    total = stats.prescan_ns + stats.aliasing_ns + stats.dag_ns +
+            stats.partition_ns + stats.schedule_ns + stats.epilogue_ns
     ms(x) = round(x / 1e6; digits=2)
     @info """
     datadeps plan: $(stats.ntasks) tasks, $(stats.nargs) args, $(stats.npartitions) partitions, $(ms(total)) ms total
       phase 1 prescan   $(ms(stats.prescan_ns)) ms
-      phase 1 aliasing  $(ms(stats.aliasing_ns)) ms  ($(stats.ainfo_count[]) ainfos, $(ms(stats.ainfo_ns[])) ms in aliasing())
+      phase 1 aliasing  $(ms(stats.aliasing_ns)) ms  ($(stats.ainfo_count) ainfos, $(ms(stats.ainfo_ns)) ms in aliasing())
       phase 2 dag       $(ms(stats.dag_ns)) ms
       phase 3 partition $(ms(stats.partition_ns)) ms
-      phase 4 schedule  $(ms(stats.schedule_ns)) ms  ($(stats.slot_count[]) slots, $(ms(stats.slot_ns[])) ms, of which $(stats.slot_moved_count[]) moved data in $(ms(stats.slot_moved_ns[])) ms, $(stats.slot_samespace_count[]) of those within one space in $(ms(stats.slot_samespace_ns[])) ms)
+      phase 4 schedule  $(ms(stats.schedule_ns)) ms  ($(stats.slot_count) slots, $(ms(stats.slot_ns)) ms, of which $(stats.moved_count) moved data in $(ms(stats.moved_ns)) ms, $(stats.samespace_count) of those within one space in $(ms(stats.samespace_ns)) ms)
       epilogue          $(ms(stats.epilogue_ns)) ms"""
-    return
+    return nothing
 end
 
 struct HierarchicalTaskMeta
@@ -934,7 +961,7 @@ function _compute_aliasing_batch(arg_ws::Vector{ArgumentWrapper})
             arg_w = arg_ws[i]
             t0 = time_ns()
             ainfo = AliasingWrapper(aliasing(accel, arg_w.arg, arg_w.dep_mod))
-            hier_stat_add!(:ainfo_ns, time_ns() - t0)
+            hier_log!(LogHierAinfo, 0x01, LogHierAinfoId(), (time_ns() - t0, 1))
             results[i] = arg_w => ainfo
         end
     end
@@ -1619,28 +1646,24 @@ function distribute_tasks_hierarchical!(queue::DataDepsTaskQueue)
         return distribute_tasks!(queue)
     end
 
-    stats = HIER_TIMING[] ? HierPlanStats() : nothing
-    return with(HIER_STATS => stats) do
-        _distribute_tasks_hierarchical!(queue, seen_tasks, accel, all_procs, stats)
-    end
+    return _distribute_tasks_hierarchical!(queue, seen_tasks, accel, all_procs)
 end
 
 function _distribute_tasks_hierarchical!(queue::DataDepsTaskQueue,
                                          seen_tasks::Vector{DTaskPair},
                                          accel::Acceleration,
-                                         all_procs::Vector{<:Processor},
-                                         stats::Union{HierPlanStats,Nothing})
+                                         all_procs::Vector{<:Processor})
     # Phase 1: Collect arguments and compute aliasing in parallel
-    task_metas, unique_arg_ws = @hier_phase stats prescan_ns collect_aliased_args(seen_tasks)
+    task_metas, unique_arg_ws = @hier_phase prescan collect_aliased_args(seen_tasks)
     _lookup, ainfos_overlaps, arg_to_ainfo =
-        @hier_phase stats aliasing_ns build_aliasing_parallel(unique_arg_ws)
+        @hier_phase aliasing build_aliasing_parallel(unique_arg_ws)
 
     # Phase 2: Build dependency DAG
-    dag = @hier_phase stats dag_ns build_dependency_dag(task_metas, arg_to_ainfo, ainfos_overlaps)
+    dag = @hier_phase dag build_dependency_dag(task_metas, arg_to_ainfo, ainfos_overlaps)
 
     # Phase 3: Partition the DAG
     vertex_to_partition, n_partitions, partition_procs, multi_owner =
-        @hier_phase stats partition_ns partition_dag(dag, task_metas, all_procs)
+        @hier_phase partition partition_dag(dag, task_metas, all_procs)
 
     # Detect backing chunks shared across partitions in different memory spaces.
     # These need runtime ownership transfer to avoid split-brain concurrent
@@ -1712,7 +1735,7 @@ function _distribute_tasks_hierarchical!(queue::DataDepsTaskQueue,
     # See PERF(hier-2)/(hier-3).
     exec_spaces = unique(Iterators.flatten(memory_spaces(proc) for proc in all_procs))
     use_shared_state = uniform_execution(accel) || length(exec_spaces) > 1
-    partition_states = @hier_phase stats schedule_ns try
+    partition_states = @hier_phase schedule try
         if use_shared_state
             schedule_partitions_sequential!(
                 queue, queue_lock, partitions, dag, seen_tasks,
@@ -1754,15 +1777,9 @@ function _distribute_tasks_hierarchical!(queue::DataDepsTaskQueue,
     # Distributed keeps per-partition states and needs the registry for coherent
     # cross-partition write-back.
     epilogue_registry = use_shared_state ? nothing : registry
-    @hier_phase stats epilogue_ns _hierarchical_copy_from_and_free!(
+    @hier_phase epilogue _hierarchical_copy_from_and_free!(
         partition_states, length(partition_states), epilogue_registry)
-    if stats !== nothing
-        stats.ntasks = length(seen_tasks)
-        stats.nargs = length(unique_arg_ws)
-        stats.npartitions = n_partitions
-        LAST_HIER_STATS[] = stats
-        HIER_TIMING_REPORT[] && report_hier_stats(stats)
-    end
+    report_hier_stats(length(seen_tasks), length(unique_arg_ws), n_partitions)
     return
 end
 

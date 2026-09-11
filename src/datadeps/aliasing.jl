@@ -1406,11 +1406,12 @@ function generate_slot!(state::DataDepsState, dest_space, data)
         moved = with(DATADEPS_THUNK_ID=>tid) do
             remotecall_endpoint_toplevel(move_rewrap, current_acceleration(), aliased_object_cache, from_proc, to_proc, orig_space, dest_space, data)
         end
-        hier_stat_add!(:slot_moved_ns, time_ns() - t0)
-        orig_space == dest_space && hier_stat_add!(:slot_samespace_ns, time_ns() - t0)
+        move_ns = time_ns() - t0
+        hier_log!(LogHierSlot, 0x01, LogHierSlotId(:moved), move_ns)
+        orig_space == dest_space && hier_log!(LogHierSlot, 0x01, LogHierSlotId(:samespace), move_ns)
         moved
     end
-    hier_stat_add!(:slot_ns, time_ns() - t0)
+    hier_log!(LogHierSlot, 0x01, LogHierSlotId(:total), time_ns() - t0)
     logging && @logfinish ctx LogMove LogMoveId(0, ArgPosition(), to_proc, id) data_chunk
     @assert memory_space(data_chunk) == dest_space "space mismatch! $dest_space (dest) != $(memory_space(data_chunk)) (actual) ($(typeof(data)) (data) vs. $(typeof(data_chunk)) (chunk)), spaces ($orig_space -> $dest_space)"
     dest_space_args[data] = data_chunk
