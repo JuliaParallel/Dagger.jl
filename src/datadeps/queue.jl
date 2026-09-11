@@ -190,8 +190,8 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
             ctx = Sch.eager_context()
             if !(ctx.log_sink isa TimespanLogging.NoOpLog)
                 id = rand(UInt)
-                timespan_start(ctx, :datadeps_copy_skip, (;id), (;))
-                timespan_finish(ctx, :datadeps_copy_skip, (;id), (;thunk_id=0, from_space=origin_space, to_space=origin_space, arg_w, from_arg=arg, to_arg=arg))
+                @logstart ctx LogDatadepsCopySkip LogDatadepsCopySkipId(id) nothing
+                @logfinish ctx LogDatadepsCopySkip LogDatadepsCopySkipId(id) (;thunk_id=0, from_space=origin_space, to_space=origin_space, arg_w, from_arg=arg, to_arg=arg)
             end
         end
     end
@@ -413,11 +413,11 @@ function distribute_task!(queue::DataDepsTaskQueue, state::DataDepsState, all_pr
         new_spec.options.occupancy = Dict(Any=>0)
     end
     ctx = Sch.eager_context()
-    @maybelog ctx timespan_start(ctx, :datadeps_execute, (;thunk_id=task.uid), (;))
+    @logstart ctx LogDatadepsExecute LogDatadepsExecuteId(task.uid) nothing
     enqueue!(queue.upper_queue, DTaskPair(new_spec, task))
     # N.B. `task_arg_ws`/`remote_args` are per-task scratch buffers, so the
     # logged payload snapshots them (only evaluated when logging is enabled)
-    @maybelog ctx timespan_finish(ctx, :datadeps_execute, (;thunk_id=task.uid), (;space=our_space, deps=logged_task_args(deps_vec, task_arg_ws), args=copy(remote_args)))
+    @logfinish ctx LogDatadepsExecute LogDatadepsExecuteId(task.uid) (;space=our_space, deps=logged_task_args(deps_vec, task_arg_ws), args=copy(remote_args))
 
     # Reclaim the syncdeps set when the (synchronous) submission above has
     # already consumed it — see `syncdeps_consumed` for the guard rationale.

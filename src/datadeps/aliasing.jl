@@ -1225,7 +1225,7 @@ function generate_slot!(state::DataDepsState, dest_space, data)
     ctx = Sch.eager_context()
     logging = !(ctx.log_sink isa TimespanLogging.NoOpLog)
     id = logging ? rand(Int) : 0
-    logging && timespan_start(ctx, :move, (;thunk_id=0, id, position=ArgPosition(), processor=to_proc), (;f=nothing, data))
+    logging && @logstart ctx LogMove LogMoveId(0, ArgPosition(), to_proc, id) data
     tid = something(DATADEPS_CURRENT_TASK[], (;uid=0)).uid
     data_chunk = if slot_is_already_in_place(data, orig_space, dest_space)
         # Nothing to move: the slot for data already in `dest_space` is the data
@@ -1240,7 +1240,7 @@ function generate_slot!(state::DataDepsState, dest_space, data)
             remotecall_endpoint_toplevel(move_rewrap, current_acceleration(), aliased_object_cache, from_proc, to_proc, orig_space, dest_space, data)
         end
     end
-    logging && timespan_finish(ctx, :move, (;thunk_id=0, id, position=ArgPosition(), processor=to_proc), (;f=nothing, data=data_chunk))
+    logging && @logfinish ctx LogMove LogMoveId(0, ArgPosition(), to_proc, id) data_chunk
     @assert memory_space(data_chunk) == dest_space "space mismatch! $dest_space (dest) != $(memory_space(data_chunk)) (actual) ($(typeof(data)) (data) vs. $(typeof(data_chunk)) (chunk)), spaces ($orig_space -> $dest_space)"
     dest_space_args[data] = data_chunk
     state.remote_arg_to_original[data_chunk] = data
