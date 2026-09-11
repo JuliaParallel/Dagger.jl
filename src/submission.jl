@@ -81,6 +81,19 @@ function eager_submit_internal!(payload::AnyPayload)
     tid = 0
     return eager_submit_internal!(ctx, state, task, tid, payload)
 end
+"""
+`LogAddThunk`'s payload used to carry the live `Options` object by reference.
+`options.syncdeps` is a pooled `Set` that queue.jl's datadeps path nulls out
+and returns to the pool (`return_syncdeps_set!`) right after a *synchronous*
+submission consumes it -- so a consumer reading `ev.timeline.options.syncdeps`
+at collect time (rather than eagerly, at log time) would see `nothing` even
+though the dependency really was there. `TaskDependencies` is the only reader
+of this field (checked across the whole tree); snapshot just that field here,
+at log time, instead of aliasing the mutable struct.
+"""
+logged_options(options::Options) =
+    (;syncdeps = options.syncdeps === nothing ? nothing : copy(options.syncdeps))
+
 eager_submit_internal!(ctx, state, task, tid, payload::Tuple{<:AnyPayload}) =
     eager_submit_internal!(ctx, state, task, tid, payload[1])
 @reuse_scope function eager_submit_internal!(ctx, state, task, tid, payload::AnyPayload)
@@ -105,7 +118,7 @@ eager_submit_internal!(ctx, state, task, tid, payload::Tuple{<:AnyPayload}) =
     # Eager DTask uid and Sch thunk id are the same value.
     id = Int(uid)
 
-    @logstart ctx LogAddThunk LogAddThunkId(id) (;f=fargs[1], args=fargs[2:end], options, uid)
+    @logstart ctx LogAddThunk LogAddThunkId(id) (;f=fargs[1], args=fargs[2:end], options=logged_options(options), uid)
 
     # Keep the *values* of the original arguments alive across edge-wiring: the
     # loop below replaces `fargs` entries holding a `DTask`/`ThunkID`/`Chunk`
@@ -292,7 +305,7 @@ eager_submit_internal!(ctx, state, task, tid, payload::Tuple{<:AnyPayload}) =
         Sch.schedule_ready!(state, ready)
 
         @assert options.syncdeps === nothing || all(dep->dep isa Dagger.ThunkSyncdep && dep.thunk isa Dagger.WeakThunk, options.syncdeps)
-        @logfinish ctx LogAddThunk LogAddThunkId(id) (;f=fargs[1], args=fargs[2:end], options, uid)
+        @logfinish ctx LogAddThunk LogAddThunkId(id) (;f=fargs[1], args=fargs[2:end], options=logged_options(options), uid)
 
         return thunk_id
     end
