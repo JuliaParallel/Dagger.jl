@@ -105,7 +105,7 @@ eager_submit_internal!(ctx, state, task, tid, payload::Tuple{<:AnyPayload}) =
     # Eager DTask uid and Sch thunk id are the same value.
     id = Int(uid)
 
-    @maybelog ctx timespan_start(ctx, :add_thunk, (;thunk_id=id), (;f=fargs[1], args=fargs[2:end], options, uid))
+    @logstart ctx LogAddThunk LogAddThunkId(id) (;f=fargs[1], args=fargs[2:end], options, uid)
 
     # Keep the *values* of the original arguments alive across edge-wiring: the
     # loop below replaces `fargs` entries holding a `DTask`/`ThunkID`/`Chunk`
@@ -292,7 +292,7 @@ eager_submit_internal!(ctx, state, task, tid, payload::Tuple{<:AnyPayload}) =
         Sch.schedule_ready!(state, ready)
 
         @assert options.syncdeps === nothing || all(dep->dep isa Dagger.ThunkSyncdep && dep.thunk isa Dagger.WeakThunk, options.syncdeps)
-        @maybelog ctx timespan_finish(ctx, :add_thunk, (;thunk_id=id), (;f=fargs[1], args=fargs[2:end], options, uid))
+        @logfinish ctx LogAddThunk LogAddThunkId(id) (;f=fargs[1], args=fargs[2:end], options, uid)
 
         return thunk_id
     end

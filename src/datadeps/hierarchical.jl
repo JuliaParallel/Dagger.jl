@@ -1811,9 +1811,11 @@ function _hierarchical_copy_from!(state::DataDepsState, arg_w::ArgumentWrapper, 
         @dagdebug nothing :spawn_datadeps "Skipped copy-from (up-to-date): $origin_space"
         arg = arg_w.arg
         ctx = Sch.eager_context()
-        id = rand(UInt)
-        @maybelog ctx timespan_start(ctx, :datadeps_copy_skip, (;id), (;))
-        @maybelog ctx timespan_finish(ctx, :datadeps_copy_skip, (;id), (;thunk_id=0, from_space=origin_space, to_space=origin_space, arg_w, from_arg=arg, to_arg=arg))
+        if !(ctx.log_sink isa TimespanLogging.NoOpLog)
+            id = rand(UInt)
+            @logstart ctx LogDatadepsCopySkip LogDatadepsCopySkipId(id) nothing
+            @logfinish ctx LogDatadepsCopySkip LogDatadepsCopySkipId(id) (;thunk_id=0, from_space=origin_space, to_space=origin_space, arg_w, from_arg=arg, to_arg=arg)
+        end
     end
     return
 end
