@@ -324,3 +324,26 @@ lesson.
    Category IDs are assigned lazily on first `category_id` use. Keep it
    that way — a `const ID = register_category!(...)` at Dagger toplevel
    is not safe.
+
+30. **`TimespanLogging.steal_typed` is a fine basis for a private, one-off
+   report, but it drains a *global* per-thread buffer, not a call-scoped
+   one.** Hierarchical datadeps planning used to accumulate its
+   `HIER_TIMING` breakdown into a `ScopedValue`-held `HierPlanStats` object,
+   which correctly isolated concurrent/nested planning calls (each got its
+   own object via the calling task's dynamic scope). Replacing that with
+   `@logcategory` events plus `steal_typed(...)` right after a region
+   finishes is far cheaper (lock-free typed chunk lists instead of atomics
+   and a locked samples `Dict`), but it only reports *this* region's events
+   correctly because hierarchical regions plan one at a time on the calling
+   task — there is no region id in the event, so two regions planning
+   concurrently would have their events interleaved into whichever `steal_typed`
+   call happens to run first. Fine here (documented, not enforced); do not
+   copy this pattern for something that might genuinely run concurrently
+   without first adding a region/call id to the category's `id` fields.
+   Also: gate such a feature-specific report on its own `Ref` (here
+   `HIER_TIMING`), not the shared `enable!` bits — `category_enabled`/
+   `enable_logging!`/`disable_logging!` are a single global bitset, and a
+   dedicated diagnostic should not go dark just because someone called
+   `Dagger.disable_logging!()` for an unrelated reason. Call
+   `TimespanLogging._emit` directly under your own gate instead of routing
+   through `@logstart`/`@logfinish` (which gate on the shared bits).

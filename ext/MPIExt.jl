@@ -303,7 +303,7 @@ function Dagger.batch_ainfos(accel::MPIAcceleration, objs::Vector, dep_mods::Vec
         # lookup of the same object agree even if an entry was already there.
         results[i] = Dagger.memoize_ainfo!(Dagger.ainfo_memo_key(objs[i], dep_mods[i]), ainfo)
     end
-    Dagger.hier_stat_add!(:ainfo_ns, time_ns() - t0, n)
+    Dagger.hier_log!(Dagger.LogHierAinfo, 0x01, Dagger.LogHierAinfoId(), (time_ns() - t0, n))
     return results
 end
 
