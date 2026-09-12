@@ -1,6 +1,7 @@
 .gputest: &gputest
   timeout_in_minutes: 60
   if: build.message !~ /\[skip tests\]/
+  command: "julia --project -e 'using Pkg; Pkg.develop(;path=\"lib/TimespanLogging\")'"
 
 # MPI × GPU jobs launch the SPMD datadeps suite (test/mpi_<backend>.jl) under
 # `mpiexec`. They use only the `julia` plugin (not `julia-test`, which would run
@@ -74,7 +75,7 @@ steps:
     agents:
       queue: "cuda"
     command: |
-      julia --project=test/cudaenv -e 'using Pkg; Pkg.develop(PackageSpec(path=pwd())); Pkg.instantiate()'
+      julia --project=test/cudaenv -e 'using Pkg; Pkg.develop([PackageSpec(path=pwd()), PackageSpec(path="lib/TimespanLogging")]); Pkg.instantiate()'
       julia --project=test/cudaenv test/run_mpi.jl 2 2 test/mpi_cuda.jl
 
   - label: Julia 1.11 (ROCm, MPI)
@@ -85,7 +86,7 @@ steps:
     agents:
       queue: "rocm"
     command: |
-      julia --project=test/rocmenv -e 'using Pkg; Pkg.develop(PackageSpec(path=pwd())); Pkg.instantiate()'
+      julia --project=test/rocmenv -e 'using Pkg; Pkg.develop([PackageSpec(path=pwd()), PackageSpec(path="lib/TimespanLogging")]); Pkg.instantiate()'
       julia --project=test/rocmenv test/run_mpi.jl 2 2 test/mpi_rocm.jl
 
   - label: Julia 1.11 (oneAPI, MPI)
@@ -96,7 +97,7 @@ steps:
     agents:
       queue: "oneapi"
     command: |
-      julia --project=test/oneapienv -e 'using Pkg; Pkg.develop(PackageSpec(path=pwd())); Pkg.instantiate()'
+      julia --project=test/oneapienv -e 'using Pkg; Pkg.develop([PackageSpec(path=pwd()), PackageSpec(path="lib/TimespanLogging")]); Pkg.instantiate()'
       julia --project=test/oneapienv test/run_mpi.jl 2 2 test/mpi_oneapi.jl
 
   - label: Julia 1.11 (Metal, MPI)
@@ -108,7 +109,7 @@ steps:
     agents:
       queue: "metal"
     command: |
-      julia --project=test/metalenv -e 'using Pkg; Pkg.develop(PackageSpec(path=pwd())); Pkg.instantiate()'
+      julia --project=test/metalenv -e 'using Pkg; Pkg.develop([PackageSpec(path=pwd()), PackageSpec(path="lib/TimespanLogging")]); Pkg.instantiate()'
       julia --project=test/metalenv test/run_mpi.jl 2 2 test/mpi_metal.jl
 
   - label: Julia 1.11 (Finch)

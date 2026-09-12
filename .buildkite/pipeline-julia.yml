@@ -127,6 +127,7 @@ steps:
       arch: aarch64
     env:
       CI_USE_OPENCL: "1"
+    command: "julia --project -e 'using Pkg; Pkg.develop(;path=\"lib/TimespanLogging\")'"
 
   # MPI × OpenCL SPMD datadeps suite. Runs on the same macOS/aarch64 agent as the
   # non-MPI OpenCL job, but drives test/mpi_opencl.jl under MPI.jl's bundled
@@ -142,7 +143,7 @@ steps:
       os: macos
       arch: aarch64
     command: |
-      julia --project=test/openclenv -e 'using Pkg; Pkg.develop(PackageSpec(path=pwd())); Pkg.instantiate()'
+      julia --project=test/openclenv -e 'using Pkg; Pkg.develop([PackageSpec(path=pwd()), PackageSpec(path="lib/TimespanLogging")]); Pkg.instantiate()'
       julia --project=test/openclenv test/run_mpi.jl 2 2 test/mpi_opencl.jl
 
   - label: Julia 1 - TimespanLogging
@@ -153,7 +154,7 @@ steps:
           version: "1"
       - JuliaCI/julia-coverage#v1:
           codecov: true
-    command: "julia --project -e 'using Pkg; Pkg.instantiate(); Pkg.develop(;path=\"lib/TimespanLogging\"); Pkg.test(\"TimespanLogging\")'"
+    command: "julia --project -e 'using Pkg; Pkg.develop(;path=\"lib/TimespanLogging\"); Pkg.instantiate(); Pkg.test(\"TimespanLogging\")'"
 
   - label: Julia 1 - DaggerWebDash
     <<: *test
@@ -163,7 +164,7 @@ steps:
           version: "1"
       - JuliaCI/julia-coverage#v1:
           codecov: true
-    command: "julia -e 'using Pkg; Pkg.develop(;path=pwd()); Pkg.develop(;path=\"lib/TimespanLogging\"); Pkg.develop(;path=\"lib/DaggerWebDash\"); include(\"lib/DaggerWebDash/test/runtests.jl\")'"
+    command: "julia -e 'using Pkg; Pkg.develop([PackageSpec(path=pwd()), PackageSpec(path=\"lib/TimespanLogging\"), PackageSpec(path=\"lib/DaggerWebDash\")]); include(\"lib/DaggerWebDash/test/runtests.jl\")'"
 
   - label: "Benchmarks (vs master)"
     timeout_in_minutes: 120

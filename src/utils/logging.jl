@@ -1,5 +1,7 @@
 # Logging utilities
 
+include("logging-categories.jl")
+
 """
     enable_logging!(;kwargs...)
 
@@ -22,6 +24,7 @@ Extra events:
 - `gc_stats::Bool`: Enables GC allocation tracking per event
 - `lock_contend::Bool`: Enables lock contention counting per event
 - `compile_time::Bool`: Enables Julia compile-time tracking per event
+- `mempool_fine::Bool`: Enables high-frequency MemPool events (storage RCU)
 """
 function enable_logging!(;metrics::Bool=false,
                           timeline::Bool=false,
@@ -38,7 +41,8 @@ function enable_logging!(;metrics::Bool=false,
                           linuxperf::String="",
                           gc_stats::Bool=false,
                           lock_contend::Bool=false,
-                          compile_time::Bool=false)
+                          compile_time::Bool=false,
+                          mempool_fine::Bool=false)
     ml = TimespanLogging.MultiEventLog()
     ml[:core] = TimespanLogging.Events.CoreMetrics()
     ml[:id] = TimespanLogging.Events.IDMetrics()
@@ -107,7 +111,31 @@ function enable_logging!(;metrics::Bool=false,
     if compile_time
         ml[:compile_time] = Dagger.Events.CompileTimeMetrics()
     end
-    Dagger.Sch.eager_context().log_sink = ml
+    _install_log_sink!(ml, gc_stats, mempool_fine)
+    return
+end
+
+function _install_log_sink!(sink, capture_gc::Bool, mempool_fine::Bool=false)
+    Dagger.Sch.eager_context().log_sink = sink
+    if sink isa TimespanLogging.NoOpLog
+        TimespanLogging.disable!()
+    else
+        TimespanLogging.enable!(; capture_gc)
+    end
+    if isdefined(MemPool, :set_log_sink!)
+        MemPool.set_log_sink!(sink)
+        fine = mempool_fine && !(sink isa TimespanLogging.NoOpLog)
+        if isdefined(MemPool, :set_log_fine!)
+            MemPool.set_log_fine!(fine)
+        end
+    end
+    # `nworkers() == 1` with no extra workers, and `workers() == [1]`. A
+    # remotecall to self deadlocks (the Distributed waiter never runs).
+    if myid() == 1 && length(procs()) > 1
+        @sync for w in workers()
+            @async remotecall_wait(_install_log_sink!, w, sink, capture_gc, mempool_fine)
+        end
+    end
     return
 end
 
@@ -123,7 +151,7 @@ end
 Disables logging previously enabled with `enable_logging!`.
 """
 function disable_logging!()
-    Dagger.Sch.eager_context().log_sink = TimespanLogging.NoOpLog()
+    _install_log_sink!(TimespanLogging.NoOpLog(), false)
     return
 end
 
