@@ -99,6 +99,18 @@ chunk lists and consumed at `get_logs!`.
 """
 struct ActiveLog end
 
+"""
+    get_logs!(ctx; kwargs...)
+    get_logs!(sink; kwargs...)
+
+Get the logs recorded by `ctx`'s (or `sink`'s) log sink, clearing them in the
+process. Recording is always into per-thread buffers regardless of sink;
+`get_logs!` is what steals and projects them into the sink's own log shape
+(a `Vector{Timespan}` for `LocalEventLog`, a `Dict` of consumer name to
+per-event values for `MultiEventLog`, `nothing` for `NoOpLog`). See the
+sink's own docstring for sink-specific keyword arguments (e.g. `raw` and
+`only_local` on `LocalEventLog`).
+"""
 get_logs!(ctx; kwargs...) = get_logs!(log_sink(ctx); kwargs...)
 write_event(::NoOpLog, event::Event) = nothing
 get_logs!(::NoOpLog) = nothing
