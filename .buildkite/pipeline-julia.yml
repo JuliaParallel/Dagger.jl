@@ -143,7 +143,7 @@ steps:
       os: macos
       arch: aarch64
     command: |
-      julia --project=test/openclenv -e 'using Pkg; Pkg.develop(PackageSpec(path=pwd())); Pkg.develop(path="lib/TimespanLogging"); Pkg.instantiate()'
+      julia --project=test/openclenv -e 'using Pkg; Pkg.develop([PackageSpec(path=pwd()), PackageSpec(path="lib/TimespanLogging")]); Pkg.instantiate()'
       julia --project=test/openclenv test/run_mpi.jl 2 2 test/mpi_opencl.jl
 
   - label: Julia 1 - TimespanLogging
