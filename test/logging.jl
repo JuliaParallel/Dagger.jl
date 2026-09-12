@@ -132,9 +132,41 @@ end
             b = delayed(sum)(X)
             c = delayed(+)(a,b)
             compute(ctx, c)
-            sleep(1)
 
-            logs = TimespanLogging.get_logs!(ml)
+            # `get_logs!` destructively drains the shared per-thread event
+            # buffers, so a single fixed sleep() before one drain can race
+            # scheduler teardown activity that lands slightly late under CPU
+            # pressure (e.g. a busy, oversubscribed CI runner). Poll and
+            # merge across drains instead of sleep-then-drain-once, requiring
+            # a short quiet period (no newly-drained events) once the
+            # expected categories show up, so a slow-but-eventually-
+            # consistent run still passes without racing trailing activity.
+            logs = Dict{Int,Dict{Symbol,Vector}}()
+            deadline = time() + 10
+            quiet_since = nothing
+            while true
+                added = 0
+                for (w, cats) in TimespanLogging.get_logs!(ml)
+                    dcats = get!(Dict{Symbol,Vector}, logs, w)
+                    for (cat, v) in cats
+                        added += length(v)
+                        append!(get!(Vector{Any}, dcats, cat), v)
+                    end
+                end
+                w1 = get(logs, 1, Dict{Symbol,Vector}())
+                ready = haskey(w1, :core) && length(w1[:core]) > 1 &&
+                        haskey(w1, :esat) &&
+                        any(e -> haskey(e, :scheduler_init), w1[:esat]) &&
+                        any(e -> haskey(e, :finish), w1[:esat])
+                if ready && added == 0
+                    quiet_since === nothing && (quiet_since = time())
+                    time() - quiet_since >= 0.2 && break
+                else
+                    quiet_since = nothing
+                end
+                time() >= deadline && break
+                sleep(0.05)
+            end
             for w in keys(logs)
                 len = length(logs[w][:core])
                 if w == 1
