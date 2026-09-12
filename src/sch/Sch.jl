@@ -20,6 +20,10 @@ import ..Dagger: DepNode, deps_push!, deps_seal!
 import ..Dagger: order, dependents, noffspring, istask, inputs, unwrap_weak, unwrap_weak_checked, wrap_weak, tochunk, timespan_start, timespan_finish, procs, move, chunktype, default_enabled, processor, get_processors, get_parent, execute!, rmprocs!, task_processor, constrain, cputhreadtime, maybe_take_or_alloc!
 import ..Dagger: datasize, root_worker_id, is_local_processor, fire_order_key, short_name, select_processors_uniform!, processor_order_key, current_acceleration, set_task_acceleration!, scheduling_ignore_capacity, scheduling_task_occupancy, schedule_argument_move, argument_move_may_inline, sched_move, bind_moved_argument
 import ..Dagger: @dagdebug, @safe_lock_spin1, @maybelog, @take_or_alloc!
+import ..Dagger: LogCompute, LogComputeId, LogMove, LogMoveId, LogTake, LogTakeId
+import ..Dagger: LogProcRunWait, LogProcRunWaitId, LogProcRunFetch, LogProcRunFetchId
+import ..Dagger: LogEnqueue, LogEnqueueId, LogSchedule, LogScheduleId, LogFire, LogFireId, LogFinish, LogFinishId
+import TimespanLogging: @logstart, @logfinish
 import DataStructures: PriorityQueue
 
 import ..Dagger: ReusableCache, ReusableLinkedList, ReusableDict
@@ -604,9 +608,9 @@ function handle_result!(ctx, state::ComputeState, pid, proc, thunk_id, res, meta
             end
         end
 
-        @maybelog ctx timespan_start(ctx, :finish, (;uid=state.uid, thunk_id), (;thunk_id, result=res))
+        @logstart ctx LogFinish LogFinishId(state.uid, thunk_id) (;thunk_id, result=res)
         finish_task!(ctx, state, node, thunk_failed, ready)
-        @maybelog ctx timespan_finish(ctx, :finish, (;uid=state.uid, thunk_id), (;thunk_id, result=res))
+        @logfinish ctx LogFinish LogFinishId(state.uid, thunk_id) (;thunk_id, result=res)
         return true
     end
     proceed || return
@@ -647,10 +651,10 @@ function scheduler_run(ctx, state::ComputeState, d::Thunk, options::SchedulerOpt
     while state.running_count[] > 0
         check_workers_available(ctx, options)
 
-        @maybelog ctx timespan_start(ctx, :take, (;uid=state.uid), nothing)
+        @logstart ctx LogTake LogTakeId(state.uid) nothing
         @dagdebug nothing :take "Waiting for results"
         tresult = take!(state.chan) # get result of completed thunk
-        @maybelog ctx timespan_finish(ctx, :take, (;uid=state.uid), nothing)
+        @logfinish ctx LogTake LogTakeId(state.uid) nothing
         if tresult isa RescheduleSignal
             continue
         end
@@ -906,7 +910,7 @@ concurrently across threads.
             return (true, procs_filt)
         end
         @dagdebug task :schedule "Scheduling task"
-        @maybelog ctx timespan_start(ctx, :schedule, (;uid=state.uid, thunk_id=task.id), (;thunk_id=task.id))
+        @logstart ctx LogSchedule LogScheduleId(state.uid, task.id) (;thunk_id=task.id)
 
         if has_result(state, task)
             if (@atomic task.errored)
@@ -928,7 +932,7 @@ concurrently across threads.
             # nor `finish_task!` on this path — release that credit now so the
             # counter doesn't leak (which would otherwise hang the scheduler).
             Threads.atomic_sub!(state.running_count, 1)
-            @maybelog ctx timespan_finish(ctx, :schedule, (;uid=state.uid, thunk_id=task.id), (;thunk_id=task.id))
+            @logfinish ctx LogSchedule LogScheduleId(state.uid, task.id) (;thunk_id=task.id)
             return (true, procs_filt)
         end
 
@@ -993,7 +997,7 @@ concurrently across threads.
             # entered `ready_out` (see comment at the other `set_failed!`
             # call sites in this function for why this is necessary).
             Threads.atomic_sub!(state.running_count, 1)
-            @maybelog ctx timespan_finish(ctx, :schedule, (;uid=state.uid, thunk_id=task.id), (;thunk_id=task.id))
+            @logfinish ctx LogSchedule LogScheduleId(state.uid, task.id) (;thunk_id=task.id)
         end
         return
     end
@@ -1083,7 +1087,7 @@ concurrently across threads.
             # `finish_task!` — release that credit now to avoid leaking it.
             Threads.atomic_sub!(state.running_count, 1)
         end
-        @maybelog ctx timespan_finish(ctx, :schedule, (;uid=state.uid, thunk_id=task.id), (;thunk_id=task.id))
+        @logfinish ctx LogSchedule LogScheduleId(state.uid, task.id) (;thunk_id=task.id)
     finally
         unlock(state.lock)
     end
@@ -1495,7 +1499,7 @@ function (ets::FireTaskSpec)()
     chan = ets.return_chan
     pid = Dagger.root_worker_id(proc)
 
-    @maybelog ctx timespan_start(ctx, :fire, (;uid, worker=pid), nothing)
+    @logstart ctx LogFire LogFireId(uid, pid) nothing
     try
         if pid == myid()
             do_tasks(proc, chan, tasks)
@@ -1510,7 +1514,7 @@ function (ets::FireTaskSpec)()
             put!(chan, TaskResult(pid, proc, thunk_id, CapturedException(err, bt), nothing))
         end
     finally
-        @maybelog ctx timespan_finish(ctx, :fire, (;uid, worker=pid), nothing)
+        @logfinish ctx LogFire LogFireId(uid, pid) nothing
     end
     return
 end
@@ -1724,12 +1728,12 @@ function start_processor_runner!(istate::ProcessorInternalState, uid::UInt64, re
             # Wait for new tasks
             if !work_to_do
                 @dagdebug nothing :processor "Waiting for tasks"
-                @maybelog ctx timespan_start(ctx, :proc_run_wait, (;uid, worker=wid, processor=to_proc), nothing)
+                @logstart ctx LogProcRunWait LogProcRunWaitId(uid, wid, to_proc) nothing
                 wait(istate.reschedule)
                 @static if VERSION >= v"1.9"
                     reset(istate.reschedule)
                 end
-                @maybelog ctx timespan_finish(ctx, :proc_run_wait, (;uid, worker=wid, processor=to_proc), nothing)
+                @logfinish ctx LogProcRunWait LogProcRunWaitId(uid, wid, to_proc) nothing
                 if istate.done[]
                     return
                 end
@@ -1737,7 +1741,7 @@ function start_processor_runner!(istate::ProcessorInternalState, uid::UInt64, re
 
             # Fetch a new task to execute
             @dagdebug nothing :processor "Trying to dequeue"
-            @maybelog ctx timespan_start(ctx, :proc_run_fetch, (;uid, worker=wid, processor=to_proc), nothing)
+            @logstart ctx LogProcRunFetch LogProcRunFetchId(uid, wid, to_proc) nothing
             # N.B. Results are returned from the locked block rather than
             # assigned to captured outer locals (which would Core.Box them on
             # every wakeup)
@@ -1757,7 +1761,7 @@ function start_processor_runner!(istate::ProcessorInternalState, uid::UInt64, re
                 return (queue_result, length(queue) > 0)
             end
             if task_and_occupancy === nothing
-                @maybelog ctx timespan_finish(ctx, :proc_run_fetch, (;uid, worker=wid, processor=to_proc), nothing)
+                @logfinish ctx LogProcRunFetch LogProcRunFetchId(uid, wid, to_proc) nothing
 
                 @dagdebug nothing :processor "Failed to dequeue"
 
@@ -1827,7 +1831,7 @@ function start_processor_runner!(istate::ProcessorInternalState, uid::UInt64, re
             task, task_occupancy = task_and_occupancy
             thunk_id = task.thunk_id
             time_util = task.est_time_util
-            @maybelog ctx timespan_finish(ctx, :proc_run_fetch, (;uid, worker=wid, processor=to_proc), (;thunk_id, proc_occupancy=proc_occupancy[], task_occupancy))
+            @logfinish ctx LogProcRunFetch LogProcRunFetchId(uid, wid, to_proc) (;thunk_id, proc_occupancy=proc_occupancy[], task_occupancy)
             @dagdebug thunk_id :processor "Dequeued task"
 
             # Skip tasks cancelled by the fallback (which may have fired
@@ -2099,7 +2103,7 @@ function do_tasks(to_proc, return_queue, tasks)
         for task in tasks
             thunk_id = task.thunk_id
             occupancy = task.est_occupancy
-            @maybelog ctx timespan_start(ctx, :enqueue, (;uid, processor=to_proc, thunk_id), nothing)
+            @logstart ctx LogEnqueue LogEnqueueId(uid, to_proc, thunk_id) nothing
 
             # Skip tasks cancelled by the fallback before do_tasks ran.
             # The fallback marks thunk IDs in states.pre_cancelled so we don't
@@ -2128,7 +2132,7 @@ function do_tasks(to_proc, return_queue, tasks)
             end
             should_launch || continue
             push!(queue, task => occupancy)
-            @maybelog ctx timespan_finish(ctx, :enqueue, (;uid, processor=to_proc, thunk_id), nothing)
+            @logfinish ctx LogEnqueue LogEnqueueId(uid, to_proc, thunk_id) nothing
             @dagdebug thunk_id :processor "Enqueued task"
         end
     end
@@ -2191,7 +2195,7 @@ function move_one_argument!(arg, mctx::MoveCtx)
     f = mctx.f
     value = Dagger.value(arg)
     position = arg.pos
-    @maybelog ctx timespan_start(ctx, :move, (;thunk_id, position, processor=to_proc), (;f, data=value))
+    @logstart ctx LogMove LogMoveId(thunk_id, position, to_proc, nothing) value
             #= FIXME: This isn't valid if x is written to (formerly used transfer_time/transfer_size stats)
             x = if x isa Chunk
                 value = lock(TASK_SYNC) do
@@ -2247,7 +2251,7 @@ function move_one_argument!(arg, mctx::MoveCtx)
         @dagdebug thunk_id :move "Moved argument @ $position to $to_proc: $(typeof(value)) -> $(typeof(bound))"
     end
     arg.value = bound
-    @maybelog ctx timespan_finish(ctx, :move, (;thunk_id, position, processor=to_proc), (;f, data=Dagger.value(arg)); tasks=[Base.current_task()])
+    @logfinish ctx LogMove LogMoveId(thunk_id, position, to_proc, nothing) Dagger.value(arg)
     return
 end
 
@@ -2392,7 +2396,7 @@ Executes a single task specified by `task` on `to_proc`.
     =#
 
     real_time_util[] += est_time_util
-    @maybelog ctx timespan_start(ctx, :compute, (;thunk_id, processor=to_proc), (;f))
+    @logstart ctx LogCompute LogComputeId(thunk_id, to_proc) f
 
     # Start counting time and GC allocations
     threadtime_start = cputhreadtime()
@@ -2455,7 +2459,7 @@ Executes a single task specified by `task` on `to_proc`.
     threadtime = cputhreadtime() - threadtime_start
     # FIXME: This is not a realistic measure of max. required memory
     #gc_allocd = min(max(UInt64(Base.gc_num().allocd) - UInt64(gcnum_start.allocd), UInt64(0)), UInt64(1024^4))
-    @maybelog ctx timespan_finish(ctx, :compute, (;thunk_id, processor=to_proc), (;f, result=result_meta))
+    @logfinish ctx LogCompute LogComputeId(thunk_id, to_proc) (;f, result=result_meta)
 
     lock(TASK_SYNC) do
         real_time_util[] -= est_time_util

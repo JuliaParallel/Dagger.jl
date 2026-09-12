@@ -294,3 +294,33 @@ lesson.
    and died in `ipc_export(::Matrix)`. Stamp the result from
    `value_memory_space`, and do not select IPC unless the chunktype is a
    GPU array (`ipc_type_eligible`). Space-only `ipc_eligible` is not enough.
+
+27. **Log emitters in tests must be count-bounded, and chunk lists must be
+   memory-bounded.** A `while !stop[]` logger on every default thread will
+   starve the task that flips `stop` (lesson 12) and allocate slabs until
+   the machine OOMs — measured at 250GB+ virtual across leftover
+   `Pkg.test` children after only the parent shell was killed. Use a
+   fixed `for i in 1:N` (N on the order of a few chunks), cap published
+   slabs (`MAX_CHUNKS`), and when killing a hung Julia test kill the
+   whole process group (`kill -- -$PGID`), not just the `julia -e`
+   wrapper. `Pkg.test` spawns a child that keeps running if you only
+   SIGTERM the wrapper.
+
+28. **`nworkers() == 1` means "this process", not "there are workers".**
+   Without `addprocs`, `workers() == [1]`. `remotecall_wait` /
+   `remotecall_fetch` to `myid()` deadlocks — the Distributed waiter
+   never runs on the calling task. Gate broadcasts with
+   `length(procs()) > 1` (then `workers()` are remote only; Dagger does
+   not import `nprocs`). `_map_workers` already calls `f()`
+   locally when `p == myid()`; do not reintroduce a self-remotecall
+   around `enable_logging!` / `get_logs!`.
+
+29. **Do not mutate TimespanLogging globals at another package's toplevel.**
+   `@logcategory` used to call `register_category!` while Dagger was
+   precompiling. Those writes land in TimespanLogging's arrays in the
+   *precompile process* and are discarded when TimespanLogging loads from
+   its own image; Dagger's baked `const` IDs then disagree with a fresh
+   runtime registry (or collide with MemPool/tests that register later).
+   Category IDs are assigned lazily on first `category_id` use. Keep it
+   that way — a `const ID = register_category!(...)` at Dagger toplevel
+   is not safe.

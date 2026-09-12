@@ -27,7 +27,7 @@ if !isdefined(Base, :get_extension)
 end
 
 import TimespanLogging
-import TimespanLogging: timespan_start, timespan_finish
+import TimespanLogging: timespan_start, timespan_finish, @logstart, @logfinish
 
 import Adapt
 

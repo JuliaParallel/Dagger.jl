@@ -131,7 +131,7 @@ jobs:
           arch: x64
       - uses: julia-actions/cache@v3
       - name: Test TimespanLogging
-        run: julia --project=. -e 'using Pkg; Pkg.instantiate(); Pkg.develop(;path="lib/TimespanLogging"); Pkg.test("TimespanLogging")'
+        run: julia --project=. -e 'using Pkg; Pkg.develop(;path="lib/TimespanLogging"); Pkg.instantiate(); Pkg.test("TimespanLogging")'
 
   daggerwebdash:
     name: Julia 1 - DaggerWebDash
@@ -146,7 +146,7 @@ jobs:
           arch: x64
       - uses: julia-actions/cache@v3
       - name: Test DaggerWebDash
-        run: julia -e 'using Pkg; Pkg.develop(;path=pwd()); Pkg.develop(;path="lib/TimespanLogging"); Pkg.develop(;path="lib/DaggerWebDash"); include("lib/DaggerWebDash/test/runtests.jl")'
+        run: julia -e 'using Pkg; Pkg.develop([PackageSpec(path=pwd()), PackageSpec(path="lib/TimespanLogging"), PackageSpec(path="lib/DaggerWebDash")]); include("lib/DaggerWebDash/test/runtests.jl")'
 
   benchmarks:
     name: Benchmarks (vs master)
@@ -437,7 +437,7 @@ jobs:
       # feature and is silently ignored on 1.10 (LTS), which would otherwise
       # resolve a stale registered Dagger lacking the MPI API (`accelerate!`).
       - name: Instantiate CPU MPI environment
-        run: julia --project=test/mpienv -e 'using Pkg; Pkg.develop(PackageSpec(path=pwd())); Pkg.instantiate()'
+        run: julia --project=test/mpienv -e 'using Pkg; Pkg.develop([PackageSpec(path=pwd()), PackageSpec(path="lib/TimespanLogging")]); Pkg.instantiate()'
       - name: Run CPU MPI tests
         run: julia --project=test/mpienv test/run_mpi.jl ${{ matrix.ranks }} 2 test/mpi.jl
 
@@ -462,6 +462,6 @@ jobs:
           arch: x64
       - uses: julia-actions/cache@v3
       - name: Instantiate OpenCL MPI environment
-        run: julia --project=test/openclenv -e 'using Pkg; Pkg.develop(PackageSpec(path=pwd())); Pkg.instantiate()'
+        run: julia --project=test/openclenv -e 'using Pkg; Pkg.develop([PackageSpec(path=pwd()), PackageSpec(path="lib/TimespanLogging")]); Pkg.instantiate()'
       - name: Run OpenCL MPI tests
         run: julia --project=test/openclenv test/run_mpi.jl 2 2 test/mpi_opencl.jl

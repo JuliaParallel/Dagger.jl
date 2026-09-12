@@ -365,9 +365,9 @@ function enqueue_remainder_copy_to!(state::DataDepsState, dest_space::MemorySpac
     ctx = Sch.eager_context()
     logging = !(ctx.log_sink isa TimespanLogging.NoOpLog)
     id = logging ? rand(UInt) : UInt(0)
-    logging && timespan_start(ctx, :datadeps_copy, (;id), (;))
+    logging && @logstart ctx LogDatadepsCopy LogDatadepsCopyId(id) nothing
     copy_task = Dagger.@spawn scope=dest_scope exec_scope=dest_scope syncdeps=remainder_syncdeps meta=true tag=datadeps_task_tag() Dagger.move!(remainder_aliasing, dest_space, source_space, arg_dest, arg_source)
-    logging && timespan_finish(ctx, :datadeps_copy, (;id), (;thunk_id=copy_task.uid, from_space=source_space, to_space=dest_space, arg_w, from_arg=arg_source, to_arg=arg_dest))
+    logging && @logfinish ctx LogDatadepsCopy LogDatadepsCopyId(id) (;thunk_id=copy_task.uid, from_space=source_space, to_space=dest_space, arg_w, from_arg=arg_source, to_arg=arg_dest)
 
     # This copy task reads the sources and writes to the target
     for ainfo in source_ainfos
@@ -424,9 +424,9 @@ function enqueue_remainder_copy_from!(state::DataDepsState, dest_space::MemorySp
     ctx = Sch.eager_context()
     logging = !(ctx.log_sink isa TimespanLogging.NoOpLog)
     id = logging ? rand(UInt) : UInt(0)
-    logging && timespan_start(ctx, :datadeps_copy, (;id), (;))
+    logging && @logstart ctx LogDatadepsCopy LogDatadepsCopyId(id) nothing
     copy_task = Dagger.@spawn scope=dest_scope exec_scope=dest_scope syncdeps=remainder_syncdeps meta=true tag=datadeps_task_tag() Dagger.move!(remainder_aliasing, dest_space, source_space, arg_dest, arg_source)
-    logging && timespan_finish(ctx, :datadeps_copy, (;id), (;thunk_id=copy_task.uid, from_space=source_space, to_space=dest_space, arg_w, from_arg=arg_source, to_arg=arg_dest))
+    logging && @logfinish ctx LogDatadepsCopy LogDatadepsCopyId(id) (;thunk_id=copy_task.uid, from_space=source_space, to_space=dest_space, arg_w, from_arg=arg_source, to_arg=arg_dest)
 
     # This copy task reads the sources and writes to the target
     for ainfo in source_ainfos
@@ -463,9 +463,9 @@ function enqueue_copy_to!(state::DataDepsState, dest_space::MemorySpace, arg_w::
     ctx = Sch.eager_context()
     logging = !(ctx.log_sink isa TimespanLogging.NoOpLog)
     id = logging ? rand(UInt) : UInt(0)
-    logging && timespan_start(ctx, :datadeps_copy, (;id), (;))
+    logging && @logstart ctx LogDatadepsCopy LogDatadepsCopyId(id) nothing
     copy_task = Dagger.@spawn scope=dest_scope exec_scope=dest_scope syncdeps=copy_syncdeps meta=true tag=datadeps_task_tag() Dagger.move!(dep_mod, dest_space, source_space, arg_dest, arg_source)
-    logging && timespan_finish(ctx, :datadeps_copy, (;id), (;thunk_id=copy_task.uid, from_space=source_space, to_space=dest_space, arg_w, from_arg=arg_source, to_arg=arg_dest))
+    logging && @logfinish ctx LogDatadepsCopy LogDatadepsCopyId(id) (;thunk_id=copy_task.uid, from_space=source_space, to_space=dest_space, arg_w, from_arg=arg_source, to_arg=arg_dest)
 
     # This copy task reads the source and writes to the target
     add_reader!(state, arg_w, source_space, source_ainfo, copy_task, write_num)
@@ -498,9 +498,9 @@ function enqueue_copy_from!(state::DataDepsState, dest_space::MemorySpace, arg_w
     ctx = Sch.eager_context()
     logging = !(ctx.log_sink isa TimespanLogging.NoOpLog)
     id = logging ? rand(UInt) : UInt(0)
-    logging && timespan_start(ctx, :datadeps_copy, (;id), (;))
+    logging && @logstart ctx LogDatadepsCopy LogDatadepsCopyId(id) nothing
     copy_task = Dagger.@spawn scope=dest_scope exec_scope=dest_scope syncdeps=copy_syncdeps meta=true tag=datadeps_task_tag() Dagger.move!(dep_mod, dest_space, source_space, arg_dest, arg_source)
-    logging && timespan_finish(ctx, :datadeps_copy, (;id), (;thunk_id=copy_task.uid, from_space=source_space, to_space=dest_space, arg_w, from_arg=arg_source, to_arg=arg_dest))
+    logging && @logfinish ctx LogDatadepsCopy LogDatadepsCopyId(id) (;thunk_id=copy_task.uid, from_space=source_space, to_space=dest_space, arg_w, from_arg=arg_source, to_arg=arg_dest)
 
     # This copy task reads the source and writes to the target
     add_reader!(state, arg_w, source_space, source_ainfo, copy_task, write_num)
