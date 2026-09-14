@@ -46,7 +46,7 @@ function linalg_suite(ctx; method, accels)
 
                 sub["solve (A\\b via lu)"] = @benchmarkable(wait(lu(A, RowMaximum()) \ b),
                     setup = (A = rand(Blocks($b, $b), $T, $N, $N);
-                             b = rand(Blocks($b), $T, $N); wait(A)),
+                             b = rand(Blocks($b), $T, $N); wait(A); wait(b)),
                     teardown = (A = nothing; b = nothing; @everywhere GC.gc()))
             end
 
@@ -70,7 +70,7 @@ function linalg_suite(ctx; method, accels)
             if fits_budget(dense_bytes(N; nmats=1, T=T))
                 sub["matvec (A*x)"] = @benchmarkable(wait(A * x),
                     setup = (A = rand(Blocks($b, $b), $T, $N, $N);
-                             x = rand(Blocks($b), $T, $N); wait(A)),
+                             x = rand(Blocks($b), $T, $N); wait(A); wait(x)),
                     teardown = (A = nothing; x = nothing; @everywhere GC.gc()))
             end
 
