@@ -67,6 +67,7 @@ end
 
 inc!(X) = (X .+= 1; nothing)
 add1!(X) = (X .+= 1; nothing)
+delayed_add1!(X) = (sleep(0.25); X .+= 1; nothing)
 scale2!(X) = (X .*= 2; nothing)
 sum_into!(r, X) = (r[] = Int(sum(X)); nothing)
 sum_into_f!(r, X) = (r[] = Float64(sum(X)); nothing)
@@ -170,6 +171,7 @@ end
         @test c.handle isa MPIExt.MPIRef
         @test Dagger.check_uniform(c.handle)
     end
+
 end
 
 @testset "check_uniform" begin
@@ -451,7 +453,11 @@ end
     r1 = min(1, nranks-1)
     r2 = min(2, nranks-1)
     Dagger.spawn_datadeps() do
-        Dagger.@spawn scope=rank_scope(r1) add1!(InOut(cv_top))
+        # Delay the first producer so the bottom-half copy reaches rank 0
+        # first. A whole-ainfo owner for both disjoint copy tasks used to let
+        # the following whole-chunk write run after only the faster copy, then
+        # the late top-half copy overwrote its result.
+        Dagger.@spawn scope=rank_scope(r1) delayed_add1!(InOut(cv_top))
         Dagger.@spawn scope=rank_scope(r2) scale2!(InOut(cv_bot))
         Dagger.@spawn scope=rank_scope(0) add1!(InOut(c))
     end

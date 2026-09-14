@@ -324,11 +324,22 @@ Enqueues a copy operation to update the remainder regions of an object before a 
 """
 function enqueue_remainder_copy_to!(state::DataDepsState, dest_space::MemorySpace, arg_w::ArgumentWrapper, remainder_aliasing::MultiRemainderAliasing,
                                     f, idx, dest_scope, task, write_num::Int)
-    for remainder in remainder_aliasing.remainders
+    remainders = remainder_aliasing.remainders
+    last_idx = length(remainders)
+    for (i, remainder) in enumerate(remainders)
         @check_uniform(remainder.space)
         @assert !isempty(remainder.spans)
         @check_uniform(remainder.spans)
-        enqueue_remainder_copy_to!(state, dest_space, arg_w, remainder, f, idx, dest_scope, task, write_num)
+        copy_task = enqueue_remainder_copy_to!(state, dest_space, arg_w,
+            remainder, f, idx, dest_scope, task, write_num)
+        if i < last_idx
+            # Every copy is recorded as the owner of the whole destination, so
+            # the final one replaces the earlier owners. Make that replacement
+            # truthful: once the final copy completes, all disjoint pieces have
+            # completed. Earlier copies remain mutually parallel, and this
+            # fuses the batch join into work we already had to schedule.
+            push!(remainders[last_idx].syncdeps, ThunkSyncdep(copy_task))
+        end
     end
 end
 function enqueue_remainder_copy_to!(state::DataDepsState, dest_space::MemorySpace, arg_w::ArgumentWrapper, remainder_aliasing::RemainderAliasing,
@@ -356,7 +367,6 @@ function enqueue_remainder_copy_to!(state::DataDepsState, dest_space::MemorySpac
     source_ainfos = copy(remainder_aliasing.ainfos)
     empty!(remainder_aliasing.ainfos)
     get_write_deps!(state, dest_space, target_ainfo, write_num, remainder_syncdeps)
-
     @dagdebug task.uid :spawn_datadeps "($(repr(f)))[$(idx-1)][$dep_mod] Remainder copy-to has $(length(remainder_syncdeps)) syncdeps"
 
     # Launch the remainder copy task
@@ -373,7 +383,9 @@ function enqueue_remainder_copy_to!(state::DataDepsState, dest_space::MemorySpac
     for ainfo in source_ainfos
         add_reader!(state, arg_w, source_space, ainfo, copy_task, write_num)
     end
-    add_writer!(state, arg_w, dest_space, target_ainfo, copy_task, write_num; copy_src=source_space)
+    add_writer!(state, arg_w, dest_space, target_ainfo, copy_task, write_num;
+                copy_src=source_space)
+    return copy_task
 end
 """
     enqueue_remainder_copy_from!(state::DataDepsState, target_ainfo::AliasingWrapper, arg, remainder_aliasing,
@@ -383,11 +395,17 @@ Enqueues a copy operation to update the remainder regions of an object back to t
 """
 function enqueue_remainder_copy_from!(state::DataDepsState, dest_space::MemorySpace, arg_w::ArgumentWrapper, remainder_aliasing::MultiRemainderAliasing,
                                       dest_scope, write_num::Int)
-    for remainder in remainder_aliasing.remainders
+    remainders = remainder_aliasing.remainders
+    last_idx = length(remainders)
+    for (i, remainder) in enumerate(remainders)
         @check_uniform(remainder.space)
         @assert !isempty(remainder.spans)
         @check_uniform(remainder.spans)
-        enqueue_remainder_copy_from!(state, dest_space, arg_w, remainder, dest_scope, write_num)
+        copy_task = enqueue_remainder_copy_from!(state, dest_space, arg_w,
+            remainder, dest_scope, write_num)
+        if i < last_idx
+            push!(remainders[last_idx].syncdeps, ThunkSyncdep(copy_task))
+        end
     end
 end
 function enqueue_remainder_copy_from!(state::DataDepsState, dest_space::MemorySpace, arg_w::ArgumentWrapper, remainder_aliasing::RemainderAliasing,
@@ -415,7 +433,6 @@ function enqueue_remainder_copy_from!(state::DataDepsState, dest_space::MemorySp
     source_ainfos = copy(remainder_aliasing.ainfos)
     empty!(remainder_aliasing.ainfos)
     get_write_deps!(state, dest_space, target_ainfo, write_num, remainder_syncdeps)
-
     @dagdebug nothing :spawn_datadeps "($(typeof(arg_w.arg)))[$dep_mod] Remainder copy-from has $(length(remainder_syncdeps)) syncdeps"
 
     # Launch the remainder copy task
@@ -432,7 +449,9 @@ function enqueue_remainder_copy_from!(state::DataDepsState, dest_space::MemorySp
     for ainfo in source_ainfos
         add_reader!(state, arg_w, source_space, ainfo, copy_task, write_num)
     end
-    add_writer!(state, arg_w, dest_space, target_ainfo, copy_task, write_num; copy_src=source_space)
+    add_writer!(state, arg_w, dest_space, target_ainfo, copy_task, write_num;
+                copy_src=source_space)
+    return copy_task
 end
 
 # FIXME: Document me

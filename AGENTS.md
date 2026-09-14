@@ -359,3 +359,15 @@ lesson.
    planning has nearly or completely finished, serializing planning against
    execution. This is especially costly for iterative solvers, which execute
    many small datadeps regions. Tune the two queue types independently.
+
+35. **A whole-region copy owner must represent the whole copy batch.** A
+   remainder can be assembled by several copy tasks from disjoint source
+   spaces. Registering each task as the owner of the whole destination makes
+   the last registration replace the earlier ones; unless that last task is a
+   causal successor of the other copies, a whole-region consumer waits for one
+   piece and a late copy can overwrite its result. Fuse the join into the final
+   copy by making it depend on the earlier copies (which may remain mutually
+   parallel), then the one recorded owner truthfully means "the whole batch is
+   complete." Registering every exact destination span is correct too, but is a
+   performance cliff for halo exchange: a 64-tile stencil produced hundreds of
+   megabytes of interval-tree/overlap bookkeeping and regressed by 7–8x.
