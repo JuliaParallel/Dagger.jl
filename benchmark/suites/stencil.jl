@@ -118,38 +118,38 @@ function stencil_suite(ctx; method, accels)
 
                 if wrap_ok
                     sub["neighbors (Wrap)"] = @benchmarkable(stencil_neighbors_wrap!(A, B),
-                        setup = (A = ones(Blocks($b, $b), $T, $N, $N); B = zeros(Blocks($b, $b), $T, $N, $N); wait(A)),
+                        setup = (A = ones(Blocks($b, $b), $T, $N, $N); B = zeros(Blocks($b, $b), $T, $N, $N); wait(A); wait(B)),
                         teardown = (A = nothing; B = nothing; @everywhere GC.gc()))
                 end
 
                 if pad_ok
                     sub["neighbors (Pad)"] = @benchmarkable(stencil_neighbors_pad!(A, B),
-                        setup = (A = ones(Blocks($b, $b), $T, $N, $N); B = zeros(Blocks($b, $b), $T, $N, $N); wait(A)),
+                        setup = (A = ones(Blocks($b, $b), $T, $N, $N); B = zeros(Blocks($b, $b), $T, $N, $N); wait(A); wait(B)),
                         teardown = (A = nothing; B = nothing; @everywhere GC.gc()))
                 end
 
                 if clamp_ok
                     sub["neighbors (Clamp)"] = @benchmarkable(stencil_neighbors_clamp!(A, B),
-                        setup = (A = ones(Blocks($b, $b), $T, $N, $N); B = zeros(Blocks($b, $b), $T, $N, $N); wait(A)),
+                        setup = (A = ones(Blocks($b, $b), $T, $N, $N); B = zeros(Blocks($b, $b), $T, $N, $N); wait(A); wait(B)),
                         teardown = (A = nothing; B = nothing; @everywhere GC.gc()))
                 end
 
                 if reflect_ok
                     sub["neighbors (Reflect)"] = @benchmarkable(stencil_neighbors_reflect!(A, B),
-                        setup = (A = ones(Blocks($b, $b), $T, $N, $N); B = zeros(Blocks($b, $b), $T, $N, $N); wait(A)),
+                        setup = (A = ones(Blocks($b, $b), $T, $N, $N); B = zeros(Blocks($b, $b), $T, $N, $N); wait(A); wait(B)),
                         teardown = (A = nothing; B = nothing; @everywhere GC.gc()))
                 end
 
                 if update_ok
                     sub["update (+)"] = @benchmarkable(stencil_update_plus!(A, B),
-                        setup = (A = ones(Blocks($b, $b), $T, $N, $N); B = zeros(Blocks($b, $b), $T, $N, $N); wait(A)),
+                        setup = (A = ones(Blocks($b, $b), $T, $N, $N); B = zeros(Blocks($b, $b), $T, $N, $N); wait(A); wait(B)),
                         teardown = (A = nothing; B = nothing; @everywhere GC.gc()))
                 end
 
                 if multi_ok
                     sub["multi-expr"] = @benchmarkable(stencil_multi_expr!(A, B, $T),
                         setup = (A = zeros(Blocks($b, $b), $T, $N, $N);
-                                 B = zeros(Blocks($b, $b), $T, $N, $N); wait(A)),
+                                 B = zeros(Blocks($b, $b), $T, $N, $N); wait(A); wait(B)),
                         teardown = (A = nothing; B = nothing; @everywhere GC.gc()))
                 end
             end

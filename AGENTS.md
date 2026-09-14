@@ -324,3 +324,10 @@ lesson.
    Category IDs are assigned lazily on first `category_id` use. Keep it
    that way — a `const ID = register_category!(...)` at Dagger toplevel
    is not safe.
+
+30. **Benchmark fixtures must be fully awaited.** DArray construction is
+   asynchronous: if setup launches `A` and `B` but waits only for `A`, the
+   timed body inherits an arbitrary fraction of `B`'s allocation and scheduling
+   work. That contamination is placement- and timing-dependent, so a scheduler
+   improvement can look like a multi-fold regression. Wait every fixture that
+   the measured operation consumes.
