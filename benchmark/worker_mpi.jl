@@ -16,6 +16,8 @@
 #   that completed (in sorted-keypath order).
 # - `results_mpi_manifest.json`: [{keypath, file}, ...] pairing each
 #   completed leaf's key path to its result file.
+# - `error_mpi_rank_<rank>.json`: a rank-local `CapturedException`, written
+#   before aborting the communicator when benchmark work fails.
 # - `done`: written last, once every benchmark has been attempted.
 #
 # Note this worker does not have worker.jl's per-scale OOM isolation: a
@@ -187,13 +189,24 @@ for (keypath, bench) in leaves
         trial = run_mpi_benchmark(bench)
         rank == 0 && push!(results, (kp, trial))
     catch err
+        bt = catch_backtrace()
+        # Any rank may be the first to fail, and MPI.Abort can terminate rank 0
+        # before it observes the same error. Give every failing rank its own
+        # sidecar so the orchestrator can report the first one that survives.
+        failure = (;
+            benchmark=join(kp, " / "),
+            rank,
+            exception=sprint(showerror, CapturedException(err, bt)),
+        )
+        atomic_write(joinpath(WORKDIR, "error_mpi_rank_$(rank).json"),
+                     JSON3.write(failure))
         if err isa OutOfMemoryError
             rank == 0 && @warn "[worker_mpi] OutOfMemoryError; aborting MPI job" benchmark = join(kp, " / ")
             flush(stdout); flush(stderr)
             MPI.Abort(comm, 137)
             exit(137)  # unreachable unless MPI.Abort fails to terminate us
         else
-            @error "[worker_mpi] Benchmark errored; aborting MPI job" rank benchmark = join(kp, " / ") exception = (err, catch_backtrace())
+            @error "[worker_mpi] Benchmark errored; aborting MPI job" rank benchmark = join(kp, " / ") exception = (err, bt)
             flush(stdout); flush(stderr)
             MPI.Abort(comm, 1)
             exit(1)  # unreachable unless MPI.Abort fails to terminate us

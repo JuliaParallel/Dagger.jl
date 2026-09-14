@@ -360,6 +360,18 @@ lesson.
    execution. This is especially costly for iterative solvers, which execute
    many small datadeps regions. Tune the two queue types independently.
 
+34. **A benchmark script shared across revisions must probe backend capability.**
+   Airspeed runs today's script against old Dagger code, and a generic suite can
+   also contain a leaf unsupported by the selected backend. MPI SVD, for
+   example, uses a Distributed-only processor grid and divides by zero before
+   sampling. Probe optional or newly backend-enabled operations while
+   constructing the suite, so unsupported leaves are absent rather than
+   aborting the comparison. When an external MPI worker does abort, persist
+   each failing rank's `CapturedException` before `MPI.Abort`: the first failure
+   may be off rank 0 and can terminate rank 0 before it writes anything, mpiexec
+   output may disappear from the parent runner's log, and a generic "worker
+   exited" message discards the only actionable diagnosis.
+
 35. **A whole-region copy owner must represent the whole copy batch.** A
    remainder can be assembled by several copy tasks from disjoint source
    spaces. Registering each task as the owner of the whole destination makes

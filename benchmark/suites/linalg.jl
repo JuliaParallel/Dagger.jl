@@ -20,6 +20,15 @@ function linalg_suite(ctx; method, accels)
     @assert accel == "cpu" "Linalg suite only supports CPU execution"
 
     T = Float64
+    # Some older Dagger revisions use a Distributed-only processor grid for
+    # tiled SVD. Under MPI that grid is empty and `_tile_index` divides by zero.
+    # This script is shared by both Airspeed revisions, so probe once and omit
+    # SVD where the revision/backend combination cannot execute it.
+    svd_ok = supported("linalg/svd") do
+        A = rand(Blocks(4, 4), T, 8, 8)
+        wait(A)
+        wait(svd(A).U)
+    end
     suite = BenchmarkGroup()
 
     for N in scales
@@ -60,7 +69,7 @@ function linalg_suite(ctx; method, accels)
             # SVD (tiled one-sided Jacobi) additionally holds the internally-copied
             # scratch matrix, the accumulated V factor, and (across multiple
             # workers) a restaged copy of A, on top of the resident input.
-            if fits_budget(dense_bytes(N; nmats=5, T=T))
+            if svd_ok && fits_budget(dense_bytes(N; nmats=5, T=T))
                 sub["svd"] = @benchmarkable(wait(svd(A).U),
                     setup = (A = rand(Blocks($b, $b), $T, $N, $N); wait(A)),
                     teardown = (A = nothing; @everywhere GC.gc()))
