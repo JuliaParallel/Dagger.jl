@@ -22,10 +22,9 @@
 # caught `OutOfMemoryError` aborts the *whole* MPI job (`MPI.Abort`) rather
 # than exiting only the local rank and letting the orchestrator retry smaller
 # scales, since a partially-alive rank set can't make collective progress.
-# Other exceptions are caught per-rank and just skip that one benchmark:
-# since every rank runs the identical deterministic computation, ranks are
-# expected to fail together at the same call, so no cross-rank coordination
-# is needed for the common case.
+# Any other exception aborts the MPI job. A partial SPMD result set is not a
+# trustworthy benchmark run, and continuing after one rank fails can deadlock
+# as soon as its peers enter their next collective.
 
 using BenchmarkTools
 using Distributed
@@ -126,8 +125,25 @@ end
 function run_mpi_benchmark(bench::BenchmarkTools.Benchmark)
     params = bench.params
 
+    # BenchmarkTools 1.8 changed its generated sample function from returning
+    # `(time, gctime, memory, allocs, value)` to writing the four measurements
+    # through a Ref. Keep the compatibility check here, at the one unavoidable
+    # use of BenchmarkTools' internal sampling API.
+    sample_ref = Ref{Tuple{Float64,Float64,Int,Int}}((0.0, 0.0, 0, 0))
+    new_sample_api = applicable(bench.samplefunc, bench.quote_vals, params,
+                                sample_ref, nothing)
+    function sample!(sample_params)
+        if new_sample_api
+            bench.samplefunc(bench.quote_vals, sample_params, sample_ref, nothing)
+            return sample_ref[]
+        else
+            result = bench.samplefunc(bench.quote_vals, sample_params)
+            return result[1:(end - 1)]
+        end
+    end
+
     wait(MPI.Ibarrier(comm))
-    bench.samplefunc(bench.quote_vals, BenchmarkTools.Parameters(params; evals=1))
+    sample!(BenchmarkTools.Parameters(params; evals=1))
 
     trial = BenchmarkTools.Trial(params)
     params.gctrial && BenchmarkTools.gcscrub()
@@ -139,8 +155,8 @@ function run_mpi_benchmark(bench::BenchmarkTools.Benchmark)
         # cooperatively yields instead.
         wait(MPI.Ibarrier(comm))
         sample_start = Base.time()
-        result = bench.samplefunc(bench.quote_vals, params)
-        push!(trial, result[1:(end - 1)]...)
+        result = sample!(params)
+        push!(trial, result...)
 
         # Do not charge this rank for time spent at the pre-sample barrier.
         # Sum the slowest rank's setup/body/teardown duration for each sample,
@@ -177,7 +193,10 @@ for (keypath, bench) in leaves
             MPI.Abort(comm, 137)
             exit(137)  # unreachable unless MPI.Abort fails to terminate us
         else
-            rank == 0 && @warn "[worker_mpi] Benchmark errored (skipped)" benchmark = join(kp, " / ") exception = (err, catch_backtrace())
+            @error "[worker_mpi] Benchmark errored; aborting MPI job" rank benchmark = join(kp, " / ") exception = (err, catch_backtrace())
+            flush(stdout); flush(stderr)
+            MPI.Abort(comm, 1)
+            exit(1)  # unreachable unless MPI.Abort fails to terminate us
         end
     end
 end

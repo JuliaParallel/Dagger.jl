@@ -342,3 +342,12 @@ lesson.
    12). Otherwise a fast rank also charges its next sample for waiting on a
    peer's preceding GC, creating large but fake timing regressions in short
    collective operations.
+
+32. **An empty benchmark suite is a benchmark failure, not a successful no-op.**
+   AirspeedVelocity adds its own `time_to_load` result, so an orchestrator that
+   swallows every leaf error still emits a plausible-looking green report with
+   one row. Require a nonempty manifest, and abort an SPMD run on a leaf error:
+   after one rank leaves a failed operation, attempting the next collective is
+   unsafe. Also treat BenchmarkTools' generated `samplefunc` as a versioned
+   internal API: 1.8 changed it from a two-argument function returning a tuple
+   to a four-argument function writing measurements through a `Ref`.

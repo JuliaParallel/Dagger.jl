@@ -299,10 +299,10 @@ function run_all_mpi()
 
     proc = spawn_worker()
     donepath = joinpath(WORKDIR, "done")
+    completed = false
     t0 = time()
     while !isfile(donepath)
         if !process_running(proc)
-            @error "MPI benchmark worker exited before signaling completion; producing partial results."
             break
         end
         if time() - t0 > PROC_TIMEOUT
@@ -312,13 +312,17 @@ function run_all_mpi()
         end
         sleep(POLL)
     end
+    completed = isfile(donepath)
     if process_running(proc)
         try; wait(proc); catch; end
     end
 
+    completed || error("MPI benchmark worker exited before signaling completion")
+
     manifestpath = joinpath(WORKDIR, "results_mpi_manifest.json")
-    isfile(manifestpath) || return results
+    isfile(manifestpath) || error("MPI benchmark worker produced no result manifest")
     manifest = JSON3.read(read(manifestpath, String))
+    isempty(manifest) && error("MPI benchmark worker produced an empty result manifest")
     for entry in manifest
         kp = String[string(k) for k in entry.keypath]
         resultpath = joinpath(WORKDIR, String(entry.file))
