@@ -331,3 +331,14 @@ lesson.
    work. That contamination is placement- and timing-dependent, so a scheduler
    improvement can look like a multi-fold regression. Wait every fixture that
    the measured operation consumes.
+
+31. **SPMD benchmarks need a rank-uniform sample loop.** BenchmarkTools applies
+   its `seconds` cutoff independently on each process; small timing differences
+   can make one MPI rank stop while a peer enters another collective sample,
+   deadlocking the next benchmark. Run one sample per rank at a time, use a
+   collective maximum to make the stop decision, and use a cooperatively-waited
+   `MPI.Ibarrier` after per-sample GC/teardown before timing the next sample (a
+   blocking `MPI.Barrier` has the same progress-engine deadlock risk as lesson
+   12). Otherwise a fast rank also charges its next sample for waiting on a
+   peer's preceding GC, creating large but fake timing regressions in short
+   collective operations.
