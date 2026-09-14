@@ -326,21 +326,21 @@ jobs:
       - name: Download default benchmark results
         if: always()
         continue-on-error: true
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           name: benchmark-results-default
           path: results-default
       - name: Download Distributed benchmark results
         if: always()
         continue-on-error: true
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           name: benchmark-results-distributed
           path: results-distributed
       - name: Download MPI benchmark results
         if: always()
         continue-on-error: true
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@v8
         with:
           name: benchmark-results-mpi
           path: results-mpi
