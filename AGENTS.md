@@ -383,3 +383,27 @@ lesson.
    complete." Registering every exact destination span is correct too, but is a
    performance cliff for halo exchange: a 64-tile stencil produced hundreds of
    megabytes of interval-tree/overlap bookkeeping and regressed by 7–8x.
+
+36. **Distributed benchmark kernels must exist on every worker before
+   sampling.** Defining an `@stencil` wrapper only on the driver serializes its
+   generated closure to whichever worker happens to receive a tile. Globals
+   used by the closure (`Clamp`, `Reflect`, etc.) can then be missing or too new
+   for that worker's world age, and even successful leaves randomly pay remote
+   compilation during a timed sample. Import macros/globals in one
+   `@everywhere` statement, then define the macro-using wrappers in a second
+   `@everywhere` statement (the import must be evaluated before remote macro
+   expansion). A one-block capability probe is not a distributed warmup.
+
+37. **BenchmarkTools sees only the driver process's allocations.** In a
+   Distributed benchmark, arbitrary tile placement makes the reported bytes
+   include however many payload tiles happened to execute on the driver. A
+   1024² `Float64` allocation consequently varied from 2–8 MiB with no global
+   allocation change, and task overhead varied with the driver's share too.
+   Give Distributed benchmark fixtures a deterministic balanced proc grid (the
+   array and stencil suites use `assignment=:cyclicrow` when
+   `length(procs()) > 1`) so both revisions measure the same local fraction of
+   the workload. Do not force that assignment under MPI: named cyclic grids are
+   built from Distributed processors, and an MPI rank's `procs()` is only `[1]`,
+   so the grid is empty and allocation divides by zero. Retain `:arbitrary`
+   there so the MPI-aware scheduler places tiles. The reported number is still
+   process-local; deterministic placement only makes the comparison meaningful.
