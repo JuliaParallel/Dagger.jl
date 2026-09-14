@@ -351,3 +351,11 @@ lesson.
    unsafe. Also treat BenchmarkTools' generated `samplefunc` as a versioned
    internal API: 1.8 changed it from a two-argument function returning a tuple
    to a four-argument function writing measurements through a `Ref`.
+
+33. **Synchronous and asynchronous submission need different batch sizes.** A
+   large asynchronous batch amortizes channel and scheduler overhead while its
+   submitter overlaps with continued planning. The same batch size on a
+   one-thread `BatchedEnqueueQueue` withholds every task in a short region until
+   planning has nearly or completely finished, serializing planning against
+   execution. This is especially costly for iterative solvers, which execute
+   many small datadeps regions. Tune the two queue types independently.

@@ -146,7 +146,7 @@ function flush_batch!(beq::BatchedEnqueueQueue)
 end
 
 """
-    AsyncEnqueueQueue(inner, lock; limit=DATADEPS_BATCH_LIMIT[])
+    AsyncEnqueueQueue(inner, lock; limit=DATADEPS_ASYNC_BATCH_LIMIT[])
 
 `BatchedEnqueueQueue` that hands each full batch to a submitter task rather than
 submitting it on the caller's thread.
@@ -181,7 +181,7 @@ mutable struct AsyncEnqueueQueue <: AbstractTaskQueue
     failure::Any
 end
 function AsyncEnqueueQueue(inner::AbstractTaskQueue, lock::ReentrantLock;
-                           limit::Int=DATADEPS_BATCH_LIMIT[])
+                           limit::Int=DATADEPS_ASYNC_BATCH_LIMIT[])
     chan = Channel{Union{Vector{DTaskPair},Base.Event}}(Inf)
     queue = AsyncEnqueueQueue(inner, lock, DTaskPair[], limit, chan, nothing, nothing)
     queue.submitter = Threads.@spawn _async_submit_loop(queue)
@@ -252,17 +252,22 @@ maybe_flush_batch!(beq::BatchedEnqueueQueue) = flush_batch!(beq)
 maybe_flush_batch!(aeq::AsyncEnqueueQueue) = flush_batch!(aeq)
 maybe_flush_batch!(::AbstractTaskQueue) = nothing
 
-"""
-Maximum number of tasks a hierarchical partition buffers before submitting.
+"""Maximum tasks buffered by a synchronous submitter.
 
-Sized from the two costs it trades off. Submitting one task at a time makes the
-scheduler round-trip about 40% of this path's per-task planning cost; batching
-amortizes it down, and measurably stops paying off past ~16 (a 256-task region
-over 4 workers plans at 69 us/task unbatched, 55 at 16, 53.5 unbounded). Against
-that, buffered tasks cannot start running, so the batch is what planning gets
-ahead of execution -- bounded here at 16 tasks' worth of planning.
-"""
-const DATADEPS_BATCH_LIMIT = Ref(16)
+Keep this small enough to start short regions before planning reaches their
+end; Krylov's vector operations are commonly only one or two batches long.
+Submission blocks planning here, so a large batch serializes planning against
+execution."""
+const DATADEPS_BATCH_LIMIT = Ref(4)
+
+"""Maximum tasks buffered by an asynchronous submitter.
+
+Submitting one task at a time makes the scheduler round-trip about 40% of this
+path's per-task planning cost; batching measurably stops paying off past ~16 (a
+256-task region over 4 workers plans at 69 us/task unbatched, 55 at 16, 53.5
+unbounded). The submitter overlaps that cost with planning, so it can use the
+larger batch without serializing planning against execution."""
+const DATADEPS_ASYNC_BATCH_LIMIT = Ref(16)
 
 """
 Whether uniform (SPMD) planning withholds a region's tasks until it has finished
