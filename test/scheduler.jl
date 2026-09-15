@@ -849,3 +849,14 @@ end
     @test timedwait(()->istaskdone(b), 60) == :ok
     istaskdone(b) && @test fetch(b) == 42
 end
+
+@testset "Load balancing across workers" begin
+    # Issue #663: without per-processor pressure in the task cost, every
+    # default-scope task lands on the scheduler's own worker ([1 => 40]);
+    # with it, tasks spread across workers.
+    if nprocs() > 1
+        slowid = i -> (sleep(0.1); myid())
+        ids = fetch.([Dagger.@spawn slowid(i) for i in 1:40])
+        @test length(unique(ids)) > 1
+    end
+end
