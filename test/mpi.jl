@@ -449,6 +449,7 @@ end
     cv_top = view(c, 1:2, 1:4)
     cv_bot = view(c, 3:4, 1:4)
     @test cv_top isa Dagger.ChunkView
+    whole_sum = Ref(0.0)
 
     r1 = min(1, nranks-1)
     r2 = min(2, nranks-1)
@@ -459,12 +460,16 @@ end
         # the late top-half copy overwrote its result.
         Dagger.@spawn scope=rank_scope(r1) delayed_add1!(InOut(cv_top))
         Dagger.@spawn scope=rank_scope(r2) scale2!(InOut(cv_bot))
+        # A whole-object read must wait for both disjoint writeback copies,
+        # even though neither copy covers the whole chunk by itself.
+        Dagger.@spawn scope=rank_scope(0) sum_into_f!(Out(whole_sum), In(c))
         Dagger.@spawn scope=rank_scope(0) add1!(InOut(c))
     end
 
     ref_blk = A[1:4, 1:4]
     ref_blk[1:2, :] .+= 1
     ref_blk[3:4, :] .*= 2
+    rank == 0 && @test whole_sum[] ≈ sum(ref_blk)
     ref_blk .+= 1
     # Collective uniform fetches: identical on every rank
     @test fetch(c) ≈ ref_blk

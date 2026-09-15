@@ -375,14 +375,15 @@ lesson.
 35. **A whole-region copy owner must represent the whole copy batch.** A
    remainder can be assembled by several copy tasks from disjoint source
    spaces. Registering each task as the owner of the whole destination makes
-   the last registration replace the earlier ones; unless that last task is a
-   causal successor of the other copies, a whole-region consumer waits for one
-   piece and a late copy can overwrite its result. Fuse the join into the final
-   copy by making it depend on the earlier copies (which may remain mutually
-   parallel), then the one recorded owner truthfully means "the whole batch is
-   complete." Registering every exact destination span is correct too, but is a
-   performance cliff for halo exchange: a 64-tile stencil produced hundreds of
-   megabytes of interval-tree/overlap bookkeeping and regressed by 7–8x.
+   the last registration replace the earlier ones; a whole-region consumer
+   then waits for one piece and a late copy can overwrite its result. Making
+   the last task depend on every earlier copy repairs that owner invariant,
+   but couples disjoint copies unnecessarily and puts the last one on the
+   critical path. Represent the logical write as a batch producer instead
+   (lesson 38). Registering every exact destination span is correct too, but
+   is a performance cliff for halo exchange: a 64-tile stencil produced
+   hundreds of megabytes of interval-tree/overlap bookkeeping and regressed
+   by 7–8x.
 
 36. **Distributed benchmark kernels must exist on every worker before
    sampling.** Defining an `@stencil` wrapper only on the driver serializes its
@@ -407,3 +408,15 @@ lesson.
    so the grid is empty and allocation divides by zero. Retain `:arbitrary`
    there so the MPI-aware scheduler places tiles. The reported number is still
    process-local; deterministic placement only makes the comparison meaningful.
+
+38. **A logical copy batch must keep every physical producer in every
+   dependency view.** When a `MultiRemainderAliasing` restores one whole-region
+   replica from disjoint pieces, launch each copy with its own source readers
+   and syncdeps, but do not let each copy rewrite the destination's whole
+   `ainfos_owner`, `arg_history`, or `arg_current`. After all copies are
+   launched, record one logical writer whose producer is the complete task
+   batch. Expand that producer in whole-object read/write dependencies,
+   historical remainder dependencies, and free-buffer syncdeps; widening only
+   the live owner silently leaves history or teardown waiting for one copy.
+   Keep the singleton-copy path direct so ordinary per-argument moves do not
+   allocate a batch vector.

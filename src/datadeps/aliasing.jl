@@ -385,6 +385,27 @@ logged_task_args(deps_vec::Vector{DataDepsTaskDependency}, infos::Vector{TaskArg
     [LoggedTaskArg(i.arg, i.pos, i.may_alias, i.inplace_move,
                    deps_vec[arg_deps_range(i)]) for i in infos]
 
+"A logical copy whose disjoint pieces may execute concurrently."
+struct CopyBatchOwner
+    tasks::Vector{DTask}
+    function CopyBatchOwner(tasks::Vector{DTask})
+        @assert length(tasks) > 1
+        new(tasks)
+    end
+end
+const WriterProducer = Union{DTask,CopyBatchOwner}
+
+@inline function append_producer_syncdeps!(syncdeps, task::DTask)
+    push!(syncdeps, ThunkSyncdep(task))
+    return
+end
+function append_producer_syncdeps!(syncdeps, batch::CopyBatchOwner)
+    for task in batch.tasks
+        push!(syncdeps, ThunkSyncdep(task))
+    end
+    return
+end
+
 struct HistoryEntry
     ainfo::AliasingWrapper
     space::MemorySpace
@@ -393,7 +414,7 @@ struct HistoryEntry
     # directly instead of re-resolving through live `ainfos_owner`, which may
     # later name a different task for the same ainfo or miss the producer when
     # only an overlapping ainfo is consulted.
-    task::DTask
+    task::WriterProducer
 end
 
 struct AliasedObjectCacheStore
@@ -722,7 +743,7 @@ mutable struct DataDepsState
     # Track writers ("owners") and readers
     # Updated as new writer and reader tasks are launched
     # Used by task dependency tracking to calculate syncdeps and ensure correct launch ordering
-    ainfos_owner::Dict{AliasingWrapper,Union{Pair{DTask,Int},Nothing}}
+    ainfos_owner::Dict{AliasingWrapper,Union{Pair{DTask,Int},Pair{CopyBatchOwner,Int},Nothing}}
     ainfos_readers::Dict{AliasingWrapper,Vector{Pair{DTask,Int}}}
 
     # Per-task scratch buffers filled by `populate_task_info!` and consumed by
@@ -755,7 +776,7 @@ mutable struct DataDepsState
         ainfos_lookup = AliasingLookup()
         ainfos_overlaps = Dict{AliasingWrapper,Set{AliasingWrapper}}()
 
-        ainfos_owner = Dict{AliasingWrapper,Union{Pair{DTask,Int},Nothing}}()
+        ainfos_owner = Dict{AliasingWrapper,Union{Pair{DTask,Int},Pair{CopyBatchOwner,Int},Nothing}}()
         ainfos_readers = Dict{AliasingWrapper,Vector{Pair{DTask,Int}}}()
 
         return new(arg_to_chunk, sparse_arg_wrap, arg_origin, remote_args, remote_arg_to_original, remote_arg_w, ainfo_arg, arg_history, arg_owner, arg_current, arg_overlaps, ainfo_backing_chunk,
@@ -1115,7 +1136,7 @@ function _get_write_deps!(state::DataDepsState, dest_space::MemorySpace, ainfo::
         other_task, other_write_num = other_task_write_num
         write_num == other_write_num && continue
         @dagdebug nothing :spawn_datadeps_sync "Sync with writer via $ainfo -> $other_ainfo"
-        push!(syncdeps, ThunkSyncdep(other_task))
+        append_producer_syncdeps!(syncdeps, other_task)
     end
 end
 function _get_read_deps!(state::DataDepsState, dest_space::MemorySpace, ainfo::AbstractAliasing, write_num, syncdeps)
@@ -1163,7 +1184,7 @@ function gather_overlap_syncdeps!(state::DataDepsState, ainfo::AliasingWrapper, 
         owner = get(state.ainfos_owner, other_ainfo, nothing)
         if owner !== nothing
             owner_task, owner_write_num = owner
-            owner_write_num != write_num && push!(syncdeps, ThunkSyncdep(owner_task))
+            owner_write_num != write_num && append_producer_syncdeps!(syncdeps, owner_task)
         end
         for (reader_task, reader_write_num) in get(state.ainfos_readers, other_ainfo, ())
             reader_write_num != write_num && push!(syncdeps, ThunkSyncdep(reader_task))
@@ -1192,7 +1213,13 @@ function assert_free_syncdeps!(state::DataDepsState, ainfo::AliasingWrapper, wri
         owner_task, owner_write_num = owner
         owner_write_num == write_num && continue
         will_alias(ainfo, other_ainfo) || continue
-        @assert ThunkSyncdep(owner_task) in syncdeps "gather_free_syncdeps! omitted a live writer $owner_task ($other_ainfo) for buffer overlapping $ainfo"
+        if owner_task isa CopyBatchOwner
+            for task in owner_task.tasks
+                @assert ThunkSyncdep(task) in syncdeps "gather_free_syncdeps! omitted a live copy $task ($other_ainfo) for buffer overlapping $ainfo"
+            end
+        else
+            @assert ThunkSyncdep(owner_task) in syncdeps "gather_free_syncdeps! omitted a live writer $owner_task ($other_ainfo) for buffer overlapping $ainfo"
+        end
     end
     for (other_ainfo, readers) in state.ainfos_readers
         for (reader_task, reader_write_num) in readers
@@ -1255,7 +1282,7 @@ function gather_free_syncdeps!(state::DataDepsState, space::MemorySpace, buf_ain
     assert_free_syncdeps!(state, wrapped, write_num, syncdeps)
     return
 end
-function add_writer!(state::DataDepsState, arg_w::ArgumentWrapper, dest_space::MemorySpace, ainfo::AbstractAliasing, task, write_num; copy_src::Union{MemorySpace,Nothing}=nothing)
+function add_writer!(state::DataDepsState, arg_w::ArgumentWrapper, dest_space::MemorySpace, ainfo::AbstractAliasing, task::WriterProducer, write_num; copied::Bool=false)
     state.ainfos_owner[ainfo] = task=>write_num
     empty!(state.ainfos_readers[ainfo])
 
@@ -1272,7 +1299,7 @@ function add_writer!(state::DataDepsState, arg_w::ArgumentWrapper, dest_space::M
     end
 
     # Track which spaces hold a fully-current replica of this region
-    if copy_src === nothing
+    if !copied
         # Task write: only the written space is current, and other spaces'
         # replicas of overlapping regions become stale
         # N.B. The `Set` is reused in place rather than replaced; nothing ever
@@ -1308,7 +1335,13 @@ function add_writer!(state::DataDepsState, arg_w::ArgumentWrapper, dest_space::M
     state.arg_owner[arg_w] = dest_space
 
     # Not necessary to assert a read, but conceptually it's true
-    add_reader!(state, arg_w, dest_space, ainfo, task, write_num)
+    if task isa CopyBatchOwner
+        for copy_task in task.tasks
+            add_reader!(state, arg_w, dest_space, ainfo, copy_task, write_num)
+        end
+    else
+        add_reader!(state, arg_w, dest_space, ainfo, task, write_num)
+    end
 end
 function add_reader!(state::DataDepsState, arg_w::ArgumentWrapper, dest_space::MemorySpace, ainfo::AbstractAliasing, task, write_num)
     push!(state.ainfos_readers[ainfo], task=>write_num)
