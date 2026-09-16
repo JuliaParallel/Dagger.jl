@@ -1426,7 +1426,8 @@ function generate_slot!(state::DataDepsState, dest_space, data)
     id = logging ? rand(Int) : 0
     logging && @logstart ctx LogMove LogMoveId(0, ArgPosition(), to_proc, id) data
     tid = something(DATADEPS_CURRENT_TASK[], (;uid=0)).uid
-    t0 = time_ns()
+    timing = HIER_TIMING[]
+    t0 = timing ? time_ns() : UInt64(0)
     data_chunk = if slot_is_already_in_place(data, orig_space, dest_space)
         # Nothing to move: the slot for data already in `dest_space` is the data
         # itself. Going through `move_rewrap` here would allocate a second Chunk
@@ -1439,12 +1440,14 @@ function generate_slot!(state::DataDepsState, dest_space, data)
         moved = with(DATADEPS_THUNK_ID=>tid) do
             remotecall_endpoint_toplevel(move_rewrap, current_acceleration(), aliased_object_cache, from_proc, to_proc, orig_space, dest_space, data)
         end
-        move_ns = time_ns() - t0
-        hier_log!(LogHierSlot, 0x01, LogHierSlotId(:moved), move_ns)
-        orig_space == dest_space && hier_log!(LogHierSlot, 0x01, LogHierSlotId(:samespace), move_ns)
+        if timing
+            move_ns = time_ns() - t0
+            hier_log!(LogHierSlot, 0x01, LogHierSlotId(:moved), move_ns)
+            orig_space == dest_space && hier_log!(LogHierSlot, 0x01, LogHierSlotId(:samespace), move_ns)
+        end
         moved
     end
-    hier_log!(LogHierSlot, 0x01, LogHierSlotId(:total), time_ns() - t0)
+    timing && hier_log!(LogHierSlot, 0x01, LogHierSlotId(:total), time_ns() - t0)
     logging && @logfinish ctx LogMove LogMoveId(0, ArgPosition(), to_proc, id) data_chunk
     @assert memory_space(data_chunk) == dest_space "space mismatch! $dest_space (dest) != $(memory_space(data_chunk)) (actual) ($(typeof(data)) (data) vs. $(typeof(data_chunk)) (chunk)), spaces ($orig_space -> $dest_space)"
     dest_space_args[data] = data_chunk

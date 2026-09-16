@@ -2,6 +2,45 @@ import Dagger: ChunkView, Chunk, AbstractAliasing, MemorySpace, ArgumentWrapper
 import Dagger: aliasing, memory_space
 using LinearAlgebra, Graphs
 
+@testset "Hierarchical timing gates" begin
+    # Exercise both the identity slot and the general move_rewrap path. Timing
+    # must remain available when enabled, independently of scheduler logging.
+    tsl = Dagger.TimespanLogging
+    old_timing = Dagger.HIER_TIMING[]
+    try
+        for timing in (false, true)
+            tsl.steal_typed(Dagger.LogHierAinfo)
+            tsl.steal_typed(Dagger.LogHierSlot)
+            Dagger.HIER_TIMING[] = timing
+            A = zeros(4)
+            chunk = Dagger.tochunk(A)
+            arg_ws = [ArgumentWrapper(chunk, identity)]
+            result = Dagger._compute_aliasing_batch(arg_ws)
+            @test only(result).second == Dagger.AliasingWrapper(aliasing(chunk))
+            state = Dagger.DataDepsState()
+            space = memory_space(chunk)
+            @test Dagger.generate_slot!(state, space, chunk) === chunk
+            @test fetch(Dagger.generate_slot!(state, space, view(chunk, 1:4))) == A
+            ainfo_events = tsl.steal_typed(Dagger.LogHierAinfo)
+            slot_events = tsl.steal_typed(Dagger.LogHierSlot)
+            if timing
+                @test length(ainfo_events) == 1
+                @test only(ainfo_events).data[1] > 0
+                @test only(ainfo_events).data[2] == 1
+                @test count(ev -> ev.id.kind === :total, slot_events) == 2
+                @test count(ev -> ev.id.kind === :moved, slot_events) == 1
+                @test count(ev -> ev.id.kind === :samespace, slot_events) == 1
+                @test all(ev -> ev.data > 0, slot_events)
+            else
+                @test isempty(ainfo_events)
+                @test isempty(slot_events)
+            end
+        end
+    finally
+        Dagger.HIER_TIMING[] = old_timing
+    end
+end
+
 @testset "Memory Aliasing" begin
     A = rand(4)
     a = Dagger.aliasing(A)

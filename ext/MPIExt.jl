@@ -260,7 +260,8 @@ function Dagger.batch_ainfos(accel::MPIAcceleration, objs::Vector, dep_mods::Vec
     comm = accel.comm
     rank = MPI.Comm_rank(comm)
     check_uniform(UInt64(n))
-    t0 = time_ns()
+    timing = Dagger.HIER_TIMING[]
+    t0 = timing ? time_ns() : UInt64(0)
 
     owners = Vector{Int}(undef, n)
     ainfos = Vector{Union{Nothing,AbstractAliasing}}(nothing, n)
@@ -303,7 +304,7 @@ function Dagger.batch_ainfos(accel::MPIAcceleration, objs::Vector, dep_mods::Vec
         # lookup of the same object agree even if an entry was already there.
         results[i] = Dagger.memoize_ainfo!(Dagger.ainfo_memo_key(objs[i], dep_mods[i]), ainfo)
     end
-    Dagger.hier_log!(Dagger.LogHierAinfo, 0x01, Dagger.LogHierAinfoId(), (time_ns() - t0, n))
+    timing && Dagger.hier_log!(Dagger.LogHierAinfo, 0x01, Dagger.LogHierAinfoId(), (time_ns() - t0, n))
     return results
 end
 

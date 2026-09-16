@@ -420,3 +420,10 @@ lesson.
    the live owner silently leaves history or teardown waiting for one copy.
    Keep the singleton-copy path direct so ordinary per-argument moves do not
    allocate a batch vector.
+
+39. **Gate diagnostic work at the call site, not only inside the logger.**
+   `hier_log!` checks `HIER_TIMING[]`, but Julia evaluates its arguments before
+   that check. Unconditional `time_ns()` calls around per-argument aliasing and
+   slot creation therefore survived with timing disabled. Gate both the start
+   timestamp and the finish/event argument evaluation; a disabled diagnostic
+   should not pay for the measurement it discards.

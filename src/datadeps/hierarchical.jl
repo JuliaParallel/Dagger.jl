@@ -964,9 +964,10 @@ function _compute_aliasing_batch(arg_ws::Vector{ArgumentWrapper})
     else
         for i in 1:n
             arg_w = arg_ws[i]
-            t0 = time_ns()
+            timing = HIER_TIMING[]
+            t0 = timing ? time_ns() : UInt64(0)
             ainfo = AliasingWrapper(aliasing(accel, arg_w.arg, arg_w.dep_mod))
-            hier_log!(LogHierAinfo, 0x01, LogHierAinfoId(), (time_ns() - t0, 1))
+            timing && hier_log!(LogHierAinfo, 0x01, LogHierAinfoId(), (time_ns() - t0, 1))
             results[i] = arg_w => ainfo
         end
     end
