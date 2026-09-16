@@ -105,10 +105,22 @@ compare_all_mpi_tag() = UInt32(MPI.tag_ub())
 function compare_all(value, comm)
     rank = MPI.Comm_rank(comm)
     size = MPI.Comm_size(comm)
+    size == 1 && return true
     tag = compare_all_mpi_tag()
+    # Integer checks dominate replicated planning. Every peer receives the
+    # exact same serialized value, so build its payload once rather than have
+    # MPI.isend serialize it anew for each peer. Keep the general transport for
+    # values which may use the raw-parts protocol (e.g. arrays).
+    serialized = value isa Integer ? MPI.serialize(value) : nothing
     for i in 0:(size-1)
         if i != rank
-            send_yield(value, comm, i, tag)
+            if serialized === nothing
+                send_yield(value, comm, i, tag)
+            else
+                @opcounter :send_yield_serialized
+                req = MPI.Isend(serialized, comm; dest=i, tag)
+                __wait_for_request(req, comm, rank, i, tag, "send_yield", "send")
+            end
         end
     end
     match = true

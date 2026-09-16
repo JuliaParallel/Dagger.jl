@@ -177,6 +177,11 @@ end
 @testset "check_uniform" begin
     @test Dagger.check_uniform(42)
     @test Dagger.check_uniform(hash((1, :a, "x")))
+    # Reused serialized payloads retain the general Integer wire format,
+    # including arbitrary precision and equality across integer types.
+    @test Dagger.check_uniform(big(2)^256)
+    @test Dagger.check_uniform(rank == 0 ? UInt8(42) : Int64(42))
+    @test MPIExt.compare_all([1, 2, 3], comm)
     # Rank-dependent values must be detected on every rank
     @test_throws ArgumentError Dagger.check_uniform(rank)
     # The compare stream stays aligned after a detected failure
