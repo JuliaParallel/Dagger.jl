@@ -458,3 +458,14 @@ lesson.
    native allocator. This controls the fixture, not the measured operation:
    out-of-place multiplication and Cholesky still allocate/place their own
    outputs normally, and neither scheduling heuristics nor thresholds change.
+
+43. **Broadcast delivery must wake only its own consumers.** One shared
+   condition for all `(root, tag)` slots makes a delivery wake every unrelated
+   waiter: draining 1024 tags one at a time took 395 ms, versus 3 ms with
+   per-slot conditions sharing the registry lock. Create conditions only when
+   a consumer actually blocks. Keep a slot alive until all its consumers have
+   left, including consumers already notified but still reacquiring the lock;
+   an empty FIFO alone does not mean its condition can be replaced. Heartbeats
+   and shutdown still notify every slot, and an empty consumer must also check
+   `running`: a consumer already woken by a heartbeat is outside the shutdown
+   notification queues and otherwise goes back to sleep after the relay stops.

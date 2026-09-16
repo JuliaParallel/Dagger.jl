@@ -1389,17 +1389,17 @@ end
 # tag from interleaving into a single queue, where no ordering rule applies.
 mutable struct BcastSlot
     values::Vector{Any}
-    BcastSlot() = new(Any[])
+    cond::Union{Threads.Condition,Nothing}
+    waiters::Int
+    BcastSlot() = new(Any[], nothing, 0)
 end
 
 mutable struct BcastState
     bcast_comm::MPI.Comm
     slots::Dict{Tuple{Int,UInt32},BcastSlot}
-    # Guards `slots` and wakes consumers. A condition rather than a plain lock
-    # so a consumer waiting on an undelivered payload sleeps instead of
-    # spinning: a datadeps region can have hundreds of tasks blocked on a
-    # broadcast at once, and polling them all would burn exactly the CPU the
-    # ranks need to *produce* those broadcasts.
+    # Guards `slots`; each slot's condition shares this lock but has its own
+    # wait queue. A delivery must only wake that (root, tag)'s consumers, not
+    # every task blocked on an unrelated broadcast in the region.
     cond::Threads.Condition
     running::Threads.Atomic{Bool}
     relay::Union{Task,Nothing}
@@ -1418,13 +1418,24 @@ bcast_state_for(comm::MPI.Comm) =
 
 bcast_serialize(x) = (io = IOBuffer(); Serialization.serialize(io, x); take!(io))
 
+function bcast_slot!(state::BcastState, key::Tuple{Int,UInt32})
+    slot = get(state.slots, key, nothing)
+    if slot === nothing
+        slot = BcastSlot()
+        state.slots[key] = slot
+    end
+    return slot
+end
+
 function bcast_deliver!(state::BcastState, root::Int, tag::UInt32, value)
     # `@lock`, not `lock(...) do`: the `do` block is a closure over `state`,
     # `root`, `tag` and `value`, which boxes them and allocates on a path the
     # relay runs for every delivered payload.
     @lock state.cond begin
-        push!(get!(BcastSlot, state.slots, (root, tag)).values, value)
-        notify(state.cond)
+        slot = bcast_slot!(state, (root, tag))
+        push!(slot.values, value)
+        cond = slot.cond
+        cond === nothing || notify(cond)
     end
     # A delivered payload is cross-rank progress even when it is not the one a
     # given consumer is waiting for (see `MPI_PROGRESS`).
@@ -1437,7 +1448,12 @@ end
 # deadlock detection -- no `Timer` involved, and so nothing that depends on a
 # thread reaching the scheduler's idle loop to service libuv.
 function bcast_heartbeat!(state::BcastState)
-    @lock state.cond notify(state.cond)
+    @lock state.cond begin
+        for slot in values(state.slots)
+            cond = slot.cond
+            cond === nothing || notify(cond)
+        end
+    end
     return
 end
 
@@ -1461,15 +1477,29 @@ function bcast_slot_wait(state::BcastState, root::Int, tag::UInt32)
     # a heap `Box`. Inlining the body keeps all of it on the stack; the `return`
     # below still releases the lock, via `@lock`'s `finally`.
     @lock state.cond begin
-        while true
-            slot = get(state.slots, key, nothing)
-            if slot !== nothing && !isempty(slot.values)
-                value = popfirst!(slot.values)
-                isempty(slot.values) && delete!(state.slots, key)
-                return value
+        slot = bcast_slot!(state, key)
+        slot.waiters += 1
+        try
+            while true
+                if !isempty(slot.values)
+                    return popfirst!(slot.values)
+                end
+                # A heartbeat/delivery may have already woken this consumer
+                # when teardown runs, leaving it outside the notified queues.
+                state.running[] || throw(ConcurrencyViolationError("MPI broadcast relay stopped while a consumer was waiting"))
+                timer = mpi_deadlock_detect(timer, rank, tag, "bcast_meta delivery", root)
+                # Already-delivered payloads need no condition allocation.
+                if slot.cond === nothing
+                    slot.cond = Threads.Condition(state.cond.lock)
+                end
+                wait(slot.cond::Threads.Condition)
             end
-            timer = mpi_deadlock_detect(timer, rank, tag, "bcast_meta delivery", root)
-            wait(state.cond)
+        finally
+            slot.waiters -= 1
+            # A woken consumer may not have reacquired the lock yet. Retain
+            # its slot even if another consumer drains the last payload, or
+            # the next delivery would notify a different condition.
+            isempty(slot.values) && slot.waiters == 0 && delete!(state.slots, key)
         end
     end
 end
@@ -1602,9 +1632,16 @@ function stop_bcast_relay!(accel_comm::MPI.Comm)
     # deadlock timer, so once it is gone nothing would ever wake a consumer
     # still waiting on a payload that is now never coming. Fail them instead of
     # letting teardown hang.
-    @lock state.cond notify(state.cond,
-                            ConcurrencyViolationError("MPI broadcast relay stopped while a consumer was waiting");
-                            error=true)
+    @lock state.cond begin
+        for slot in values(state.slots)
+            cond = slot.cond
+            if cond !== nothing
+                notify(cond,
+                       ConcurrencyViolationError("MPI broadcast relay stopped while a consumer was waiting");
+                       error=true)
+            end
+        end
+    end
     return nothing
 end
 
