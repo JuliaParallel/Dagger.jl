@@ -943,7 +943,7 @@ function _compute_aliasing_batch(arg_ws::Vector{ArgumentWrapper})
     # Task-local: safe to reuse across calls because the result is fully
     # consumed by the caller (copied into `arg_to_ainfo`) before this task
     # could re-enter this function for another region.
-    results = (@reusable_vector :compute_aliasing_batch_results Pair{ArgumentWrapper,AliasingWrapper} nothing 32)::Vector{Pair{ArgumentWrapper,AliasingWrapper}}
+    results = @reusable_vector :compute_aliasing_batch_results Pair{ArgumentWrapper,AliasingWrapper} nothing 32
     resize!(results, n)
     accel = current_acceleration()
     # Under uniform execution (MPI), aliasing may perform collectives that must

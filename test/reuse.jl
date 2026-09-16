@@ -1,6 +1,56 @@
 using Test
 import Dagger: ReusableLinkedList, ReusableDict, ReusableCache
 import Dagger: take_or_alloc!, maybe_take_or_alloc!, maybetake!, putback!
+import Dagger: @reusable_vector, @reusable_dict
+
+struct ReusableScratchTestEntry
+    value::Int
+end
+const ReusableScratchTestPair = Pair{Symbol,ReusableScratchTestEntry}
+const ReusableScratchTestKey = Int
+
+reuse_test_vector() = @reusable_vector :test_reusable_vector ReusableScratchTestPair nothing 32
+reuse_test_dict() = @reusable_dict :test_reusable_dict ReusableScratchTestKey Union{Nothing,ReusableScratchTestEntry} 0 nothing 32
+reuse_test_any_vector() = @reusable_vector :test_reusable_any_vector Any nothing 32
+reuse_test_abstract_dict() = @reusable_dict :test_reusable_abstract_dict Number Any 0 nothing 32
+
+@testset "Reusable scratch macros" begin
+    # Types and aliases belong to the caller, not the macro's defining module.
+    # @inferred checks the expansion itself, without a call-site assertion.
+    vector = @inferred reuse_test_vector()
+    @test vector isa Vector{ReusableScratchTestPair}
+    push!(vector, :entry => ReusableScratchTestEntry(1))
+    @test (@inferred reuse_test_vector()) === vector
+    @test isempty(vector)
+
+    dict = @inferred reuse_test_dict()
+    @test dict isa Dict{Int,Union{Nothing,ReusableScratchTestEntry}}
+    dict[1] = ReusableScratchTestEntry(1)
+    dict[2] = nothing
+    @test (@inferred reuse_test_dict()) === dict
+    @test isempty(dict)
+
+    # The container type remains concrete with abstract element/key/value types.
+    @test (@inferred reuse_test_any_vector()) isa Vector{Any}
+    @test (@inferred reuse_test_abstract_dict()) isa Dict{Number,Any}
+
+    # A different task gets independent scratch; taking it must not clear ours.
+    push!(vector, :entry => ReusableScratchTestEntry(2))
+    dict[1] = ReusableScratchTestEntry(2)
+    other_vector, other_dict = fetch(Threads.@spawn begin
+        task_vector = @inferred reuse_test_vector()
+        task_dict = @inferred reuse_test_dict()
+        return task_vector, task_dict
+    end)
+    @test isempty(other_vector)
+    @test isempty(other_dict)
+    @test other_vector !== vector
+    @test other_dict !== dict
+    @test length(vector) == 1
+    @test length(dict) == 1
+    empty!(vector)
+    empty!(dict)
+end
 
 @testset "ReusableCache Tests" begin
     @testset "Construction and Basic Properties" begin

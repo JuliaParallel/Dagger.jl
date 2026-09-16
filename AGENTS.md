@@ -428,11 +428,13 @@ lesson.
    timestamp and the finish/event argument evaluation; a disabled diagnostic
    should not pay for the measurement it discards.
 
-40. **Assert the concrete type of reusable scratch at the point of use.**
-   `@reusable_vector` expands through a non-const global `TaskLocalValue`, so
-   the expression infers as `Any` even though its runtime vector is typed.
-   Without a `::Vector{...}` assertion, iteration, element stores, and closures
-   capturing it lose that type throughout the hot loop. The aliasing-result
-   scratch introduced one boxed pair allocation per argument this way. Keep
-   reuse, but recover the concrete type before entering the loop; check the
-   return type with `@inferred` as well as the container's runtime type.
+40. **Reusable scratch macros must return their declared container types.**
+   `@reusable_vector` and `@reusable_dict` expand through non-const global
+   `TaskLocalValue`s. Without a type assertion, their expressions infer as
+   `Any` even though the runtime containers are typed: iteration, element
+   stores, and closures capturing them lose that type throughout the hot loop.
+   The aliasing-result scratch introduced one boxed pair allocation per
+   argument this way. Assert the container type inside the macros, before
+   `empty!`, rather than relying on each caller to do so. Escape the supplied
+   type expressions to resolve caller-defined types correctly, and check the
+   return types with `@inferred` as well as the containers' runtime types.

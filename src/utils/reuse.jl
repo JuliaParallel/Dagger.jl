@@ -565,19 +565,21 @@ end
 # N.B. Emptied on take (cheap when already empty), so users need no cleanup
 # registration for correctness — explicit `empty!` at the end of use remains
 # good hygiene to release references promptly.
+# The task-local globals are non-const, so assert the declared container type
+# before empty! to keep both that call and the caller's scratch use inferred.
 macro reusable_vector(name, T, null, N)
     vec_name = Symbol("__$(name)_TLV_ReusableVector")
     if !hasproperty(__module__, vec_name)
         __module__.eval(:(#=const=# $vec_name = $TaskLocalValue{$Vector{$T}}(()->$Vector{$T}())))
     end
-    return :(empty!($(esc(vec_name))[]))
+    return :(empty!($(esc(vec_name))[]::$Vector{$(esc(T))}))
 end
 macro reusable_dict(name, K, V, null_key, null_value, N)
     dict_name = Symbol("__$(name)_TLV_ReusableDict")
     if !hasproperty(__module__, dict_name)
         __module__.eval(:(#=const=# $dict_name = $TaskLocalValue{$Dict{$K,$V}}(()->$Dict{$K,$V}())))
     end
-    return :(empty!($(esc(dict_name))[]))
+    return :(empty!($(esc(dict_name))[]::$Dict{$(esc(K)),$(esc(V))}))
 end
 
 mutable struct ReusableTaskCache
