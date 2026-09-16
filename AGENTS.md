@@ -469,3 +469,14 @@ lesson.
    and shutdown still notify every slot, and an empty consumer must also check
    `running`: a consumer already woken by a heartbeat is outside the shutdown
    notification queues and otherwise goes back to sleep after the relay stops.
+
+44. **An uncontended MPI receive needs a lease, not an event.** Uniformity
+   checks made the old receive guard create hundreds of thousands of
+   `Base.Event`s per sparse product, although its `(comm, source, tag)` stream
+   had only one receiver. Register `nothing` for an owned stream and create
+   a one-shot event only when a competitor arrives; delete the stream and
+   notify that event when the owner leaves. Never reset/recycle the event:
+   notified competitors can still be inside `wait`. Use explicit locked
+   blocks, since the old captured `our_event` lowered to a `Core.Box`, and
+   release the lease in `finally` on both serialized and in-place paths so a
+   failed receive cannot strand every subsequent receiver of that stream.

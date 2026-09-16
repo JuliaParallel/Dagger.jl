@@ -52,6 +52,7 @@ const nranks = MPI.Comm_size(comm)
 const accel = Dagger.current_acceleration()
 
 include("mpi-broadcast.jl")
+include("mpi-receive.jl")
 
 mpi_procs() = sort(collect(Dagger.get_processors(MPIExt.MPIClusterProc(comm)));
                    by=p->(p.rank, Dagger.short_name(p)))

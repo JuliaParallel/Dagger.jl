@@ -927,7 +927,36 @@ function DeadlockTimer()
                          round(UInt64, DEADLOCK_TIMEOUT_PERIOD[] * 1e9),
                          MPI_PROGRESS[])
 end
-const RECV_WAITING = LockedObject(Dict{Tuple{MPI.Comm, Int, Int}, Base.Event}())
+# A present key with `nothing` denotes an active receiver with no competitors.
+# Allocate an event only when a second receiver actually needs to wait.
+const RECV_WAITING = LockedObject(Dict{Tuple{MPI.Comm, Int, Int}, Union{Base.Event,Nothing}}())
+
+function acquire_recv!(key::Tuple{MPI.Comm,Int,Int})
+    while true
+        local other_event
+        @lock RECV_WAITING begin
+            waiting = Dagger.payload(RECV_WAITING)
+            if !haskey(waiting, key)
+                waiting[key] = nothing
+                return
+            end
+            other_event = waiting[key]
+            if other_event === nothing
+                other_event = Base.Event()
+                waiting[key] = other_event
+            end
+        end
+        wait(other_event::Base.Event)
+    end
+end
+
+function release_recv!(key::Tuple{MPI.Comm,Int,Int})
+    @lock RECV_WAITING begin
+        other_event = pop!(Dagger.payload(RECV_WAITING), key)
+        other_event === nothing || notify(other_event)
+    end
+    return
+end
 
 # Envelope for the out-of-place raw-bytes MPI path: serialize a small
 # descriptor, then send contiguous bitstype buffers. Types register via
@@ -1025,68 +1054,30 @@ function recv_yield!(buffer, comm, src, tag)
     end
     #Core.println("[rank $(MPI.Comm_rank(comm))][tag $tag] Starting recv! from [$src]")
 
-    # Ensure no other receiver is waiting
-    our_event = Base.Event()
-    @label retry
-    other_event = lock(RECV_WAITING) do waiting
-        if haskey(waiting, (comm, src, tag))
-            waiting[(comm, src, tag)]
-        else
-            waiting[(comm, src, tag)] = our_event
-            nothing
-        end
+    key = (comm, Int(src), Int(tag))
+    acquire_recv!(key)
+    try
+        return recv_yield_inplace!(buffer, comm, rank, src, tag), true
+    finally
+        release_recv!(key)
     end
-    if other_event !== nothing
-        #Core.println("[rank $(MPI.Comm_rank(comm))][tag $tag] Waiting for other receiver...")
-        wait(other_event)
-        @goto retry
-    end
-
-    buffer = recv_yield_inplace!(buffer, comm, rank, src, tag)
-
-    lock(RECV_WAITING) do waiting
-        delete!(waiting, (comm, src, tag))
-        notify(our_event)
-    end
-
-    return buffer, true
-
 end
 
 function recv_yield(comm, src, tag)
     rank = MPI.Comm_rank(comm)
     #Core.println("[rank $(MPI.Comm_rank(comm))][tag $tag] Starting recv from [$src]")
 
-    # Ensure no other receiver is waiting
-    our_event = Base.Event()
-    @label retry
-    other_event = lock(RECV_WAITING) do waiting
-        if haskey(waiting, (comm, src, tag))
-            waiting[(comm, src, tag)]
-        else
-            waiting[(comm, src, tag)] = our_event
-            nothing
+    key = (comm, Int(src), Int(tag))
+    acquire_recv!(key)
+    try
+        value = recv_yield_serialized(comm, rank, src, tag)
+        if value isa InplaceInfo
+            return recv_yield_inplace(value, comm, rank, src, tag)
         end
+        return value
+    finally
+        release_recv!(key)
     end
-    if other_event !== nothing
-        #Core.println("[rank $(MPI.Comm_rank(comm))][tag $tag] Waiting for other receiver...")
-        wait(other_event)
-        @goto retry
-    end
-    #Core.println("[rank $(MPI.Comm_rank(comm))][tag $tag] Receiving...")
-
-    type = nothing
-    @label receive
-    value = recv_yield_serialized(comm, rank, src, tag)
-    if value isa InplaceInfo
-        value = recv_yield_inplace(value, comm, rank, src, tag)
-    end
-
-    lock(RECV_WAITING) do waiting
-        delete!(waiting, (comm, src, tag))
-        notify(our_event)
-    end
-    return value
 end
 
 # Device-resident dense array: receive directly when the MPI library is
