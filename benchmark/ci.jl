@@ -244,23 +244,6 @@ open(joinpath(OUTPUT_DIR, "report.md"), "w") do io
     println(io)
     job_summary_table(io, job_summary_rows)
     println(io)
-    println(io, "#### Median time")
-    println(io)
-    println(io, table)
-    println(io)
-    println(io, "#### Allocations / memory")
-    println(io)
-    println(io, alloc_table)
-    println(io)
-    if !isempty(plot_files)
-        println(io, "#### Plots")
-        println(io)
-        for f in plot_files
-            # `artifact://` references render inline in Buildkite annotations.
-            println(io, "![", basename(f), "](artifact://", relpath(f, dirname(OUTPUT_DIR)), ")")
-        end
-        println(io)
-    end
     if isempty(regressions)
         println(io, "No time regressions beyond ", pct(1 + THRESHOLD),
                 " or allocation regressions beyond ", pct(1 + ALLOC_THRESHOLD),
@@ -296,6 +279,24 @@ open(joinpath(OUTPUT_DIR, "report.md"), "w") do io
         end
         println(io)
         println(io, "</details>")
+    end
+    println(io)
+    println(io, "#### Median time")
+    println(io)
+    println(io, table)
+    println(io)
+    println(io, "#### Allocations / memory")
+    println(io)
+    println(io, alloc_table)
+    println(io)
+    if !isempty(plot_files)
+        println(io, "#### Plots")
+        println(io)
+        for f in plot_files
+            # `artifact://` references render inline in Buildkite annotations.
+            println(io, "![", basename(f), "](artifact://", relpath(f, dirname(OUTPUT_DIR)), ")")
+        end
+        println(io)
     end
 end
 
