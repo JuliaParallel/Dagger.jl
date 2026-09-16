@@ -12,7 +12,22 @@
 
 # Build a distributed symmetric positive-definite matrix (for Cholesky). `G*G'`
 # is PD almost surely for a full-rank square `G`.
-_spd(T, N, b) = (G = rand(Blocks(b, b), T, N, N); A = G * G'; wait(A); A)
+function _spd(T, N, b; assignment=:arbitrary)
+    G = rand(Blocks(b, b), T, N, N; assignment)
+    wait(G)
+    A = if assignment === :arbitrary
+        G * G'
+    else
+        # G's assignment does not propagate through similar(G). Allocate the
+        # SPD destination explicitly too, so Cholesky's input layout is fixed.
+        result = DArray{T}(undef, Blocks(b, b), N, N; assignment)
+        wait(result)
+        mul!(result, G, G')
+        result
+    end
+    wait(A)
+    return A
+end
 
 function linalg_suite(ctx; method, accels)
     @assert method == "dagger" "Linalg suite only supports `dagger` execution"
@@ -20,12 +35,16 @@ function linalg_suite(ctx; method, accels)
     @assert accel == "cpu" "Linalg suite only supports CPU execution"
 
     T = Float64
+    # Match the array/stencil suites: arbitrary fixture placement changes both
+    # data movement and the driver's allocation share across revisions/samples.
+    # Named cyclic grids are Distributed-only; leave MPI on its native allocator.
+    fixture_assignment = length(procs()) > 1 ? :cyclicrow : :arbitrary
     # Some older Dagger revisions use a Distributed-only processor grid for
     # tiled SVD. Under MPI that grid is empty and `_tile_index` divides by zero.
     # This script is shared by both Airspeed revisions, so probe once and omit
     # SVD where the revision/backend combination cannot execute it.
     svd_ok = supported("linalg/svd") do
-        A = rand(Blocks(4, 4), T, 8, 8)
+        A = rand(Blocks(4, 4), T, 8, 8; assignment=fixture_assignment)
         wait(A)
         wait(svd(A).U)
     end
@@ -38,31 +57,31 @@ function linalg_suite(ctx; method, accels)
             # gemm needs A and the result resident; factorizations copy internally.
             if fits_budget(dense_bytes(N; nmats=3, T=T))
                 sub["matmul (A*A)"] = @benchmarkable(wait(A * A),
-                    setup = (A = rand(Blocks($b, $b), $T, $N, $N); wait(A)),
+                    setup = (A = rand(Blocks($b, $b), $T, $N, $N; assignment=$fixture_assignment); wait(A)),
                     teardown = (A = nothing; @everywhere GC.gc()))
 
                 sub["syrk (A'*A)"] = @benchmarkable(wait(A' * A),
-                    setup = (A = rand(Blocks($b, $b), $T, $N, $N); wait(A)),
+                    setup = (A = rand(Blocks($b, $b), $T, $N, $N; assignment=$fixture_assignment); wait(A)),
                     teardown = (A = nothing; @everywhere GC.gc()))
 
                 sub["lu"] = @benchmarkable(wait(lu(A, RowMaximum()).factors),
-                    setup = (A = rand(Blocks($b, $b), $T, $N, $N); wait(A)),
+                    setup = (A = rand(Blocks($b, $b), $T, $N, $N; assignment=$fixture_assignment); wait(A)),
                     teardown = (A = nothing; @everywhere GC.gc()))
 
                 sub["qr"] = @benchmarkable(wait(qr(A).factors),
-                    setup = (A = rand(Blocks($b, $b), $T, $N, $N); wait(A)),
+                    setup = (A = rand(Blocks($b, $b), $T, $N, $N; assignment=$fixture_assignment); wait(A)),
                     teardown = (A = nothing; @everywhere GC.gc()))
 
                 sub["solve (A\\b via lu)"] = @benchmarkable(wait(lu(A, RowMaximum()) \ b),
-                    setup = (A = rand(Blocks($b, $b), $T, $N, $N);
-                             b = rand(Blocks($b), $T, $N); wait(A); wait(b)),
+                    setup = (A = rand(Blocks($b, $b), $T, $N, $N; assignment=$fixture_assignment);
+                             b = rand(Blocks($b), $T, $N; assignment=$fixture_assignment); wait(A); wait(b)),
                     teardown = (A = nothing; b = nothing; @everywhere GC.gc()))
             end
 
             # Cholesky additionally holds the SPD-construction temporary.
             if fits_budget(dense_bytes(N; nmats=4, T=T))
                 sub["cholesky"] = @benchmarkable(wait(cholesky(A).factors),
-                    setup = (A = _spd($T, $N, $b)),
+                    setup = (A = _spd($T, $N, $b; assignment=$fixture_assignment)),
                     teardown = (A = nothing; @everywhere GC.gc()))
             end
 
@@ -71,15 +90,15 @@ function linalg_suite(ctx; method, accels)
             # workers) a restaged copy of A, on top of the resident input.
             if svd_ok && fits_budget(dense_bytes(N; nmats=5, T=T))
                 sub["svd"] = @benchmarkable(wait(svd(A).U),
-                    setup = (A = rand(Blocks($b, $b), $T, $N, $N); wait(A)),
+                    setup = (A = rand(Blocks($b, $b), $T, $N, $N; assignment=$fixture_assignment); wait(A)),
                     teardown = (A = nothing; @everywhere GC.gc()))
             end
 
             # gemv is cheap (one matrix + two vectors).
             if fits_budget(dense_bytes(N; nmats=1, T=T))
                 sub["matvec (A*x)"] = @benchmarkable(wait(A * x),
-                    setup = (A = rand(Blocks($b, $b), $T, $N, $N);
-                             x = rand(Blocks($b), $T, $N); wait(A); wait(x)),
+                    setup = (A = rand(Blocks($b, $b), $T, $N, $N; assignment=$fixture_assignment);
+                             x = rand(Blocks($b), $T, $N; assignment=$fixture_assignment); wait(A); wait(x)),
                     teardown = (A = nothing; x = nothing; @everywhere GC.gc()))
             end
 

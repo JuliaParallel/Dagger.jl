@@ -448,3 +448,13 @@ lesson.
    wrapper. Keep the local/MPI path unchanged: it already fills that memo.
    A typed merge barrier also prevents `remotecall_fetch`'s `Any` result from
    erasing the result container's type in the per-argument loop.
+
+42. **Fix the SPD fixture's destination placement, not just its input's.**
+   Giving `G` a cyclic assignment does not give `G * G'` that assignment:
+   `similar(G)` allocates an arbitrarily placed result. A Cholesky benchmark
+   must explicitly allocate its SPD destination with the same assignment and
+   use `mul!` in untimed setup, or its input layout still varies between
+   samples/revisions. Keep named grids Distributed-only and leave MPI on its
+   native allocator. This controls the fixture, not the measured operation:
+   out-of-place multiplication and Cholesky still allocate/place their own
+   outputs normally, and neither scheduling heuristics nor thresholds change.
