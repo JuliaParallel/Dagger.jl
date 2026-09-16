@@ -8,6 +8,15 @@ using LinearAlgebra, Graphs
     tsl = Dagger.TimespanLogging
     old_timing = Dagger.HIER_TIMING[]
     try
+        # Also cover the threaded branch when the driver has multiple threads.
+        # The captured result buffer must infer concretely there as well.
+        Dagger.HIER_TIMING[] = false
+        parallel_args = [ArgumentWrapper(Dagger.tochunk(zeros(4)), identity)
+                         for _ in 1:8]
+        parallel_result = @inferred Dagger._compute_aliasing_batch(parallel_args)
+        @test length(parallel_result) == length(parallel_args)
+        @test all(p -> p.second == Dagger.AliasingWrapper(aliasing(p.first.arg)),
+                  parallel_result)
         for timing in (false, true)
             tsl.steal_typed(Dagger.LogHierAinfo)
             tsl.steal_typed(Dagger.LogHierSlot)
@@ -15,7 +24,7 @@ using LinearAlgebra, Graphs
             A = zeros(4)
             chunk = Dagger.tochunk(A)
             arg_ws = [ArgumentWrapper(chunk, identity)]
-            result = Dagger._compute_aliasing_batch(arg_ws)
+            result = @inferred Dagger._compute_aliasing_batch(arg_ws)
             @test only(result).second == Dagger.AliasingWrapper(aliasing(chunk))
             state = Dagger.DataDepsState()
             space = memory_space(chunk)

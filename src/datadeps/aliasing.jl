@@ -480,15 +480,15 @@ function resolve_pending!(cache::AliasedObjectCacheStore)
     # function (see the module docstring on deferred resolution being
     # SPMD-safe), so there is nothing left to alias by the time that could
     # happen.
-    entries = @reusable_vector :resolve_pending_entries Pair{AbstractAliasing,Chunk} nothing 32
+    entries = (@reusable_vector :resolve_pending_entries Pair{AbstractAliasing,Chunk} nothing 32)::Vector{Pair{AbstractAliasing,Chunk}}
     append!(entries, cache.pending)
     empty!(cache.pending)
     @opcounter :aliasing_resolve_pending
     @opcounter :aliasing_resolve_pending_entries length(entries)
     # Resolved as a batch: the whole point of deferring was to not pay a
     # rendezvous per copy, which asking one at a time here would reintroduce.
-    values = @reusable_vector :resolve_pending_values Chunk nothing 32
-    dep_mods = @reusable_vector :resolve_pending_dep_mods Any nothing 32
+    values = (@reusable_vector :resolve_pending_values Chunk nothing 32)::Vector{Chunk}
+    dep_mods = (@reusable_vector :resolve_pending_dep_mods Any nothing 32)::Vector{Any}
     for (_, value) in entries
         push!(values, value)
         push!(dep_mods, identity)
