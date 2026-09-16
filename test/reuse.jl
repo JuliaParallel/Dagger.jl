@@ -3,6 +3,8 @@ import Dagger: ReusableLinkedList, ReusableDict, ReusableCache
 import Dagger: take_or_alloc!, maybe_take_or_alloc!, maybetake!, putback!
 import Dagger: @reusable_vector, @reusable_dict
 
+include("reuse-task-cache.jl")
+
 struct ReusableScratchTestEntry
     value::Int
 end

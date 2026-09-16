@@ -480,3 +480,13 @@ lesson.
    blocks, since the old captured `our_event` lowered to a `Core.Box`, and
    release the lease in `finally` on both serialized and in-place paths so a
    failed receive cannot strand every subsequent receiver of that stream.
+
+45. **Task-pool capacity is not a reason to create every slot upfront.**
+   Completion and placement tasks can be short-lived, but each owns a
+   task-local fire cache with capacity 32. Creating all 32 tasks, channels,
+   and monitors on its first dispatch pays for 31 idle slots when that caller
+   dispatches only once. Initialize slots on demand without changing capacity
+   or the overflow policy; 100 single-use caches fell from 75,100 allocations
+   / 4,004,800 bytes to 6,800 / 296,000. Clear the dynamic scope at actual slot
+   creation, run its setup before scheduling, and register each dispatch
+   before publishing the payload. Finalization must skip unassigned slots.
