@@ -438,3 +438,13 @@ lesson.
    `empty!`, rather than relying on each caller to do so. Escape the supplied
    type expressions to resolve caller-defined types correctly, and check the
    return types with `@inferred` as well as the containers' runtime types.
+
+41. **Remote aliasing batches must seed the driver's region memo.** Phase 1
+   groups arguments by owner and computes aliasing remotely, but Distributed
+   RPCs do not inherit the caller's `CHUNK_AINFO_MEMO` scoped value. Keeping
+   those answers only in `arg_to_ainfo` makes Phase 4 ask the owners again.
+   Seed the memo when merging each remote batch, keyed by the original local
+   `Chunk`/`ChunkView` and dependency modifier, not the deserialized argument
+   wrapper. Keep the local/MPI path unchanged: it already fills that memo.
+   A typed merge barrier also prevents `remotecall_fetch`'s `Any` result from
+   erasing the result container's type in the per-argument loop.

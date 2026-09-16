@@ -50,6 +50,37 @@ using LinearAlgebra, Graphs
     end
 end
 
+@testset "Distributed aliasing batch memo" begin
+    chunks = Chunk[wid == myid() ? Dagger.tochunk(zeros(4,4)) :
+                                  remotecall_fetch(Dagger.tochunk, wid, zeros(4,4))
+                   for wid in procs()]
+    # Cover the direct local batch, a single remote owner, and parallel owner
+    # batches. Dependency modifiers and views must each keep their own memo key.
+    groups = [[first(chunks)], [last(chunks)], chunks]
+    for group in groups
+        arg_ws = Dict{ArgumentWrapper,ArgumentWrapper}()
+        for chunk in group
+            for arg_w in (ArgumentWrapper(chunk, identity),
+                          ArgumentWrapper(chunk, UpperTriangular),
+                          ArgumentWrapper(view(chunk, 1:2, :), identity))
+                arg_ws[arg_w] = arg_w
+            end
+        end
+        memo = Dagger.ChunkAinfoMemo()
+        Dagger.with(Dagger.CHUNK_AINFO_MEMO => memo) do
+            _, _, arg_to_ainfo = Dagger.build_aliasing_parallel(arg_ws)
+            for arg_w in keys(arg_ws)
+                key = Dagger.ainfo_memo_key(arg_w.arg, arg_w.dep_mod)
+                @test haskey(memo.entries, key)
+                # A cache miss must fail, not silently recompute the same answer.
+                cached = Dagger.memoized_ainfo(() -> error("aliasing batch was not memoized"), key)
+                @test cached === arg_to_ainfo[arg_w].inner
+                @test aliasing(Dagger.current_acceleration(), arg_w.arg, arg_w.dep_mod) === cached
+            end
+        end
+    end
+end
+
 @testset "Memory Aliasing" begin
     A = rand(4)
     a = Dagger.aliasing(A)

@@ -831,15 +831,7 @@ function build_aliasing_parallel(unique_arg_ws::Dict{ArgumentWrapper, ArgumentWr
         wid, worker_args = only(by_worker)
         results = wid == myid() ? batch_aliasing(current_acceleration(), worker_args) :
                                    remotecall_fetch(_compute_aliasing_batch, wid, worker_args)
-        # Key by the *local* `arg_w`, not the pair's: for a remote worker the
-        # returned `ArgumentWrapper` is a deserialized copy that need not be
-        # identity/hash-equal to the entry in `arg_ws_vec` we later look up
-        # (which would raise a `KeyError`). `_compute_aliasing_batch` preserves
-        # input order, so pair by index.
-        @assert length(results) == length(worker_args) "build_aliasing_parallel: _compute_aliasing_batch returned $(length(results)) results for $(length(worker_args)) args (wid=$wid)"
-        for i in eachindex(worker_args)
-            arg_to_ainfo[worker_args[i]] = results[i].second
-        end
+        _record_aliasing_batch!(arg_to_ainfo, worker_args, results, wid)
     else
         all_results_lock = ReentrantLock()
         @sync for (wid, worker_args) in by_worker
@@ -859,14 +851,8 @@ function build_aliasing_parallel(unique_arg_ws::Dict{ArgumentWrapper, ArgumentWr
                 else
                     remotecall_fetch(_compute_aliasing_batch, wid, worker_args)
                 end
-                # Key by the *local* `arg_w` (see single-worker note above): a
-                # remote worker returns deserialized `ArgumentWrapper` copies
-                # that may not compare equal to our `arg_ws_vec` lookup keys.
-                @assert length(results) == length(worker_args) "build_aliasing_parallel: _compute_aliasing_batch returned $(length(results)) results for $(length(worker_args)) args (wid=$wid)"
                 @lock all_results_lock begin
-                    for i in eachindex(worker_args)
-                        arg_to_ainfo[worker_args[i]] = results[i].second
-                    end
+                    _record_aliasing_batch!(arg_to_ainfo, worker_args, results, wid)
                 end
             end
         end
@@ -893,6 +879,28 @@ function build_aliasing_parallel(unique_arg_ws::Dict{ArgumentWrapper, ArgumentWr
     end
 
     return lookup, ainfos_overlaps, arg_to_ainfo
+end
+
+function _record_aliasing_batch!(arg_to_ainfo::Dict{ArgumentWrapper,AliasingWrapper},
+                                 worker_args::Vector{ArgumentWrapper},
+                                 results::Vector{Pair{ArgumentWrapper,AliasingWrapper}},
+                                 wid::Int)
+    @assert length(results) == length(worker_args) "build_aliasing_parallel: _compute_aliasing_batch returned $(length(results)) results for $(length(worker_args)) args (wid=$wid)"
+    # Pair with the local arguments by index: the returned wrappers have crossed
+    # serialization and need not be identity/hash-equal to the caller's keys.
+    # This barrier also restores the known batch type after remotecall_fetch.
+    for i in eachindex(worker_args)
+        arg_w = worker_args[i]
+        ainfo = results[i].second
+        arg_to_ainfo[arg_w] = ainfo
+        # Remote calls do not inherit the driver's ScopedValues memo. Phase 1
+        # already got the owner's answer, so retain it rather than asking again
+        # in Phase 4. Local batches (including MPI's override) seed it themselves.
+        if wid != myid() && (arg_w.arg isa Chunk || arg_w.arg isa ChunkView)
+            memoize_ainfo!(ainfo_memo_key(arg_w.arg, arg_w.dep_mod), ainfo.inner)
+        end
+    end
+    return
 end
 
 """
