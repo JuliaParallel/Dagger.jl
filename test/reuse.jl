@@ -1172,3 +1172,37 @@ end
         @test !haskey(dict, "apricot")  # New value not in dict
     end
 end
+
+@testset "LFU eviction equivalence" begin
+    function reference_lfu_get!(cache, key)
+        if haskey(cache.cache, key)
+            cache.freq[key] += 1
+            return cache.cache[key]
+        end
+        value = key[1]
+        cache.cache[key] = value
+        cache.freq[key] = 1
+        if length(cache.cache) > cache.max_size
+            _, lfu_key = findmin(cache.freq)
+            delete!(cache.cache, lfu_key)
+            delete!(cache.freq, lfu_key)
+        end
+        return value
+    end
+
+    # Include zero capacity, ties, retained hot entries and immediate eviction
+    # of new entries. Compare the exact contents/frequencies after every call.
+    for capacity in (0, 1, 8, 256)
+        current = Dagger.BasicLFUCache{Tuple{UInt,Symbol},Any}(capacity)
+        original = Dagger.BasicLFUCache{Tuple{UInt,Symbol},Any}(capacity)
+        rng = MersenneTwister(1729)
+        for _ in 1:1_000
+            key = (rand(rng, UInt(1):UInt(512)), :meta)
+            @test get!(() -> key[1], current, key) == reference_lfu_get!(original, key)
+            @test current.cache == original.cache
+            @test current.freq == original.freq
+        end
+        @test empty!(current) === current
+        @test isempty(current.cache) && isempty(current.freq)
+    end
+end

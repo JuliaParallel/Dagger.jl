@@ -20,7 +20,15 @@ function Base.get!(f, cache::BasicLFUCache{K,V}, key::K) where {K,V}
     cache.freq[key] = 1
     if length(cache.cache) > cache.max_size
         # Find the least frequently used key
-        _, lfu_key::K = findmin(cache.freq)
+        # `findmin(::Dict)` boxes its (frequency, key) result. Scan directly
+        # and keep the first minimum, preserving its iteration-order ties.
+        lfu_key, min_freq = first(cache.freq)
+        for (candidate, frequency) in cache.freq
+            if frequency < min_freq
+                lfu_key = candidate
+                min_freq = frequency
+            end
+        end
         delete!(cache.cache, lfu_key)
         delete!(cache.freq, lfu_key)
     end

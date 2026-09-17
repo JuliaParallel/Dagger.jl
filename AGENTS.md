@@ -503,3 +503,15 @@ lesson.
    population fell from 217 allocations / 9,088 bytes to 49 / 1,792, while
    cache hits stayed at 1 / 256. Keep keyword views instead of adding a copy
    to every signature, especially signatures whose defaults are already cached.
+
+47. **Even a typed `findmin(::Dict)` can box its result in an eviction loop.**
+   The defaults LFU allocated one `(frequency, key)` tuple per eviction
+   despite its concrete key/frequency types. A direct minimum-frequency scan
+   removes that allocation without changing capacity, admission or eviction
+   decisions. Initialize from the first dictionary entry and update only on
+   strict `<` so equal-frequency ties preserve the original iteration order.
+   Compare exact cache contents and frequencies against the old algorithm
+   after mixed hits/misses, including zero capacity. Ten thousand repeated
+   evictions fell from 10,000 allocations / 320,000 bytes to zero; cache-hit
+   behavior is unchanged. Together with lesson 46, cold default population
+   is 25 allocations / 1,024 bytes rather than 217 / 9,088.

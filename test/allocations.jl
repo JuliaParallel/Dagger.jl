@@ -81,6 +81,28 @@ end
     @test measured.bytes <= 4_000 * ALLOC_BOUND_MULTIPLIER
 end
 
+function exercise_lfu_evictions!(cache, key)
+    for _ in 1:1_000
+        get!(() -> nothing, cache, key)
+    end
+end
+
+@testset "LFU eviction allocations" begin
+    cache = Dagger.BasicLFUCache{Tuple{UInt,Symbol},Any}(16)
+    for i in 1:cache.max_size
+        key = (UInt(i), :meta)
+        cache.cache[key] = nothing
+        cache.freq[key] = 2
+    end
+    key = (UInt(1024), :meta)
+    measured = measure_steady_state_allocs() do
+        exercise_lfu_evictions!(cache, key)
+    end
+    @test !haskey(cache.cache, key)
+    @test measured.allocs <= 100 * ALLOC_BOUND_MULTIPLIER
+    @test measured.bytes <= 4_000 * ALLOC_BOUND_MULTIPLIER
+end
+
 # name => (; allocs, bytes) upper bounds (see header for how these are set).
 # Measured steady-state values at the time of writing are noted inline.
 const ALLOC_BOUNDS = Dict(
