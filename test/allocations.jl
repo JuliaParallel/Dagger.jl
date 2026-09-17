@@ -56,6 +56,31 @@ function measure_steady_state_allocs(f; warmup=10, runs=5)
     return (allocs=best_allocs, bytes=best_bytes)
 end
 
+# A full LFU cache can immediately evict a newly inserted signature when all
+# existing entries are more frequent. Warmup alone therefore does not cover
+# the default-option fallback; exercise repeated misses in a fresh task so
+# this test cannot disturb the scheduler's task-local defaults cache.
+@testset "Uncached option defaults" begin
+    measured = fetch(Threads.@spawn begin
+        cache = Dagger.SIGNATURE_DEFAULT_CACHE[]
+        empty!(cache)
+        for i in 1:cache.max_size
+            key = (UInt(i), :meta)
+            cache.cache[key] = nothing
+            cache.freq[key] = 2
+        end
+        sig = Dagger.Signature(Any[typeof(Dagger.allocate_array), typeof(rand),
+                                   Type{Float64}, Tuple{Int,Int}])
+        result = measure_steady_state_allocs() do
+            Dagger.populate_defaults!(Dagger.Options(), sig)
+        end
+        @test !haskey(cache.cache, (sig.hash_nokw, :meta))
+        result
+    end)
+    @test measured.allocs <= 100 * ALLOC_BOUND_MULTIPLIER
+    @test measured.bytes <= 4_000 * ALLOC_BOUND_MULTIPLIER
+end
+
 # name => (; allocs, bytes) upper bounds (see header for how these are set).
 # Measured steady-state values at the time of writing are noted inline.
 const ALLOC_BOUNDS = Dict(

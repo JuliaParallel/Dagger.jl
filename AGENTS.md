@@ -490,3 +490,16 @@ lesson.
    / 4,004,800 bytes to 6,800 / 296,000. Clear the dynamic scope at actual slot
    creation, run its setup before scheduling, and register each dispatch
    before publishing the payload. Finalization must skip unassigned slots.
+
+46. **Repeated calls do not necessarily warm the option-default cache.**
+   `BasicLFUCache` can immediately evict a newly inserted frequency-1 key
+   when every resident key is more frequent, so a new signature keeps taking
+   the default fallback after arbitrarily many warmups. Test that path with
+   a full cache in a fresh task, not by changing capacity or eviction policy.
+   Splat `Signature.sig` directly for non-keyword calls: splatting its
+   identical `sig_nokw` view boxes the view and an iteration pair per type.
+   The generic fallback also needs no specialization of its unused arguments;
+   leave type-dependent user overrides untouched. A four-type cold default
+   population fell from 217 allocations / 9,088 bytes to 49 / 1,792, while
+   cache hits stayed at 1 / 256. Keep keyword views instead of adding a copy
+   to every signature, especially signatures whose defaults are already cached.
