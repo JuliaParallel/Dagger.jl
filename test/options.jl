@@ -22,6 +22,45 @@
         (to.owner == 1 && to.tid == 1) ? SpecialFunc(1) : sf
 end
 
+option_default_target(x; ignored=nothing) = x
+Dagger.@option :meta option_default_target(Integer) = true
+Dagger.@option :get_result option_default_target(AbstractFloat) = true
+Dagger.default_option(::Val{:name}, ::Type{typeof(option_default_target)},
+                      ::Type{T}) where {T<:AbstractFloat} = string(T)
+
+@testset "Signature option defaults" begin
+    positional = Dagger.Signature(Any[typeof(option_default_target), Int])
+    keyword = Dagger.Signature(Any[typeof(Core.kwcall), @NamedTuple{ignored::String},
+                                   typeof(option_default_target), Int])
+    other_keyword = Dagger.Signature(Any[typeof(Core.kwcall), @NamedTuple{other::Float64},
+                                         typeof(option_default_target), Int])
+    @test positional.hash_nokw == keyword.hash_nokw == other_keyword.hash_nokw
+    @test positional.hash != keyword.hash
+
+    # Exercise both the vector and kwarg-view cache-miss paths, independently
+    # of the cache entries left by other tests in this task.
+    cache = Dagger.SIGNATURE_DEFAULT_CACHE[]
+    for sig in (positional, keyword, other_keyword)
+        for option in (:meta, :get_result)
+            key = (sig.hash_nokw, option)
+            delete!(cache.cache, key)
+            delete!(cache.freq, key)
+        end
+        opts = Dagger.populate_defaults!(Dagger.Options(), sig)
+        @test opts.meta === true
+        @test opts.get_result === nothing
+        @test Dagger.populate_defaults!(Dagger.Options(; meta=false), sig).meta === false
+    end
+
+    floating = Dagger.Signature(Any[typeof(option_default_target), Float64])
+    opts = Dagger.populate_defaults!(Dagger.Options(), floating)
+    @test opts.meta === nothing
+    @test opts.get_result === true
+    @test opts.name == "Float64"
+    @test Dagger.default_option(Val(:meta), typeof(option_default_target), String) === nothing
+    @test_throws ArgumentError Dagger.default_option(Val(:meta))
+end
+
 @testset "Scope propagation" begin
     first_wid = first(workers())
     last_wid = last(workers())

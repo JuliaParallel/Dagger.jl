@@ -225,6 +225,106 @@ _identity_hash(arg::Chunk, h::UInt=UInt(0)) = hash(arg.handle, hash(Chunk, h))
 _identity_hash(arg::SubArray, h::UInt=UInt(0)) = hash(arg.indices, hash(arg.offset1, hash(arg.stride1, _identity_hash(arg.parent, h))))
 _identity_hash(arg::CartesianIndices, h::UInt=UInt(0)) = hash(arg.indices, hash(typeof(arg), h))
 
+"""
+    ChunkAinfoMemo
+
+Per-region memo for the aliasing info of a `Chunk` / `ChunkView`.
+
+A chunk's aliasing info cannot be computed locally: under Distributed it takes a
+`remotecall_fetch` to the owner, and under MPI a broadcast from the owner that
+every rank has to join. Datadeps asks the same question repeatedly while planning
+one region -- once per unique argument to build the dependency DAG, again for
+every slot (`aliased_object!`, `aliasing!`), and again for the write-back
+epilogue -- so left unmemoized a single region spends hundreds of round-trips
+re-deriving a handful of distinct answers. Under MPI each of those is a
+*global synchronization point*, which is what makes replicated planning scale
+poorly with rank count.
+
+Memoization is per-region because aliasing info describes where a value's memory
+currently is: stable while one region plans (datadeps copies into existing
+buffers, it never relocates a live argument), but a chunk allocated by a later
+region may well reuse a freed address.
+
+Keys (`ainfo_memo_key`) combine the argument's identity, the dependency modifier
+and the acceleration, and are identical on every rank (chunk handles hash by rank
++ id). Uniform keys are what makes the memo safe under SPMD replay: every rank
+hits and misses on exactly the same calls, so the broadcasts that remain are
+still reached collectively by all ranks.
+"""
+struct ChunkAinfoMemo
+    entries::Dict{UInt,AbstractAliasing}
+    lock::ReentrantLock
+end
+ChunkAinfoMemo() = ChunkAinfoMemo(Dict{UInt,AbstractAliasing}(), ReentrantLock())
+
+const CHUNK_AINFO_MEMO = ScopedValue{Union{ChunkAinfoMemo,Nothing}}(nothing)
+
+"The memo key for `arg`'s aliasing info under `dep_mod`; see `ChunkAinfoMemo`."
+ainfo_memo_key(arg, dep_mod) = ainfo_memo_key(_identity_hash(arg), dep_mod)
+
+"""
+    ainfo_memo_key(idhash::UInt, dep_mod) -> UInt
+
+The memo key for an argument whose identity hash is already known (an indirect
+handle, e.g. an MPI wire value, keys on the chunk it stands in for).
+
+The current acceleration is part of the key because the memo answers "what does
+*this* acceleration say the aliasing is". Under MPI the acceleration-level answer
+is the owner's local answer rank-stamped and broadcast, and it is derived by
+re-asking the *default* acceleration for the raw local one -- a nested query with
+the same argument. Keying both alike lets the outer, uniform answer be displaced
+by the inner, rank-local one: the owner then returns an unstamped span while
+every other rank holds the stamped one, and the region fails its uniformity check
+(or, with checks off, mistakes two ranks' buffers for the same memory).
+"""
+ainfo_memo_key(idhash::UInt, dep_mod) =
+    hash(accel_kind(current_acceleration()), hash(dep_mod, idhash))
+
+"Run `f` (a chunk-aliasing computation) at most once per region per `(arg, dep_mod)`."
+memoized_chunk_aliasing(f, arg, dep_mod) =
+    memoized_ainfo(f, ainfo_memo_key(arg, dep_mod))
+
+"""
+    memoized_ainfo(f, key::UInt)
+
+`memoized_chunk_aliasing` for callers that hold a key rather than the argument
+itself, which is how an indirect handle (e.g. an MPI wire value standing in for a
+chunk) reuses the entry already computed for the chunk it came from.
+"""
+function memoized_ainfo(f, key::UInt)
+    memo = CHUNK_AINFO_MEMO[]
+    memo === nothing && return f()
+    @lock memo.lock begin
+        cached = get(memo.entries, key, nothing)
+        cached === nothing || return cached
+    end
+    # Computed outside the lock: it blocks on the owner, and under parallel
+    # partition planning holding the lock across that would serialize planners.
+    # Two planners racing on one key both compute; the loser's result is dropped.
+    ainfo = f()
+    @lock memo.lock begin
+        return get!(memo.entries, key, ainfo)
+    end
+end
+
+"""
+    memoize_ainfo!(key::UInt, ainfo) -> AbstractAliasing
+
+Record `ainfo` as the region's answer for `key`, for a caller that obtained it
+some other way than by asking `memoized_ainfo` -- a batch exchange
+(`batch_aliasing`) resolves many arguments at once, and seeding its results here
+is what keeps the rest of planning from re-deriving them one collective at a
+time. Returns the entry in force, which is the existing one if any (a batch never
+contradicts what has already been computed).
+"""
+function memoize_ainfo!(key::UInt, ainfo::AbstractAliasing)
+    memo = CHUNK_AINFO_MEMO[]
+    memo === nothing && return ainfo
+    @lock memo.lock begin
+        return get!(memo.entries, key, ainfo)
+    end
+end
+
 struct ArgumentWrapper
     arg
     dep_mod
@@ -285,6 +385,27 @@ logged_task_args(deps_vec::Vector{DataDepsTaskDependency}, infos::Vector{TaskArg
     [LoggedTaskArg(i.arg, i.pos, i.may_alias, i.inplace_move,
                    deps_vec[arg_deps_range(i)]) for i in infos]
 
+"A logical copy whose disjoint pieces may execute concurrently."
+struct CopyBatchOwner
+    tasks::Vector{DTask}
+    function CopyBatchOwner(tasks::Vector{DTask})
+        @assert length(tasks) > 1
+        new(tasks)
+    end
+end
+const WriterProducer = Union{DTask,CopyBatchOwner}
+
+@inline function append_producer_syncdeps!(syncdeps, task::DTask)
+    push!(syncdeps, ThunkSyncdep(task))
+    return
+end
+function append_producer_syncdeps!(syncdeps, batch::CopyBatchOwner)
+    for task in batch.tasks
+        push!(syncdeps, ThunkSyncdep(task))
+    end
+    return
+end
+
 struct HistoryEntry
     ainfo::AliasingWrapper
     space::MemorySpace
@@ -293,7 +414,7 @@ struct HistoryEntry
     # directly instead of re-resolving through live `ainfos_owner`, which may
     # later name a different task for the same ainfo or miss the producer when
     # only an overlapping ainfo is consulted.
-    task::DTask
+    task::WriterProducer
 end
 
 struct AliasedObjectCacheStore
@@ -316,6 +437,9 @@ struct AliasedObjectCacheStore
     # which is exactly where its value is the user's own object. Every *other*
     # space holding that key is a copy we allocated and may free.
     originals::Set{Tuple{MemorySpace,AbstractAliasing}}
+    # Copies whose own (destination-side) ainfo has not been computed yet, as
+    # `key => copy`. See `resolve_pending!`.
+    pending::Vector{Pair{AbstractAliasing,Chunk}}
 end
 AliasedObjectCacheStore(accel::Acceleration) =
     AliasedObjectCacheStore(accel,
@@ -324,7 +448,69 @@ AliasedObjectCacheStore(accel::Acceleration) =
                             Dict{MemorySpace,Set{AbstractAliasing}}(),
                             Dict{MemorySpace,Dict{AbstractAliasing,Chunk}}(),
                             Dict{MemorySpace,Dict{AbstractAliasing,AbstractAliasing}}(),
-                            Set{Tuple{MemorySpace,AbstractAliasing}}())
+                            Set{Tuple{MemorySpace,AbstractAliasing}}(),
+                            Vector{Pair{AbstractAliasing,Chunk}}())
+
+"""
+    resolve_pending!(cache) -> Bool
+
+Give every copy recorded by `set_stored!` its `derived` entry, returning whether
+there was anything to do.
+
+`set_stored!` defers this because obtaining a copy's own ainfo is expensive
+exactly where it is least likely to be needed. The ainfo describes pointer spans
+in the destination space, so under MPI only the destination rank can compute it
+and it has to be broadcast to every other rank -- a second rendezvous per slot,
+on top of the transfer, which measured as about a quarter of `distribute_task!`
+for a 2-rank stencil sweep. What it buys is the ability to recognize a copy when
+that copy is itself the *source* of a later move, so that both hops share one
+cache key. Regions that never take a second hop -- the common case -- never need
+it at all.
+
+Deferring is safe under SPMD because the trigger is uniform: `derived` and the
+ainfo being looked up are rank-uniform, so every rank misses, and resolves, at
+the same point and in the same order.
+"""
+function resolve_pending!(cache::AliasedObjectCacheStore)
+    isempty(cache.pending) && return false
+    # Task-local scratch: snapshotting into a fresh `Vector` every call (here,
+    # and for `values`/`dep_mods` below) added up under an iterative workload
+    # that resolves a pending batch every sweep. Safe to reuse because
+    # `cache.pending` is cleared before any call that could re-enter this
+    # function (see the module docstring on deferred resolution being
+    # SPMD-safe), so there is nothing left to alias by the time that could
+    # happen.
+    entries = @reusable_vector :resolve_pending_entries Pair{AbstractAliasing,Chunk} nothing 32
+    append!(entries, cache.pending)
+    empty!(cache.pending)
+    @opcounter :aliasing_resolve_pending
+    @opcounter :aliasing_resolve_pending_entries length(entries)
+    # Resolved as a batch: the whole point of deferring was to not pay a
+    # rendezvous per copy, which asking one at a time here would reintroduce.
+    values = @reusable_vector :resolve_pending_values Chunk nothing 32
+    dep_mods = @reusable_vector :resolve_pending_dep_mods Any nothing 32
+    for (_, value) in entries
+        push!(values, value)
+        push!(dep_mods, identity)
+    end
+    for (i, value_ainfo) in enumerate(batch_ainfos(cache.accel, values, dep_mods))
+        key, value = entries[i]
+        cache.derived[value_ainfo] = key
+        # Keep `value_ainfo` around: this is the one point where the buffer's own
+        # aliasing is computed on every rank, and the free loop needs it later.
+        ainfos_dict = get!(Dict{AbstractAliasing,AbstractAliasing}, cache.value_ainfos, memory_space(value))
+        ainfos_dict[key] = value_ainfo
+    end
+    return true
+end
+
+"`cache.derived[ainfo]`, resolving deferred copies first, or `nothing` if absent."
+function derived_key(cache::AliasedObjectCacheStore, ainfo::AbstractAliasing)
+    key = get(cache.derived, ainfo, nothing)
+    key === nothing || return key
+    resolve_pending!(cache) || return nothing
+    return get(cache.derived, ainfo, nothing)
+end
 
 """
     is_original(cache, space, ainfo) -> Bool
@@ -340,33 +526,26 @@ function is_stored(cache::AliasedObjectCacheStore, space::MemorySpace, ainfo::Ab
     if !haskey(cache.stored, space)
         return false
     end
-    if !haskey(cache.derived, ainfo)
-        return false
-    end
-    key = cache.derived[ainfo]
+    key = derived_key(cache, ainfo)
+    key === nothing && return false
     return key in cache.stored[space]
 end
 function is_key_present(cache::AliasedObjectCacheStore, space::MemorySpace, ainfo::AbstractAliasing)
-    return haskey(cache.derived, ainfo)
+    return derived_key(cache, ainfo) !== nothing
 end
 function get_stored(cache::AliasedObjectCacheStore, space::MemorySpace, ainfo::AbstractAliasing)
-    @assert is_stored(cache, space, ainfo) "Cache does not have derived ainfo $ainfo"
-    key = cache.derived[ainfo]
+    key = derived_key(cache, ainfo)
+    @assert key !== nothing "Cache does not have derived ainfo $ainfo"
     return cache.values[space][key]
 end
 function set_stored!(cache::AliasedObjectCacheStore, dest_space::MemorySpace, value::Chunk, ainfo::AbstractAliasing)
     @assert !is_stored(cache, dest_space, ainfo) "Cache already has derived ainfo $ainfo"
     @check_uniform(value)
     key = cache.derived[ainfo]
-    value_ainfo = aliasing(cache.accel, value, identity)
-    cache.derived[value_ainfo] = key
+    push!(cache.pending, key => value)
     push!(get!(Set{AbstractAliasing}, cache.stored, dest_space), key)
     values_dict = get!(Dict{AbstractAliasing,Chunk}, cache.values, dest_space)
     values_dict[key] = value
-    # Keep `value_ainfo` around: this is the one point where the buffer's own
-    # aliasing is computed on every rank, and the free loop needs it later.
-    ainfos_dict = get!(Dict{AbstractAliasing,AbstractAliasing}, cache.value_ainfos, dest_space)
-    ainfos_dict[key] = value_ainfo
     return
 end
 
@@ -374,14 +553,21 @@ end
     stored_value_ainfo(cache, space, key) -> Union{AbstractAliasing,Nothing}
 
 The aliasing of the buffer `cache.values[space][key]` *in `space`*, as recorded
-by `set_stored!` when the buffer was allocated. `nothing` for the user's
-original data, which never gets one (and is never freed).
+by `set_stored!` when the buffer was allocated (possibly deferred; see
+`resolve_pending!`). `nothing` for the user's original data, which never gets
+one (and is never freed).
 
 This is deliberately a lookup rather than a fresh `aliasing` call: under uniform
 (SPMD) execution `aliasing` is a collective, so the buffer's extent cannot be
-recomputed once planning is over.
+recomputed once planning is over. A miss instead resolves any batch of copies
+still pending, exactly like `derived_key` -- the free loop may be the first
+thing to ask about a copy that no other lookup happened to flush already.
 """
 function stored_value_ainfo(cache::AliasedObjectCacheStore, space::MemorySpace, key::AbstractAliasing)
+    ainfos = get(cache.value_ainfos, space, nothing)
+    value = ainfos === nothing ? nothing : get(ainfos, key, nothing)
+    value === nothing || return value
+    resolve_pending!(cache) || return nothing
     ainfos = get(cache.value_ainfos, space, nothing)
     ainfos === nothing && return nothing
     return get(ainfos, key, nothing)
@@ -462,10 +648,11 @@ function aliased_object!(f, cache::AliasedObjectCache, x; ainfo=aliasing(cache.a
     else
         y = f(x)
         @assert y isa Chunk "Didn't get a Chunk from functor"
+        # N.B. Deliberately not also checking that `y`'s ainfo differs from `x`'s
+        # when the spaces differ: distinct memory spaces hold distinct memory, so
+        # the space assertion above already implies it, and asking for `y`'s ainfo
+        # here would cost a collective per slot (see `resolve_pending!`).
         @assert memory_space(y) == cache.space "Space mismatch! $(memory_space(y)) != $(cache.space)"
-        if memory_space(x) != cache.space
-            @assert ainfo != aliasing(cache.accel, y, identity) "Aliasing mismatch! $ainfo == $(aliasing(cache.accel, y, identity))"
-        end
         set_stored!(cache.accel, cache, y, ainfo)
         return y
     end
@@ -556,7 +743,7 @@ mutable struct DataDepsState
     # Track writers ("owners") and readers
     # Updated as new writer and reader tasks are launched
     # Used by task dependency tracking to calculate syncdeps and ensure correct launch ordering
-    ainfos_owner::Dict{AliasingWrapper,Union{Pair{DTask,Int},Nothing}}
+    ainfos_owner::Dict{AliasingWrapper,Union{Pair{DTask,Int},Pair{CopyBatchOwner,Int},Nothing}}
     ainfos_readers::Dict{AliasingWrapper,Vector{Pair{DTask,Int}}}
 
     # Per-task scratch buffers filled by `populate_task_info!` and consumed by
@@ -589,7 +776,7 @@ mutable struct DataDepsState
         ainfos_lookup = AliasingLookup()
         ainfos_overlaps = Dict{AliasingWrapper,Set{AliasingWrapper}}()
 
-        ainfos_owner = Dict{AliasingWrapper,Union{Pair{DTask,Int},Nothing}}()
+        ainfos_owner = Dict{AliasingWrapper,Union{Pair{DTask,Int},Pair{CopyBatchOwner,Int},Nothing}}()
         ainfos_readers = Dict{AliasingWrapper,Vector{Pair{DTask,Int}}}()
 
         return new(arg_to_chunk, sparse_arg_wrap, arg_origin, remote_args, remote_arg_to_original, remote_arg_w, ainfo_arg, arg_history, arg_owner, arg_current, arg_overlaps, ainfo_backing_chunk,
@@ -949,7 +1136,7 @@ function _get_write_deps!(state::DataDepsState, dest_space::MemorySpace, ainfo::
         other_task, other_write_num = other_task_write_num
         write_num == other_write_num && continue
         @dagdebug nothing :spawn_datadeps_sync "Sync with writer via $ainfo -> $other_ainfo"
-        push!(syncdeps, ThunkSyncdep(other_task))
+        append_producer_syncdeps!(syncdeps, other_task)
     end
 end
 function _get_read_deps!(state::DataDepsState, dest_space::MemorySpace, ainfo::AbstractAliasing, write_num, syncdeps)
@@ -997,7 +1184,7 @@ function gather_overlap_syncdeps!(state::DataDepsState, ainfo::AliasingWrapper, 
         owner = get(state.ainfos_owner, other_ainfo, nothing)
         if owner !== nothing
             owner_task, owner_write_num = owner
-            owner_write_num != write_num && push!(syncdeps, ThunkSyncdep(owner_task))
+            owner_write_num != write_num && append_producer_syncdeps!(syncdeps, owner_task)
         end
         for (reader_task, reader_write_num) in get(state.ainfos_readers, other_ainfo, ())
             reader_write_num != write_num && push!(syncdeps, ThunkSyncdep(reader_task))
@@ -1026,7 +1213,13 @@ function assert_free_syncdeps!(state::DataDepsState, ainfo::AliasingWrapper, wri
         owner_task, owner_write_num = owner
         owner_write_num == write_num && continue
         will_alias(ainfo, other_ainfo) || continue
-        @assert ThunkSyncdep(owner_task) in syncdeps "gather_free_syncdeps! omitted a live writer $owner_task ($other_ainfo) for buffer overlapping $ainfo"
+        if owner_task isa CopyBatchOwner
+            for task in owner_task.tasks
+                @assert ThunkSyncdep(task) in syncdeps "gather_free_syncdeps! omitted a live copy $task ($other_ainfo) for buffer overlapping $ainfo"
+            end
+        else
+            @assert ThunkSyncdep(owner_task) in syncdeps "gather_free_syncdeps! omitted a live writer $owner_task ($other_ainfo) for buffer overlapping $ainfo"
+        end
     end
     for (other_ainfo, readers) in state.ainfos_readers
         for (reader_task, reader_write_num) in readers
@@ -1089,7 +1282,7 @@ function gather_free_syncdeps!(state::DataDepsState, space::MemorySpace, buf_ain
     assert_free_syncdeps!(state, wrapped, write_num, syncdeps)
     return
 end
-function add_writer!(state::DataDepsState, arg_w::ArgumentWrapper, dest_space::MemorySpace, ainfo::AbstractAliasing, task, write_num; copy_src::Union{MemorySpace,Nothing}=nothing)
+function add_writer!(state::DataDepsState, arg_w::ArgumentWrapper, dest_space::MemorySpace, ainfo::AbstractAliasing, task::WriterProducer, write_num; copied::Bool=false)
     state.ainfos_owner[ainfo] = task=>write_num
     empty!(state.ainfos_readers[ainfo])
 
@@ -1106,7 +1299,7 @@ function add_writer!(state::DataDepsState, arg_w::ArgumentWrapper, dest_space::M
     end
 
     # Track which spaces hold a fully-current replica of this region
-    if copy_src === nothing
+    if !copied
         # Task write: only the written space is current, and other spaces'
         # replicas of overlapping regions become stale
         # N.B. The `Set` is reused in place rather than replaced; nothing ever
@@ -1142,7 +1335,13 @@ function add_writer!(state::DataDepsState, arg_w::ArgumentWrapper, dest_space::M
     state.arg_owner[arg_w] = dest_space
 
     # Not necessary to assert a read, but conceptually it's true
-    add_reader!(state, arg_w, dest_space, ainfo, task, write_num)
+    if task isa CopyBatchOwner
+        for copy_task in task.tasks
+            add_reader!(state, arg_w, dest_space, ainfo, copy_task, write_num)
+        end
+    else
+        add_reader!(state, arg_w, dest_space, ainfo, task, write_num)
+    end
 end
 function add_reader!(state::DataDepsState, arg_w::ArgumentWrapper, dest_space::MemorySpace, ainfo::AbstractAliasing, task, write_num)
     push!(state.ainfos_readers[ainfo], task=>write_num)
@@ -1227,6 +1426,8 @@ function generate_slot!(state::DataDepsState, dest_space, data)
     id = logging ? rand(Int) : 0
     logging && @logstart ctx LogMove LogMoveId(0, ArgPosition(), to_proc, id) data
     tid = something(DATADEPS_CURRENT_TASK[], (;uid=0)).uid
+    timing = HIER_TIMING[]
+    t0 = timing ? time_ns() : UInt64(0)
     data_chunk = if slot_is_already_in_place(data, orig_space, dest_space)
         # Nothing to move: the slot for data already in `dest_space` is the data
         # itself. Going through `move_rewrap` here would allocate a second Chunk
@@ -1236,10 +1437,17 @@ function generate_slot!(state::DataDepsState, dest_space, data)
         # original for its aliasing key, exactly as the general path does.
         aliased_object!(Returns(data), aliased_object_cache, data)::Chunk
     else
-        with(DATADEPS_THUNK_ID=>tid) do
+        moved = with(DATADEPS_THUNK_ID=>tid) do
             remotecall_endpoint_toplevel(move_rewrap, current_acceleration(), aliased_object_cache, from_proc, to_proc, orig_space, dest_space, data)
         end
+        if timing
+            move_ns = time_ns() - t0
+            hier_log!(LogHierSlot, 0x01, LogHierSlotId(:moved), move_ns)
+            orig_space == dest_space && hier_log!(LogHierSlot, 0x01, LogHierSlotId(:samespace), move_ns)
+        end
+        moved
     end
+    timing && hier_log!(LogHierSlot, 0x01, LogHierSlotId(:total), time_ns() - t0)
     logging && @logfinish ctx LogMove LogMoveId(0, ArgPosition(), to_proc, id) data_chunk
     @assert memory_space(data_chunk) == dest_space "space mismatch! $dest_space (dest) != $(memory_space(data_chunk)) (actual) ($(typeof(data)) (data) vs. $(typeof(data_chunk)) (chunk)), spaces ($orig_space -> $dest_space)"
     dest_space_args[data] = data_chunk

@@ -105,10 +105,22 @@ compare_all_mpi_tag() = UInt32(MPI.tag_ub())
 function compare_all(value, comm)
     rank = MPI.Comm_rank(comm)
     size = MPI.Comm_size(comm)
+    size == 1 && return true
     tag = compare_all_mpi_tag()
+    # Integer checks dominate replicated planning. Every peer receives the
+    # exact same serialized value, so build its payload once rather than have
+    # MPI.isend serialize it anew for each peer. Keep the general transport for
+    # values which may use the raw-parts protocol (e.g. arrays).
+    serialized = value isa Integer ? MPI.serialize(value) : nothing
     for i in 0:(size-1)
         if i != rank
-            send_yield(value, comm, i, tag)
+            if serialized === nothing
+                send_yield(value, comm, i, tag)
+            else
+                @opcounter :send_yield_serialized
+                req = MPI.Isend(serialized, comm; dest=i, tag)
+                __wait_for_request(req, comm, rank, i, tag, "send_yield", "send")
+            end
         end
     end
     match = true
@@ -159,32 +171,153 @@ struct MPIAcceleration <: Dagger.Acceleration
 end
 MPIAcceleration() = MPIAcceleration(MPI.COMM_WORLD)
 
-function aliasing(accel::MPIAcceleration, x::Chunk, T)
-    handle = x.handle
-    # Chunks created under a temporary DistributedAcceleration (or a worker
-    # thread that did not inherit MPI TLS) carry a DRef; fall back to the
-    # Distributed unwrap path rather than hard-failing the typeassert.
-    if !(handle isa MPIRef)
+aliasing(accel::MPIAcceleration, x::Chunk, T) =
+    Dagger.memoized_chunk_aliasing(() -> _aliasing_bcast(accel, x, T), x, T)
+
+"""
+    mpi_ainfo_owner(x) -> Int
+
+The rank whose copy of `x` is the one that can be inspected to derive its
+aliasing info, or `-1` when every rank can answer for itself.
+
+`-1` covers data that no single rank owns: a plain value, or a `Chunk` created
+under a temporary `DistributedAcceleration` (or on a worker thread that did not
+inherit the MPI TLS) and therefore carrying a `DRef` rather than an `MPIRef`.
+"""
+mpi_ainfo_owner(x::Chunk) = x.handle isa MPIRef ? x.handle.rank : -1
+mpi_ainfo_owner(@nospecialize(x)) = -1
+
+# `x`'s aliasing info as its owner sees it, stamped with the owning rank so that
+# spans from different ranks -- whose SPMD heaps have very similar address
+# layouts -- can never appear to alias each other.
+function mpi_owner_ainfo(@nospecialize(x), dep_mod, owner::Int)
+    ainfo = _with_default_acceleration() do
+        mpi_raw_aliasing(x, dep_mod)
+    end
+    return owner < 0 ? ainfo : mpi_remap_ainfo(ainfo, owner)
+end
+
+# How to read the local aliasing info out of each kind of handle. Runs under the
+# default acceleration (see `mpi_owner_ainfo`), on the owning rank only.
+mpi_raw_aliasing(@nospecialize(x), dep_mod) = aliasing(x, dep_mod)
+
+"""
+    _aliasing_bcast(accel::MPIAcceleration, x, dep_mod)
+
+The owner computes `x`'s aliasing info and broadcasts it; every other rank
+receives it. All ranks must call this at the same logical point, since it is a
+collective.
+
+Prefer letting Phase 1 resolve a whole region's arguments in one exchange
+(`batch_aliasing`) and reading the results back out of the region memo; this
+per-argument form is the fallback for arguments the batch did not cover.
+"""
+function _aliasing_bcast(accel::MPIAcceleration, @nospecialize(x), dep_mod)
+    owner = mpi_ainfo_owner(x)
+    if owner < 0
         return _with_default_acceleration() do
-            aliasing(x, T)
+            mpi_raw_aliasing(x, dep_mod)
         end
     end
-    @assert accel.comm == handle.comm "MPIAcceleration comm mismatch"
     tag = to_tag()
     check_uniform(tag)
     rank = MPI.Comm_rank(accel.comm)
-    if handle.rank == rank
-        ainfo = _with_default_acceleration() do
-            aliasing(x, T)
-        end
-        ainfo = mpi_remap_ainfo(ainfo, handle.rank)
+    ainfo = if owner == rank
         @opcounter :aliasing_bcast_send_yield
-        ainfo = bcast_yield(accel.comm, handle.rank, tag, ainfo)
+        bcast_yield(accel.comm, owner, tag, mpi_owner_ainfo(x, dep_mod, owner))
     else
-        ainfo = bcast_yield(accel.comm, handle.rank, tag)
+        bcast_yield(accel.comm, owner, tag)
     end
     check_uniform(ainfo)
     return ainfo
+end
+
+"""
+    batch_aliasing(accel::MPIAcceleration, arg_ws)
+
+Resolve a whole batch of arguments' aliasing info in one exchange per owning
+rank, instead of one broadcast per argument.
+
+Replicated planning makes every per-argument `aliasing` call a rendezvous: a rank
+that reaches argument `i` waits there until all its peers do, so a region's
+planning becomes a chain of `nargs` round-trips whose length grows with both the
+region and the rank count. The batch is a *uniform* list -- every rank walks the
+same arguments in the same order -- so an index into it names the same argument
+everywhere, which is all that is needed to exchange the answers wholesale: each
+owning rank broadcasts the ainfos for its own arguments keyed by index.
+
+The results also seed the region's aliasing memo, so the rest of planning (slot
+generation, remainder computation, the write-back epilogue) finds them already
+answered and communicates no further.
+"""
+function Dagger.batch_aliasing(accel::MPIAcceleration, arg_ws::Vector{Dagger.ArgumentWrapper})
+    n = length(arg_ws)
+    n == 0 && return Pair{Dagger.ArgumentWrapper,Dagger.AliasingWrapper}[]
+    objs = Any[arg_w.arg for arg_w in arg_ws]
+    dep_mods = Any[arg_w.dep_mod for arg_w in arg_ws]
+    ainfos = Dagger.batch_ainfos(accel, objs, dep_mods)
+    return Pair{Dagger.ArgumentWrapper,Dagger.AliasingWrapper}[
+        arg_ws[i] => Dagger.AliasingWrapper(ainfos[i]) for i in 1:n]
+end
+
+"""
+    batch_ainfos(accel::MPIAcceleration, objs, dep_mods)
+
+One exchange per owning rank for a whole batch of objects, instead of one
+broadcast each. See `batch_aliasing` above for why this shape matters.
+"""
+function Dagger.batch_ainfos(accel::MPIAcceleration, objs::Vector, dep_mods::Vector)
+    n = length(objs)
+    n == 0 && return AbstractAliasing[]
+    comm = accel.comm
+    rank = MPI.Comm_rank(comm)
+    check_uniform(UInt64(n))
+    timing = Dagger.HIER_TIMING[]
+    t0 = timing ? time_ns() : UInt64(0)
+
+    owners = Vector{Int}(undef, n)
+    ainfos = Vector{Union{Nothing,AbstractAliasing}}(nothing, n)
+    mine = Dict{Int,AbstractAliasing}()
+    for i in 1:n
+        owner = mpi_ainfo_owner(objs[i])
+        owners[i] = owner
+        if owner < 0
+            # Answerable on every rank, so nothing to exchange
+            ainfos[i] = mpi_owner_ainfo(objs[i], dep_mods[i], owner)
+        elseif owner == rank
+            mine[i] = mpi_owner_ainfo(objs[i], dep_mods[i], owner)
+        end
+    end
+
+    # `owners` is itself uniform, so every rank knows which ranks have something
+    # to say and skips the rest: one broadcast per *contributing* rank.
+    roots = sort!(unique!(filter(>=(0), copy(owners))))
+    for root in roots
+        tag = to_tag()
+        check_uniform(tag)
+        received = if root == rank
+            @opcounter :aliasing_bcast_send_yield
+            bcast_yield(comm, root, tag, mine)
+        else
+            bcast_yield(comm, root, tag)
+        end::Dict{Int,AbstractAliasing}
+        for (i, ainfo) in received
+            ainfos[i] = ainfo
+        end
+    end
+
+    results = Vector{AbstractAliasing}(undef, n)
+    for i in 1:n
+        ainfo = ainfos[i]
+        if ainfo === nothing
+            error("batch_ainfos: rank $rank received no aliasing info for object $i (owner $(owners[i]))")
+        end
+        # Take back whatever the memo now holds, so this batch and every later
+        # lookup of the same object agree even if an entry was already there.
+        results[i] = Dagger.memoize_ainfo!(Dagger.ainfo_memo_key(objs[i], dep_mods[i]), ainfo)
+    end
+    timing && Dagger.hier_log!(Dagger.LogHierAinfo, 0x01, Dagger.LogHierAinfoId(), (time_ns() - t0, n))
+    return results
 end
 
 default_processor(accel::MPIAcceleration) = MPIOSProc(accel.comm, 0)
@@ -743,9 +876,87 @@ function tochunk_pset(x, space::MPIMemorySpace; device=nothing, force_nonlocal=f
 end
 
 const DEADLOCK_DETECT = TaskLocalValue{Bool}(()->true)
-const DEADLOCK_WARN_PERIOD = TaskLocalValue{Float64}(()->10.0)
-const DEADLOCK_TIMEOUT_PERIOD = TaskLocalValue{Float64}(()->120.0)
-const RECV_WAITING = LockedObject(Dict{Tuple{MPI.Comm, Int, Int}, Base.Event}())
+
+const DEADLOCK_WARN_PERIOD = TaskLocalValue{Float64}(()->parse(Float64, get(ENV, "JULIA_DAGGER_MPI_WARN_PERIOD", "10.0")))
+const DEADLOCK_TIMEOUT_PERIOD = TaskLocalValue{Float64}(()->parse(Float64, get(ENV, "JULIA_DAGGER_MPI_TIMEOUT_PERIOD", "120.0")))
+# Off by default: a full stacktrace buries the one-line diagnosis (which call
+# site is waiting) in noise. Opt in with JULIA_DAGGER_MPI_WARN_BACKTRACE=1 when
+# that call site itself is the thing in question.
+const DEADLOCK_WARN_BACKTRACE = TaskLocalValue{Bool}(()->parse(Bool, get(ENV, "JULIA_DAGGER_MPI_WARN_BACKTRACE", "0")))
+
+# Monotonic count of cross-rank operations this rank has *completed*: every
+# finished `Isend`/`Irecv` request and every broadcast payload the relay hands
+# to a slot. Only the volume matters, never the value, so relaxed increments
+# from any thread are fine.
+#
+# This is what lets a wait tell "the job is moving and I am behind a peer" from
+# "nothing is moving anywhere". A per-wait stopwatch cannot: how long one rank
+# waits for another is bounded by the peer's *backlog*, not by any property of
+# the wait itself, and datadeps deliberately lets that backlog grow (a region's
+# tasks are submitted in one burst, so a non-owner can reach a task's metadata
+# wait long before the owner starts it). Add a first-call JIT of the task body
+# -- minutes, for a wide `@stencil` -- and a single legitimate wait runs well
+# past any fixed timeout. Timing that wait alone reports a deadlock that is not
+# there; timing it against this counter reports one only when the rank has
+# genuinely stopped doing cross-rank work.
+const MPI_PROGRESS = Threads.Atomic{UInt64}(0)
+@inline note_mpi_progress!() = (Threads.atomic_add!(MPI_PROGRESS, UInt64(1)); nothing)
+
+"""
+    DeadlockTimer()
+
+The stopwatch one cross-rank wait carries, rebuilt (not mutated) on each poll so
+it stays isbits and costs no allocation on the wait loops.
+
+`warn_period` is the live threshold and goes to `typemax` once this wait has
+warned, so it warns at most once; `base_warn` is the value to restore when the
+clock is reset. `last_progress` is the `MPI_PROGRESS` reading this wait was last
+judged against. See `mpi_deadlock_detect`.
+"""
+struct DeadlockTimer
+    detect::Bool
+    time_start::UInt64
+    warn_period::UInt64
+    base_warn::UInt64
+    timeout_period::UInt64
+    last_progress::UInt64
+end
+function DeadlockTimer()
+    warn_period = round(UInt64, DEADLOCK_WARN_PERIOD[] * 1e9)
+    return DeadlockTimer(DEADLOCK_DETECT[], time_ns(), warn_period, warn_period,
+                         round(UInt64, DEADLOCK_TIMEOUT_PERIOD[] * 1e9),
+                         MPI_PROGRESS[])
+end
+# A present key with `nothing` denotes an active receiver with no competitors.
+# Allocate an event only when a second receiver actually needs to wait.
+const RECV_WAITING = LockedObject(Dict{Tuple{MPI.Comm, Int, Int}, Union{Base.Event,Nothing}}())
+
+function acquire_recv!(key::Tuple{MPI.Comm,Int,Int})
+    while true
+        local other_event
+        @lock RECV_WAITING begin
+            waiting = Dagger.payload(RECV_WAITING)
+            if !haskey(waiting, key)
+                waiting[key] = nothing
+                return
+            end
+            other_event = waiting[key]
+            if other_event === nothing
+                other_event = Base.Event()
+                waiting[key] = other_event
+            end
+        end
+        wait(other_event::Base.Event)
+    end
+end
+
+function release_recv!(key::Tuple{MPI.Comm,Int,Int})
+    @lock RECV_WAITING begin
+        other_event = pop!(Dagger.payload(RECV_WAITING), key)
+        other_event === nothing || notify(other_event)
+    end
+    return
+end
 
 # Envelope for the out-of-place raw-bytes MPI path: serialize a small
 # descriptor, then send contiguous bitstype buffers. Types register via
@@ -843,68 +1054,30 @@ function recv_yield!(buffer, comm, src, tag)
     end
     #Core.println("[rank $(MPI.Comm_rank(comm))][tag $tag] Starting recv! from [$src]")
 
-    # Ensure no other receiver is waiting
-    our_event = Base.Event()
-    @label retry
-    other_event = lock(RECV_WAITING) do waiting
-        if haskey(waiting, (comm, src, tag))
-            waiting[(comm, src, tag)]
-        else
-            waiting[(comm, src, tag)] = our_event
-            nothing
-        end
+    key = (comm, Int(src), Int(tag))
+    acquire_recv!(key)
+    try
+        return recv_yield_inplace!(buffer, comm, rank, src, tag), true
+    finally
+        release_recv!(key)
     end
-    if other_event !== nothing
-        #Core.println("[rank $(MPI.Comm_rank(comm))][tag $tag] Waiting for other receiver...")
-        wait(other_event)
-        @goto retry
-    end
-
-    buffer = recv_yield_inplace!(buffer, comm, rank, src, tag)
-
-    lock(RECV_WAITING) do waiting
-        delete!(waiting, (comm, src, tag))
-        notify(our_event)
-    end
-
-    return buffer, true
-
 end
 
 function recv_yield(comm, src, tag)
     rank = MPI.Comm_rank(comm)
     #Core.println("[rank $(MPI.Comm_rank(comm))][tag $tag] Starting recv from [$src]")
 
-    # Ensure no other receiver is waiting
-    our_event = Base.Event()
-    @label retry
-    other_event = lock(RECV_WAITING) do waiting
-        if haskey(waiting, (comm, src, tag))
-            waiting[(comm, src, tag)]
-        else
-            waiting[(comm, src, tag)] = our_event
-            nothing
+    key = (comm, Int(src), Int(tag))
+    acquire_recv!(key)
+    try
+        value = recv_yield_serialized(comm, rank, src, tag)
+        if value isa InplaceInfo
+            return recv_yield_inplace(value, comm, rank, src, tag)
         end
+        return value
+    finally
+        release_recv!(key)
     end
-    if other_event !== nothing
-        #Core.println("[rank $(MPI.Comm_rank(comm))][tag $tag] Waiting for other receiver...")
-        wait(other_event)
-        @goto retry
-    end
-    #Core.println("[rank $(MPI.Comm_rank(comm))][tag $tag] Receiving...")
-
-    type = nothing
-    @label receive
-    value = recv_yield_serialized(comm, rank, src, tag)
-    if value isa InplaceInfo
-        value = recv_yield_inplace(value, comm, rank, src, tag)
-    end
-
-    lock(RECV_WAITING) do waiting
-        delete!(waiting, (comm, src, tag))
-        notify(our_event)
-    end
-    return value
 end
 
 # Device-resident dense array: receive directly when the MPI library is
@@ -931,10 +1104,7 @@ end
 recv_yield_inplace!(array::Array, comm, my_rank, their_rank, tag) =
     _recv_yield_inplace_raw!(array, comm, my_rank, their_rank, tag)
 function _recv_yield_inplace_raw!(array, comm, my_rank, their_rank, tag)
-    time_start = time_ns()
-    detect = DEADLOCK_DETECT[]
-    warn_period = round(UInt64, DEADLOCK_WARN_PERIOD[] * 1e9)
-    timeout_period = round(UInt64, DEADLOCK_TIMEOUT_PERIOD[] * 1e9)
+    timer = DeadlockTimer()
 
     while true
         (got, msg, stat) = MPI.Improbe(their_rank, tag, comm, MPI.Status)
@@ -949,7 +1119,7 @@ function _recv_yield_inplace_raw!(array, comm, my_rank, their_rank, tag)
             __wait_for_request(req, comm, my_rank, their_rank, tag, "recv_yield", "recv")
             return array
         end
-        warn_period = mpi_deadlock_detect(detect, time_start, warn_period, timeout_period, my_rank, tag, "recv", their_rank)
+        timer = mpi_deadlock_detect(timer, my_rank, tag, "recv", their_rank)
         yield()
     end
 end
@@ -962,10 +1132,7 @@ function recv_yield_inplace(_value::InplaceInfo, comm, my_rank, their_rank, tag)
 end
 
 function recv_yield_serialized(comm, my_rank, their_rank, tag)
-    time_start = time_ns()
-    detect = DEADLOCK_DETECT[]
-    warn_period = round(UInt64, DEADLOCK_WARN_PERIOD[] * 1e9)
-    timeout_period = round(UInt64, DEADLOCK_TIMEOUT_PERIOD[] * 1e9)
+    timer = DeadlockTimer()
 
     while true
         (got, msg, stat) = MPI.Improbe(their_rank, tag, comm, MPI.Status)
@@ -979,7 +1146,7 @@ function recv_yield_serialized(comm, my_rank, their_rank, tag)
             __wait_for_request(req, comm, my_rank, their_rank, tag, "recv_yield", "recv")
             return MPI.deserialize(buf)
         end
-        warn_period = mpi_deadlock_detect(detect, time_start, warn_period, timeout_period, my_rank, tag, "recv", their_rank)
+        timer = mpi_deadlock_detect(timer, my_rank, tag, "recv", their_rank)
         yield()
     end
 end
@@ -1060,19 +1227,19 @@ function send_yield_serialized(value, comm, my_rank, their_rank, tag)
 end
 
 function __wait_for_request(req, comm, my_rank, their_rank, tag, fn::String, kind::String)
-    time_start = time_ns()
-    detect = DEADLOCK_DETECT[]
-    warn_period = round(UInt64, DEADLOCK_WARN_PERIOD[] * 1e9)
-    timeout_period = round(UInt64, DEADLOCK_TIMEOUT_PERIOD[] * 1e9)
+    timer = DeadlockTimer()
     while true
         finish, status = MPI.Test(req, MPI.Status)
         if finish
             if MPI.Get_error(status) != MPI.SUCCESS
                 error("$fn failed with error $(MPI.Get_error(status))")
             end
+            # Every completed request is this rank's proof of life for the
+            # waits running concurrently with it (see `MPI_PROGRESS`).
+            note_mpi_progress!()
             return
         end
-        warn_period = mpi_deadlock_detect(detect, time_start, warn_period, timeout_period, my_rank, tag, kind, their_rank)
+        timer = mpi_deadlock_detect(timer, my_rank, tag, kind, their_rank)
         yield()
     end
 end
@@ -1117,16 +1284,39 @@ function bcast_yield(comm, root::Integer, tag, value=nothing)
     return value
 end
 
-function mpi_deadlock_detect(detect, time_start, warn_period, timeout_period, rank, tag, kind, srcdest)
-    time_elapsed = (time_ns() - time_start)
-    if detect && time_elapsed > warn_period
-        @warn "[rank $rank][tag $tag] Hit probable hang on $kind (dest: $srcdest)"
-        return typemax(UInt64)
+# Escalate a wait only while this rank is doing no cross-rank work at all.
+#
+# Waiting a long time is not evidence of a deadlock (see `MPI_PROGRESS`): it is
+# the normal cost of being behind a peer. What *is* evidence is waiting while
+# nothing else on this rank completes, so every poll that sees the counter move
+# restarts the clock, and the warn/timeout thresholds then measure a stall
+# rather than a wait. A real cycle still trips them, just once the work that
+# does not depend on it has drained.
+function mpi_deadlock_detect(timer::DeadlockTimer, rank, tag, kind, srcdest)
+    timer.detect || return timer
+    progress = MPI_PROGRESS[]
+    if progress != timer.last_progress
+        return DeadlockTimer(true, time_ns(), timer.base_warn, timer.base_warn,
+                             timer.timeout_period, progress)
     end
-    if detect && time_elapsed > timeout_period
+    time_elapsed = (time_ns() - timer.time_start)
+    if time_elapsed > timer.warn_period
+        # A hang here is a wait cycle across ranks, so which call site is waiting
+        # (and on whose behalf) is the whole diagnosis; a bare tag is not enough.
+        # The backtrace that pins down the call site is off by default, though --
+        # see DEADLOCK_WARN_BACKTRACE.
+        if DEADLOCK_WARN_BACKTRACE[]
+            @warn "[rank $rank][tag $tag] Hit probable hang on $kind (dest: $srcdest)" stacktrace=sprint(Base.show_backtrace, stacktrace())
+        else
+            @warn "[rank $rank][tag $tag] Hit probable hang on $kind (dest: $srcdest)"
+        end
+        return DeadlockTimer(true, timer.time_start, typemax(UInt64), timer.base_warn,
+                             timer.timeout_period, progress)
+    end
+    if time_elapsed > timer.timeout_period
         error("[rank $rank][tag $tag] Hit hang on $kind (dest: $srcdest)")
     end
-    return warn_period
+    return timer
 end
 
 # ---------------------------------------------------------------------------
@@ -1190,17 +1380,17 @@ end
 # tag from interleaving into a single queue, where no ordering rule applies.
 mutable struct BcastSlot
     values::Vector{Any}
-    BcastSlot() = new(Any[])
+    cond::Union{Threads.Condition,Nothing}
+    waiters::Int
+    BcastSlot() = new(Any[], nothing, 0)
 end
 
 mutable struct BcastState
     bcast_comm::MPI.Comm
     slots::Dict{Tuple{Int,UInt32},BcastSlot}
-    # Guards `slots` and wakes consumers. A condition rather than a plain lock
-    # so a consumer waiting on an undelivered payload sleeps instead of
-    # spinning: a datadeps region can have hundreds of tasks blocked on a
-    # broadcast at once, and polling them all would burn exactly the CPU the
-    # ranks need to *produce* those broadcasts.
+    # Guards `slots`; each slot's condition shares this lock but has its own
+    # wait queue. A delivery must only wake that (root, tag)'s consumers, not
+    # every task blocked on an unrelated broadcast in the region.
     cond::Threads.Condition
     running::Threads.Atomic{Bool}
     relay::Union{Task,Nothing}
@@ -1219,14 +1409,28 @@ bcast_state_for(comm::MPI.Comm) =
 
 bcast_serialize(x) = (io = IOBuffer(); Serialization.serialize(io, x); take!(io))
 
+function bcast_slot!(state::BcastState, key::Tuple{Int,UInt32})
+    slot = get(state.slots, key, nothing)
+    if slot === nothing
+        slot = BcastSlot()
+        state.slots[key] = slot
+    end
+    return slot
+end
+
 function bcast_deliver!(state::BcastState, root::Int, tag::UInt32, value)
     # `@lock`, not `lock(...) do`: the `do` block is a closure over `state`,
     # `root`, `tag` and `value`, which boxes them and allocates on a path the
     # relay runs for every delivered payload.
     @lock state.cond begin
-        push!(get!(BcastSlot, state.slots, (root, tag)).values, value)
-        notify(state.cond)
+        slot = bcast_slot!(state, (root, tag))
+        push!(slot.values, value)
+        cond = slot.cond
+        cond === nothing || notify(cond)
     end
+    # A delivered payload is cross-rank progress even when it is not the one a
+    # given consumer is waiting for (see `MPI_PROGRESS`).
+    note_mpi_progress!()
     return
 end
 
@@ -1235,7 +1439,12 @@ end
 # deadlock detection -- no `Timer` involved, and so nothing that depends on a
 # thread reaching the scheduler's idle loop to service libuv.
 function bcast_heartbeat!(state::BcastState)
-    @lock state.cond notify(state.cond)
+    @lock state.cond begin
+        for slot in values(state.slots)
+            cond = slot.cond
+            cond === nothing || notify(cond)
+        end
+    end
     return
 end
 
@@ -1251,27 +1460,37 @@ function bcast_slot_wait(state::BcastState, root::Int, tag::UInt32)
     # here forever with nothing to report -- a CI job exhausting its timeout
     # with no error to point at. Re-checks are driven by `bcast_heartbeat!`
     # rather than by polling, so a blocked consumer costs no CPU.
-    time_start = time_ns()
-    detect = DEADLOCK_DETECT[]
-    warn_period = round(UInt64, DEADLOCK_WARN_PERIOD[] * 1e9)
-    timeout_period = round(UInt64, DEADLOCK_TIMEOUT_PERIOD[] * 1e9)
+    timer = DeadlockTimer()
     rank = MPI.Comm_rank(state.bcast_comm)
     # `@lock`, not `lock(...) do`: the loop closes over enough of the enclosing
     # frame (`key`, the deadlock-timer state, `rank`) that the closure boxes
-    # them, and `warn_period` -- reassigned across iterations and captured --
-    # becomes a heap `Box`. Inlining the body keeps all of it on the stack; the
-    # `return` below still releases the lock, via `@lock`'s `finally`.
+    # them, and `timer` -- reassigned across iterations and captured -- becomes
+    # a heap `Box`. Inlining the body keeps all of it on the stack; the `return`
+    # below still releases the lock, via `@lock`'s `finally`.
     @lock state.cond begin
-        while true
-            slot = get(state.slots, key, nothing)
-            if slot !== nothing && !isempty(slot.values)
-                value = popfirst!(slot.values)
-                isempty(slot.values) && delete!(state.slots, key)
-                return value
+        slot = bcast_slot!(state, key)
+        slot.waiters += 1
+        try
+            while true
+                if !isempty(slot.values)
+                    return popfirst!(slot.values)
+                end
+                # A heartbeat/delivery may have already woken this consumer
+                # when teardown runs, leaving it outside the notified queues.
+                state.running[] || throw(ConcurrencyViolationError("MPI broadcast relay stopped while a consumer was waiting"))
+                timer = mpi_deadlock_detect(timer, rank, tag, "bcast_meta delivery", root)
+                # Already-delivered payloads need no condition allocation.
+                if slot.cond === nothing
+                    slot.cond = Threads.Condition(state.cond.lock)
+                end
+                wait(slot.cond::Threads.Condition)
             end
-            warn_period = mpi_deadlock_detect(detect, time_start, warn_period, timeout_period,
-                                              rank, tag, "bcast_meta delivery", root)
-            wait(state.cond)
+        finally
+            slot.waiters -= 1
+            # A woken consumer may not have reacquired the lock yet. Retain
+            # its slot even if another consumer drains the last payload, or
+            # the next delivery would notify a different condition.
+            isempty(slot.values) && slot.waiters == 0 && delete!(state.slots, key)
         end
     end
 end
@@ -1404,9 +1623,16 @@ function stop_bcast_relay!(accel_comm::MPI.Comm)
     # deadlock timer, so once it is gone nothing would ever wake a consumer
     # still waiting on a payload that is now never coming. Fail them instead of
     # letting teardown hang.
-    @lock state.cond notify(state.cond,
-                            ConcurrencyViolationError("MPI broadcast relay stopped while a consumer was waiting");
-                            error=true)
+    @lock state.cond begin
+        for slot in values(state.slots)
+            cond = slot.cond
+            if cond !== nothing
+                notify(cond,
+                       ConcurrencyViolationError("MPI broadcast relay stopped while a consumer was waiting");
+                       error=true)
+            end
+        end
+    end
     return nothing
 end
 
@@ -1644,7 +1870,15 @@ end
 struct MPIWireValue{T}
     value::Union{Some{T},Nothing}
     space::MPIMemorySpace
+    # Aliasing-memo identity of the `Chunk` this value stands in for, or 0 for a
+    # sub-value produced by wrapper recursion (which has no chunk of its own).
+    # Asking for a wire value's aliasing info means broadcasting from the owner --
+    # a global synchronization point during planning -- so when the answer is
+    # already memoized for the originating chunk, reuse it (`Dagger.memoized_ainfo`).
+    origin_key::UInt
 end
+MPIWireValue{T}(value::Union{Some{T},Nothing}, space::MPIMemorySpace) where T =
+    MPIWireValue{T}(value, space, UInt(0))
 wire_type(::MPIWireValue{T}) where T = T
 has_value(w::MPIWireValue) = w.value !== nothing
 wire_value(w::MPIWireValue) = something(w.value)
@@ -1653,9 +1887,12 @@ memory_space(w::MPIWireValue) = w.space
 default_memory_space(accel::MPIAcceleration, w::MPIWireValue) = w.space
 
 function check_uniform(w::MPIWireValue{T}, original=w) where T
-    # Compare logical metadata only: the value itself is rank-local
+    # Compare logical metadata only: the value itself is rank-local. The origin
+    # key gates a collective (see `MPIWireValue`), so a rank disagreeing on it
+    # would hang in `aliasing` rather than fail loudly.
     return check_uniform(hash(T), original) &&
-           check_uniform(w.space, original)
+           check_uniform(w.space, original) &&
+           check_uniform(w.origin_key, original)
 end
 
 function tochunk(w::MPIWireValue{T}, proc::P, scope::S=Dagger.AnyScope(); kwargs...) where {T,P<:Processor,S}
@@ -1701,25 +1938,16 @@ mpi_remap_ainfo(a::Dagger.AliasingWrapper, owner::Int) =
     Dagger.AliasingWrapper(mpi_remap_ainfo(a.inner, owner))
 mpi_remap_ainfo(a::Dagger.AbstractAliasing, owner::Int) = a
 
-# Owner computes the aliasing info for its local value and broadcasts it;
-# all ranks must call this collectively at the same logical point.
+# A wire value stands in for the chunk it was unwrapped from, so its aliasing
+# info is the chunk's: reuse the memo entry rather than repeating the collective.
 function Dagger.aliasing(accel::MPIAcceleration, w::MPIWireValue, dep_mod)
-    tag = to_tag()
-    check_uniform(tag)
-    rank = MPI.Comm_rank(accel.comm)
-    if w.space.rank == rank
-        ainfo = Dagger._with_default_acceleration() do
-            Dagger.aliasing(wire_value(w), dep_mod)
-        end
-        ainfo = mpi_remap_ainfo(ainfo, w.space.rank)
-        @opcounter :aliasing_bcast_send_yield
-        ainfo = bcast_yield(accel.comm, w.space.rank, tag, ainfo)
-    else
-        ainfo = bcast_yield(accel.comm, w.space.rank, tag)
-    end
-    check_uniform(ainfo)
-    return ainfo
+    w.origin_key == 0 && return _aliasing_bcast(accel, w, dep_mod)
+    return Dagger.memoized_ainfo(() -> _aliasing_bcast(accel, w, dep_mod),
+                                 Dagger.ainfo_memo_key(w.origin_key, dep_mod))
 end
+
+mpi_ainfo_owner(w::MPIWireValue) = w.space.rank
+mpi_raw_aliasing(w::MPIWireValue, dep_mod) = Dagger.aliasing(wire_value(w), dep_mod)
 
 # All ranks enter collectively; the owner unwraps its local value, all other
 # ranks construct a wire proxy carrying only type and origin space. The
@@ -1727,10 +1955,13 @@ end
 function remotecall_endpoint_toplevel(f, accel::MPIAcceleration, cache::AliasedObjectCache, from_proc, to_proc, from_space, to_space, data::Chunk)
     local_rank = MPI.Comm_rank(accel.comm)
     T = chunktype(data)
+    # The chunk's identity alone: `aliasing` combines it with the `dep_mod` to
+    # form the same memo key `ainfo_memo_key` would.
+    origin_key = Dagger._identity_hash(data)
     w = if local_rank == from_space.rank
-        MPIWireValue{T}(Some{T}(unwrap(data)), from_space)
+        MPIWireValue{T}(Some{T}(unwrap(data)), from_space, origin_key)
     else
-        MPIWireValue{T}(nothing, from_space)
+        MPIWireValue{T}(nothing, from_space, origin_key)
     end
     return f(accel, cache, from_proc, to_proc, from_space, to_space, w)::Chunk
 end
@@ -1998,27 +2229,16 @@ function move_rewrap(accel::MPIAcceleration, cache::AliasedObjectCache, from_pro
 end
 
 # Owner computes the view's aliasing info locally and broadcasts it
-function aliasing(accel::MPIAcceleration, x::ChunkView, dep_mod)
+aliasing(accel::MPIAcceleration, x::ChunkView, dep_mod) =
+    Dagger.memoized_chunk_aliasing(() -> _aliasing_bcast(accel, x, dep_mod), x, dep_mod)
+
+mpi_ainfo_owner(x::ChunkView) = mpi_ainfo_owner(x.chunk)
+function mpi_raw_aliasing(x::ChunkView, dep_mod)
     @assert dep_mod === identity "Dependency modifiers not yet supported for ChunkView: $dep_mod"
-    handle = x.chunk.handle::MPIRef
-    tag = to_tag()
-    check_uniform(tag)
-    rank = MPI.Comm_rank(accel.comm)
-    if handle.rank == rank
-        ainfo = _with_default_acceleration() do
-            v = view(unwrap(x.chunk), x.slices...)
-            # Resolve whole-object containers (e.g. `DSparseArray`) where `v`
-            # lives; see `aliasing_unwrapped`.
-            aliasing_unwrapped(v, dep_mod)
-        end
-        ainfo = mpi_remap_ainfo(ainfo, handle.rank)
-        @opcounter :aliasing_bcast_send_yield
-        ainfo = bcast_yield(accel.comm, handle.rank, tag, ainfo)
-    else
-        ainfo = bcast_yield(accel.comm, handle.rank, tag)
-    end
-    check_uniform(ainfo)
-    return ainfo
+    v = view(unwrap(x.chunk), x.slices...)
+    # Resolve whole-object containers (e.g. `DSparseArray`) where `v`
+    # lives; see `aliasing_unwrapped`.
+    return aliasing_unwrapped(v, dep_mod)
 end
 
 # The aliased-object cache is a per-rank replicated store; every rank updates

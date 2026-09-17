@@ -13,6 +13,10 @@ function array_suite(ctx; method, accels)
 
     T = Float64
     suite = BenchmarkGroup()
+    # The named cyclic grids are currently backed by Distributed processors;
+    # an MPI worker has no Distributed workers and must use the MPI-aware
+    # arbitrary allocator instead.
+    fixture_assignment = length(procs()) > 1 ? :cyclicrow : :arbitrary
 
     for N in scales
         # Elementwise ops hold at most the input plus a same-size result.
@@ -20,31 +24,37 @@ function array_suite(ctx; method, accels)
         for b in blocks_for(N)
             sub = BenchmarkGroup()
 
-            sub["alloc (rand)"] = @benchmarkable(wait(rand(Blocks($b, $b), $T, $N, $N)),
+            # Multi-process BenchmarkTools only observes allocations made on
+            # the driver process. Arbitrary placement therefore turns each
+            # driver-owned tile payload into benchmark noise (a 1024² result
+            # can vary by several MiB between otherwise-identical revisions).
+            # A cyclic grid keeps the Distributed workload balanced and gives
+            # both revisions the same share of driver-local tiles.
+            sub["alloc (rand)"] = @benchmarkable(wait(rand(Blocks($b, $b), $T, $N, $N; assignment=$fixture_assignment)),
                 teardown = (@everywhere GC.gc()))
 
             sub["broadcast (X .+ 1)"] = @benchmarkable(wait(X .+ 1),
-                setup = (X = rand(Blocks($b, $b), $T, $N, $N); wait(X)),
+                setup = (X = rand(Blocks($b, $b), $T, $N, $N; assignment=$fixture_assignment); wait(X)),
                 teardown = (X = nothing; @everywhere GC.gc()))
 
             sub["add (X + X)"] = @benchmarkable(wait(X + X),
-                setup = (X = rand(Blocks($b, $b), $T, $N, $N); wait(X)),
+                setup = (X = rand(Blocks($b, $b), $T, $N, $N; assignment=$fixture_assignment); wait(X)),
                 teardown = (X = nothing; @everywhere GC.gc()))
 
             sub["map (sin.(X))"] = @benchmarkable(wait(sin.(X)),
-                setup = (X = rand(Blocks($b, $b), $T, $N, $N); wait(X)),
+                setup = (X = rand(Blocks($b, $b), $T, $N, $N; assignment=$fixture_assignment); wait(X)),
                 teardown = (X = nothing; @everywhere GC.gc()))
 
             sub["transpose (permutedims)"] = @benchmarkable(wait(permutedims(X)),
-                setup = (X = rand(Blocks($b, $b), $T, $N, $N); wait(X)),
+                setup = (X = rand(Blocks($b, $b), $T, $N, $N; assignment=$fixture_assignment); wait(X)),
                 teardown = (X = nothing; @everywhere GC.gc()))
 
             sub["reduce (sum)"] = @benchmarkable(sum(X),
-                setup = (X = rand(Blocks($b, $b), $T, $N, $N); wait(X)),
+                setup = (X = rand(Blocks($b, $b), $T, $N, $N; assignment=$fixture_assignment); wait(X)),
                 teardown = (X = nothing; @everywhere GC.gc()))
 
             sub["norm"] = @benchmarkable(norm(X),
-                setup = (X = rand(Blocks($b, $b), $T, $N, $N); wait(X)),
+                setup = (X = rand(Blocks($b, $b), $T, $N, $N; assignment=$fixture_assignment); wait(X)),
                 teardown = (X = nothing; @everywhere GC.gc()))
 
             suite["N=$N (block $b)"] = sub

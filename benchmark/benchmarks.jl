@@ -99,7 +99,7 @@
 #   request/response protocol -- see `run_all_mpi` vs `run_all_external`).
 #   Defaults to "0" (disabled; plain subprocess, worker.jl).
 # - BENCHMARK_SECONDS: Time budget (seconds) per benchmark. Defaults to "30".
-# - BENCHMARK_SAMPLES: Max samples per benchmark. Defaults to "5".
+# - BENCHMARK_SAMPLES: Max samples per benchmark. Defaults to "7".
 # - BENCHMARK_PROC_TIMEOUT: Wall-clock seconds to wait for a single benchmark
 #   before assuming the worker is wedged, killing it, and treating it like an
 #   OOM (skip this and larger scales, restart). Defaults to "3600".
@@ -171,6 +171,10 @@ function spawn_worker()
     rm(joinpath(WORKDIR, "request.json.tmp"); force=true)
     rm(joinpath(WORKDIR, "done"); force=true)
     rm(joinpath(WORKDIR, "results_mpi_manifest.json"); force=true)
+    for name in readdir(WORKDIR)
+        startswith(name, "error_mpi_rank_") || continue
+        rm(joinpath(WORKDIR, name); force=true)
+    end
     if MPI_RANKS > 0
         # `MPI.mpiexec` only sets up the environment mpiexec needs (library
         # paths for the bundled MPICH_jll, etc.) for the dynamic extent of the
@@ -204,7 +208,8 @@ send_request(id, action, keypath) =
                   JSON3.write((; id=id, action=action, keypath=keypath)))
 
 # Wait for a response to request `id`, or for the worker to die / time out.
-# Returns the status string ("ok"/"error"/"missing"/"oom"/"died"/"timeout").
+# Returns an object with `status` and `message` fields. Preserve the worker's
+# error text here: this orchestrator is the only output Airspeed reliably shows.
 function await_response(proc, id)
     resppath = joinpath(WORKDIR, "response_$(id).json")
     t0 = time()
@@ -215,10 +220,13 @@ function await_response(proc, id)
             catch
                 nothing  # caught mid-write; retry
             end
-            resp === nothing || return String(resp.status)
+            resp === nothing || return (;
+                status=String(resp.status),
+                message=hasproperty(resp, :message) ? String(resp.message) : "",
+            )
         end
-        process_running(proc) || return "died"
-        time() - t0 > PROC_TIMEOUT && return "timeout"
+        process_running(proc) || return (; status="died", message="")
+        time() - t0 > PROC_TIMEOUT && return (; status="timeout", message="")
         sleep(POLL)
     end
 end
@@ -254,7 +262,8 @@ function run_all_external()
 
         req_id += 1
         send_request(req_id, "run", it.keypath)
-        status = await_response(proc, req_id)
+        response = await_response(proc, req_id)
+        status = response.status
 
         if status == "ok"
             results[it.keypath] =
@@ -262,7 +271,7 @@ function run_all_external()
         elseif status == "missing"
             @warn "Worker has no such benchmark (capability probe differs?): $(join(it.keypath, " / "))"
         elseif status == "error"
-            @warn "Benchmark errored (skipped): $(join(it.keypath, " / "))"
+            @warn "Benchmark errored (skipped): $(join(it.keypath, " / "))" message=response.message
         else  # "oom" / "died" / "timeout"
             @warn "Benchmark $(status); skipping this and larger scales of $(it.suite)/$(it.method)" benchmark = join(it.keypath, " / ")
             if it.N >= 0
@@ -299,10 +308,10 @@ function run_all_mpi()
 
     proc = spawn_worker()
     donepath = joinpath(WORKDIR, "done")
+    completed = false
     t0 = time()
     while !isfile(donepath)
         if !process_running(proc)
-            @error "MPI benchmark worker exited before signaling completion; producing partial results."
             break
         end
         if time() - t0 > PROC_TIMEOUT
@@ -312,13 +321,27 @@ function run_all_mpi()
         end
         sleep(POLL)
     end
+    completed = isfile(donepath)
     if process_running(proc)
         try; wait(proc); catch; end
     end
 
+    if !completed
+        errorpaths = sort!(filter(name -> startswith(name, "error_mpi_rank_") &&
+                                          endswith(name, ".json"),
+                                  readdir(WORKDIR)))
+        if !isempty(errorpaths)
+            errorpath = joinpath(WORKDIR, first(errorpaths))
+            failure = JSON3.read(read(errorpath, String))
+            error("MPI benchmark rank $(failure.rank) failed while running $(failure.benchmark):\n$(failure.exception)")
+        end
+        error("MPI benchmark worker exited before signaling completion")
+    end
+
     manifestpath = joinpath(WORKDIR, "results_mpi_manifest.json")
-    isfile(manifestpath) || return results
+    isfile(manifestpath) || error("MPI benchmark worker produced no result manifest")
     manifest = JSON3.read(read(manifestpath, String))
+    isempty(manifest) && error("MPI benchmark worker produced an empty result manifest")
     for entry in manifest
         kp = String[string(k) for k in entry.keypath]
         resultpath = joinpath(WORKDIR, String(entry.file))

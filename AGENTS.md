@@ -324,3 +324,194 @@ lesson.
    Category IDs are assigned lazily on first `category_id` use. Keep it
    that way — a `const ID = register_category!(...)` at Dagger toplevel
    is not safe.
+
+30. **Benchmark fixtures must be fully awaited.** DArray construction is
+   asynchronous: if setup launches `A` and `B` but waits only for `A`, the
+   timed body inherits an arbitrary fraction of `B`'s allocation and scheduling
+   work. That contamination is placement- and timing-dependent, so a scheduler
+   improvement can look like a multi-fold regression. Wait every fixture that
+   the measured operation consumes.
+
+31. **SPMD benchmarks need a rank-uniform sample loop.** BenchmarkTools applies
+   its `seconds` cutoff independently on each process; small timing differences
+   can make one MPI rank stop while a peer enters another collective sample,
+   deadlocking the next benchmark. Run one sample per rank at a time, use a
+   collective maximum to make the stop decision, and use a cooperatively-waited
+   `MPI.Ibarrier` after per-sample GC/teardown before timing the next sample (a
+   blocking `MPI.Barrier` has the same progress-engine deadlock risk as lesson
+   12). Otherwise a fast rank also charges its next sample for waiting on a
+   peer's preceding GC, creating large but fake timing regressions in short
+   collective operations.
+
+32. **An empty benchmark suite is a benchmark failure, not a successful no-op.**
+   AirspeedVelocity adds its own `time_to_load` result, so an orchestrator that
+   swallows every leaf error still emits a plausible-looking green report with
+   one row. Require a nonempty manifest, and abort an SPMD run on a leaf error:
+   after one rank leaves a failed operation, attempting the next collective is
+   unsafe. Also treat BenchmarkTools' generated `samplefunc` as a versioned
+   internal API: 1.8 changed it from a two-argument function returning a tuple
+   to a four-argument function writing measurements through a `Ref`.
+
+33. **Synchronous and asynchronous submission need different batch sizes.** A
+   large asynchronous batch amortizes channel and scheduler overhead while its
+   submitter overlaps with continued planning. The same batch size on a
+   one-thread `BatchedEnqueueQueue` withholds every task in a short region until
+   planning has nearly or completely finished, serializing planning against
+   execution. This is especially costly for iterative solvers, which execute
+   many small datadeps regions. Tune the two queue types independently.
+
+34. **A benchmark script shared across revisions must probe backend capability.**
+   Airspeed runs today's script against old Dagger code, and a generic suite can
+   also contain a leaf unsupported by the selected backend. MPI SVD, for
+   example, uses a Distributed-only processor grid and divides by zero before
+   sampling. Probe optional or newly backend-enabled operations while
+   constructing the suite, so unsupported leaves are absent rather than
+   aborting the comparison. When an external MPI worker does abort, persist
+   each failing rank's `CapturedException` before `MPI.Abort`: the first failure
+   may be off rank 0 and can terminate rank 0 before it writes anything, mpiexec
+   output may disappear from the parent runner's log, and a generic "worker
+   exited" message discards the only actionable diagnosis.
+
+35. **A whole-region copy owner must represent the whole copy batch.** A
+   remainder can be assembled by several copy tasks from disjoint source
+   spaces. Registering each task as the owner of the whole destination makes
+   the last registration replace the earlier ones; a whole-region consumer
+   then waits for one piece and a late copy can overwrite its result. Making
+   the last task depend on every earlier copy repairs that owner invariant,
+   but couples disjoint copies unnecessarily and puts the last one on the
+   critical path. Represent the logical write as a batch producer instead
+   (lesson 38). Registering every exact destination span is correct too, but
+   is a performance cliff for halo exchange: a 64-tile stencil produced
+   hundreds of megabytes of interval-tree/overlap bookkeeping and regressed
+   by 7–8x.
+
+36. **Distributed benchmark kernels must exist on every worker before
+   sampling.** Defining an `@stencil` wrapper only on the driver serializes its
+   generated closure to whichever worker happens to receive a tile. Globals
+   used by the closure (`Clamp`, `Reflect`, etc.) can then be missing or too new
+   for that worker's world age, and even successful leaves randomly pay remote
+   compilation during a timed sample. Import macros/globals in one
+   `@everywhere` statement, then define the macro-using wrappers in a second
+   `@everywhere` statement (the import must be evaluated before remote macro
+   expansion). A one-block capability probe is not a distributed warmup.
+
+37. **BenchmarkTools sees only the driver process's allocations.** In a
+   Distributed benchmark, arbitrary tile placement makes the reported bytes
+   include however many payload tiles happened to execute on the driver. A
+   1024² `Float64` allocation consequently varied from 2–8 MiB with no global
+   allocation change, and task overhead varied with the driver's share too.
+   Give Distributed benchmark fixtures a deterministic balanced proc grid (the
+   array and stencil suites use `assignment=:cyclicrow` when
+   `length(procs()) > 1`) so both revisions measure the same local fraction of
+   the workload. Do not force that assignment under MPI: named cyclic grids are
+   built from Distributed processors, and an MPI rank's `procs()` is only `[1]`,
+   so the grid is empty and allocation divides by zero. Retain `:arbitrary`
+   there so the MPI-aware scheduler places tiles. The reported number is still
+   process-local; deterministic placement only makes the comparison meaningful.
+
+38. **A logical copy batch must keep every physical producer in every
+   dependency view.** When a `MultiRemainderAliasing` restores one whole-region
+   replica from disjoint pieces, launch each copy with its own source readers
+   and syncdeps, but do not let each copy rewrite the destination's whole
+   `ainfos_owner`, `arg_history`, or `arg_current`. After all copies are
+   launched, record one logical writer whose producer is the complete task
+   batch. Expand that producer in whole-object read/write dependencies,
+   historical remainder dependencies, and free-buffer syncdeps; widening only
+   the live owner silently leaves history or teardown waiting for one copy.
+   Keep the singleton-copy path direct so ordinary per-argument moves do not
+   allocate a batch vector.
+
+39. **Gate diagnostic work at the call site, not only inside the logger.**
+   `hier_log!` checks `HIER_TIMING[]`, but Julia evaluates its arguments before
+   that check. Unconditional `time_ns()` calls around per-argument aliasing and
+   slot creation therefore survived with timing disabled. Gate both the start
+   timestamp and the finish/event argument evaluation; a disabled diagnostic
+   should not pay for the measurement it discards.
+
+40. **Reusable scratch macros must return their declared container types.**
+   `@reusable_vector` and `@reusable_dict` expand through non-const global
+   `TaskLocalValue`s. Without a type assertion, their expressions infer as
+   `Any` even though the runtime containers are typed: iteration, element
+   stores, and closures capturing them lose that type throughout the hot loop.
+   The aliasing-result scratch introduced one boxed pair allocation per
+   argument this way. Assert the container type inside the macros, before
+   `empty!`, rather than relying on each caller to do so. Escape the supplied
+   type expressions to resolve caller-defined types correctly, and check the
+   return types with `@inferred` as well as the containers' runtime types.
+
+41. **Remote aliasing batches must seed the driver's region memo.** Phase 1
+   groups arguments by owner and computes aliasing remotely, but Distributed
+   RPCs do not inherit the caller's `CHUNK_AINFO_MEMO` scoped value. Keeping
+   those answers only in `arg_to_ainfo` makes Phase 4 ask the owners again.
+   Seed the memo when merging each remote batch, keyed by the original local
+   `Chunk`/`ChunkView` and dependency modifier, not the deserialized argument
+   wrapper. Keep the local/MPI path unchanged: it already fills that memo.
+   A typed merge barrier also prevents `remotecall_fetch`'s `Any` result from
+   erasing the result container's type in the per-argument loop.
+
+42. **Fix the SPD fixture's destination placement, not just its input's.**
+   Giving `G` a cyclic assignment does not give `G * G'` that assignment:
+   `similar(G)` allocates an arbitrarily placed result. A Cholesky benchmark
+   must explicitly allocate its SPD destination with the same assignment and
+   use `mul!` in untimed setup, or its input layout still varies between
+   samples/revisions. Keep named grids Distributed-only and leave MPI on its
+   native allocator. This controls the fixture, not the measured operation:
+   out-of-place multiplication and Cholesky still allocate/place their own
+   outputs normally, and neither scheduling heuristics nor thresholds change.
+
+43. **Broadcast delivery must wake only its own consumers.** One shared
+   condition for all `(root, tag)` slots makes a delivery wake every unrelated
+   waiter: draining 1024 tags one at a time took 395 ms, versus 3 ms with
+   per-slot conditions sharing the registry lock. Create conditions only when
+   a consumer actually blocks. Keep a slot alive until all its consumers have
+   left, including consumers already notified but still reacquiring the lock;
+   an empty FIFO alone does not mean its condition can be replaced. Heartbeats
+   and shutdown still notify every slot, and an empty consumer must also check
+   `running`: a consumer already woken by a heartbeat is outside the shutdown
+   notification queues and otherwise goes back to sleep after the relay stops.
+
+44. **An uncontended MPI receive needs a lease, not an event.** Uniformity
+   checks made the old receive guard create hundreds of thousands of
+   `Base.Event`s per sparse product, although its `(comm, source, tag)` stream
+   had only one receiver. Register `nothing` for an owned stream and create
+   a one-shot event only when a competitor arrives; delete the stream and
+   notify that event when the owner leaves. Never reset/recycle the event:
+   notified competitors can still be inside `wait`. Use explicit locked
+   blocks, since the old captured `our_event` lowered to a `Core.Box`, and
+   release the lease in `finally` on both serialized and in-place paths so a
+   failed receive cannot strand every subsequent receiver of that stream.
+
+45. **Task-pool capacity is not a reason to create every slot upfront.**
+   Completion and placement tasks can be short-lived, but each owns a
+   task-local fire cache with capacity 32. Creating all 32 tasks, channels,
+   and monitors on its first dispatch pays for 31 idle slots when that caller
+   dispatches only once. Initialize slots on demand without changing capacity
+   or the overflow policy; 100 single-use caches fell from 75,100 allocations
+   / 4,004,800 bytes to 6,800 / 296,000. Clear the dynamic scope at actual slot
+   creation, run its setup before scheduling, and register each dispatch
+   before publishing the payload. Finalization must skip unassigned slots.
+
+46. **Repeated calls do not necessarily warm the option-default cache.**
+   `BasicLFUCache` can immediately evict a newly inserted frequency-1 key
+   when every resident key is more frequent, so a new signature keeps taking
+   the default fallback after arbitrarily many warmups. Test that path with
+   a full cache in a fresh task, not by changing capacity or eviction policy.
+   Splat `Signature.sig` directly for non-keyword calls: splatting its
+   identical `sig_nokw` view boxes the view and an iteration pair per type.
+   The generic fallback also needs no specialization of its unused arguments;
+   leave type-dependent user overrides untouched. A four-type cold default
+   population fell from 217 allocations / 9,088 bytes to 49 / 1,792, while
+   cache hits stayed at 1 / 256. Keep keyword views instead of adding a copy
+   to every signature, especially signatures whose defaults are already cached.
+
+47. **Even a typed `findmin(::Dict)` can box its result in an eviction loop.**
+   The defaults LFU allocated one `(frequency, key)` tuple per eviction
+   despite its concrete key/frequency types. A direct minimum-frequency scan
+   removes that allocation without changing capacity, admission or eviction
+   decisions. Initialize from the first dictionary entry and update only on
+   strict `<` so equal-frequency ties preserve the original iteration order.
+   Compare exact cache contents and frequencies against the old algorithm
+   after mixed hits/misses, including zero capacity. Ten thousand repeated
+   evictions fell from 10,000 allocations / 320,000 bytes to zero; cache-hit
+   behavior is unchanged. Together with lesson 46, cold default population
+   is 25 allocations / 1,024 bytes rather than 217 / 9,088.

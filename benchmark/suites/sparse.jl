@@ -72,7 +72,7 @@ function sparse_suite(ctx; method, accels)
         if spmv_ok && fits_budget(sparse_bytes(N; nmats=2, density=density, T=T))
             sub["spmv (S*x)"] = @benchmarkable(wait(S * x),
                 setup = (S = distribute(sprand($T, $N, $N, $density), Blocks($b, $b));
-                         x = distribute(rand($T, $N), Blocks($b)); wait(S)),
+                         x = distribute(rand($T, $N), Blocks($b)); wait(S); wait(x)),
                 teardown = (S = nothing; x = nothing; @everywhere GC.gc()))
         end
 
@@ -87,7 +87,7 @@ function sparse_suite(ctx; method, accels)
         if cg_ok && fits_budget(sparse_bytes(N; nmats=2, density=3 / N, T=T))
             sub["cg solve (laplacian)"] = @benchmarkable(wait(first(Dagger.cg(A, rhs; atol=1e-8, rtol=1e-6, itmax=200))),
                 setup = (A = distribute(laplacian_1d($T, $N), Blocks($b, $b));
-                         rhs = distribute(rand($T, $N), Blocks($b)); wait(A)),
+                         rhs = distribute(rand($T, $N), Blocks($b)); wait(A); wait(rhs)),
                 teardown = (A = nothing; rhs = nothing; @everywhere GC.gc()))
         end
 

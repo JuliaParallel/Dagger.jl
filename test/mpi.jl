@@ -51,6 +51,9 @@ const rank = MPI.Comm_rank(comm)
 const nranks = MPI.Comm_size(comm)
 const accel = Dagger.current_acceleration()
 
+include("mpi-broadcast.jl")
+include("mpi-receive.jl")
+
 mpi_procs() = sort(collect(Dagger.get_processors(MPIExt.MPIClusterProc(comm)));
                    by=p->(p.rank, Dagger.short_name(p)))
 proc_for_rank(r) = first(filter(p->p.rank == r, mpi_procs()))
@@ -67,6 +70,7 @@ end
 
 inc!(X) = (X .+= 1; nothing)
 add1!(X) = (X .+= 1; nothing)
+delayed_add1!(X) = (sleep(0.25); X .+= 1; nothing)
 scale2!(X) = (X .*= 2; nothing)
 sum_into!(r, X) = (r[] = Int(sum(X)); nothing)
 sum_into_f!(r, X) = (r[] = Float64(sum(X)); nothing)
@@ -170,11 +174,17 @@ end
         @test c.handle isa MPIExt.MPIRef
         @test Dagger.check_uniform(c.handle)
     end
+
 end
 
 @testset "check_uniform" begin
     @test Dagger.check_uniform(42)
     @test Dagger.check_uniform(hash((1, :a, "x")))
+    # Reused serialized payloads retain the general Integer wire format,
+    # including arbitrary precision and equality across integer types.
+    @test Dagger.check_uniform(big(2)^256)
+    @test Dagger.check_uniform(rank == 0 ? UInt8(42) : Int64(42))
+    @test MPIExt.compare_all([1, 2, 3], comm)
     # Rank-dependent values must be detected on every rank
     @test_throws ArgumentError Dagger.check_uniform(rank)
     # The compare stream stays aligned after a detected failure
@@ -447,18 +457,27 @@ end
     cv_top = view(c, 1:2, 1:4)
     cv_bot = view(c, 3:4, 1:4)
     @test cv_top isa Dagger.ChunkView
+    whole_sum = Ref(0.0)
 
     r1 = min(1, nranks-1)
     r2 = min(2, nranks-1)
     Dagger.spawn_datadeps() do
-        Dagger.@spawn scope=rank_scope(r1) add1!(InOut(cv_top))
+        # Delay the first producer so the bottom-half copy reaches rank 0
+        # first. A whole-ainfo owner for both disjoint copy tasks used to let
+        # the following whole-chunk write run after only the faster copy, then
+        # the late top-half copy overwrote its result.
+        Dagger.@spawn scope=rank_scope(r1) delayed_add1!(InOut(cv_top))
         Dagger.@spawn scope=rank_scope(r2) scale2!(InOut(cv_bot))
+        # A whole-object read must wait for both disjoint writeback copies,
+        # even though neither copy covers the whole chunk by itself.
+        Dagger.@spawn scope=rank_scope(0) sum_into_f!(Out(whole_sum), In(c))
         Dagger.@spawn scope=rank_scope(0) add1!(InOut(c))
     end
 
     ref_blk = A[1:4, 1:4]
     ref_blk[1:2, :] .+= 1
     ref_blk[3:4, :] .*= 2
+    rank == 0 && @test whole_sum[] ≈ sum(ref_blk)
     ref_blk .+= 1
     # Collective uniform fetches: identical on every rank
     @test fetch(c) ≈ ref_blk

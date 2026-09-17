@@ -16,16 +16,17 @@
 #   that completed (in sorted-keypath order).
 # - `results_mpi_manifest.json`: [{keypath, file}, ...] pairing each
 #   completed leaf's key path to its result file.
+# - `error_mpi_rank_<rank>.json`: a rank-local `CapturedException`, written
+#   before aborting the communicator when benchmark work fails.
 # - `done`: written last, once every benchmark has been attempted.
 #
 # Note this worker does not have worker.jl's per-scale OOM isolation: a
 # caught `OutOfMemoryError` aborts the *whole* MPI job (`MPI.Abort`) rather
 # than exiting only the local rank and letting the orchestrator retry smaller
 # scales, since a partially-alive rank set can't make collective progress.
-# Other exceptions are caught per-rank and just skip that one benchmark:
-# since every rank runs the identical deterministic computation, ranks are
-# expected to fail together at the same call, so no cross-rank coordination
-# is needed for the common case.
+# Any other exception aborts the MPI job. A partial SPMD result set is not a
+# trustworthy benchmark run, and continuing after one rank fails can deadlock
+# as soon as its peers enter their next collective.
 
 using BenchmarkTools
 using Distributed
@@ -112,6 +113,66 @@ for (_, b) in BenchmarkTools.leaves(SUITE)
     b.params.gcsample = true
 end
 
+# BenchmarkTools enforces `seconds` independently on each process. That is not
+# safe for SPMD work: small timing differences can make one rank stop sampling
+# while another enters one more Dagger collective, leaving the latter hung. GC
+# and benchmark teardown also finish at different times, so without a barrier a
+# fast rank charges its next sample for waiting on a slow peer.
+#
+# Keep the ordinary BenchmarkTools sampling semantics, but make the stop
+# decision from the maximum elapsed time across ranks and synchronize directly
+# before every timed sample. All ranks therefore execute exactly the same number
+# of samples, and rank 0's trial measures the operation rather than another
+# rank's preceding GC.
+function run_mpi_benchmark(bench::BenchmarkTools.Benchmark)
+    params = bench.params
+
+    # BenchmarkTools 1.8 changed its generated sample function from returning
+    # `(time, gctime, memory, allocs, value)` to writing the four measurements
+    # through a Ref. Keep the compatibility check here, at the one unavoidable
+    # use of BenchmarkTools' internal sampling API.
+    sample_ref = Ref{Tuple{Float64,Float64,Int,Int}}((0.0, 0.0, 0, 0))
+    new_sample_api = applicable(bench.samplefunc, bench.quote_vals, params,
+                                sample_ref, nothing)
+    function sample!(sample_params)
+        if new_sample_api
+            bench.samplefunc(bench.quote_vals, sample_params, sample_ref, nothing)
+            return sample_ref[]
+        else
+            result = bench.samplefunc(bench.quote_vals, sample_params)
+            return result[1:(end - 1)]
+        end
+    end
+
+    wait(MPI.Ibarrier(comm))
+    sample!(BenchmarkTools.Parameters(params; evals=1))
+
+    trial = BenchmarkTools.Trial(params)
+    params.gctrial && BenchmarkTools.gcscrub()
+    elapsed = 0.0
+    for sample in 1:params.samples
+        sample > 1 && params.gcsample && BenchmarkTools.gcscrub()
+        # A blocking MPI.Barrier can park the only Julia thread while a peer
+        # still needs this rank's Dagger progress tasks. Base.wait on Ibarrier
+        # cooperatively yields instead.
+        wait(MPI.Ibarrier(comm))
+        sample_start = Base.time()
+        result = sample!(params)
+        push!(trial, result...)
+
+        # Do not charge this rank for time spent at the pre-sample barrier.
+        # Sum the slowest rank's setup/body/teardown duration for each sample,
+        # which is the SPMD analogue of BenchmarkTools' local wall-time budget.
+        local_elapsed = Base.time() - sample_start
+        # Align cooperatively before the blocking reduction, so no rank can be
+        # parked in MPI while a peer is still finishing Dagger work.
+        wait(MPI.Ibarrier(comm))
+        elapsed += MPI.Allreduce(local_elapsed, MPI.MAX, comm)
+        elapsed >= params.seconds && break
+    end
+    return trial
+end
+
 # --- Run every benchmark once, identically on every rank --------------------
 # Sorted by keypath (not Dict/BenchmarkGroup insertion order) so ranks agree
 # even if suite construction were ever to introduce nondeterministic
@@ -125,16 +186,30 @@ for (keypath, bench) in leaves
     kp = String[string(k) for k in keypath]
     rank == 0 && @info "[worker_mpi] Running: $(join(kp, " / "))"
     try
-        trial = BenchmarkTools.run(bench)
+        trial = run_mpi_benchmark(bench)
         rank == 0 && push!(results, (kp, trial))
     catch err
+        bt = catch_backtrace()
+        # Any rank may be the first to fail, and MPI.Abort can terminate rank 0
+        # before it observes the same error. Give every failing rank its own
+        # sidecar so the orchestrator can report the first one that survives.
+        failure = (;
+            benchmark=join(kp, " / "),
+            rank,
+            exception=sprint(showerror, CapturedException(err, bt)),
+        )
+        atomic_write(joinpath(WORKDIR, "error_mpi_rank_$(rank).json"),
+                     JSON3.write(failure))
         if err isa OutOfMemoryError
             rank == 0 && @warn "[worker_mpi] OutOfMemoryError; aborting MPI job" benchmark = join(kp, " / ")
             flush(stdout); flush(stderr)
             MPI.Abort(comm, 137)
             exit(137)  # unreachable unless MPI.Abort fails to terminate us
         else
-            rank == 0 && @warn "[worker_mpi] Benchmark errored (skipped)" benchmark = join(kp, " / ") exception = (err, catch_backtrace())
+            @error "[worker_mpi] Benchmark errored; aborting MPI job" rank benchmark = join(kp, " / ") exception = (err, bt)
+            flush(stdout); flush(stderr)
+            MPI.Abort(comm, 1)
+            exit(1)  # unreachable unless MPI.Abort fails to terminate us
         end
     end
 end

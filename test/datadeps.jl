@@ -2,6 +2,85 @@ import Dagger: ChunkView, Chunk, AbstractAliasing, MemorySpace, ArgumentWrapper
 import Dagger: aliasing, memory_space
 using LinearAlgebra, Graphs
 
+@testset "Hierarchical timing gates" begin
+    # Exercise both the identity slot and the general move_rewrap path. Timing
+    # must remain available when enabled, independently of scheduler logging.
+    tsl = Dagger.TimespanLogging
+    old_timing = Dagger.HIER_TIMING[]
+    try
+        # Also cover the threaded branch when the driver has multiple threads.
+        # The captured result buffer must infer concretely there as well.
+        Dagger.HIER_TIMING[] = false
+        parallel_args = [ArgumentWrapper(Dagger.tochunk(zeros(4)), identity)
+                         for _ in 1:8]
+        parallel_result = @inferred Dagger._compute_aliasing_batch(parallel_args)
+        @test length(parallel_result) == length(parallel_args)
+        @test all(p -> p.second == Dagger.AliasingWrapper(aliasing(p.first.arg)),
+                  parallel_result)
+        for timing in (false, true)
+            tsl.steal_typed(Dagger.LogHierAinfo)
+            tsl.steal_typed(Dagger.LogHierSlot)
+            Dagger.HIER_TIMING[] = timing
+            A = zeros(4)
+            chunk = Dagger.tochunk(A)
+            arg_ws = [ArgumentWrapper(chunk, identity)]
+            result = @inferred Dagger._compute_aliasing_batch(arg_ws)
+            @test only(result).second == Dagger.AliasingWrapper(aliasing(chunk))
+            state = Dagger.DataDepsState()
+            space = memory_space(chunk)
+            @test Dagger.generate_slot!(state, space, chunk) === chunk
+            @test fetch(Dagger.generate_slot!(state, space, view(chunk, 1:4))) == A
+            ainfo_events = tsl.steal_typed(Dagger.LogHierAinfo)
+            slot_events = tsl.steal_typed(Dagger.LogHierSlot)
+            if timing
+                @test length(ainfo_events) == 1
+                @test only(ainfo_events).data[1] > 0
+                @test only(ainfo_events).data[2] == 1
+                @test count(ev -> ev.id.kind === :total, slot_events) == 2
+                @test count(ev -> ev.id.kind === :moved, slot_events) == 1
+                @test count(ev -> ev.id.kind === :samespace, slot_events) == 1
+                @test all(ev -> ev.data > 0, slot_events)
+            else
+                @test isempty(ainfo_events)
+                @test isempty(slot_events)
+            end
+        end
+    finally
+        Dagger.HIER_TIMING[] = old_timing
+    end
+end
+
+@testset "Distributed aliasing batch memo" begin
+    chunks = Chunk[wid == myid() ? Dagger.tochunk(zeros(4,4)) :
+                                  remotecall_fetch(Dagger.tochunk, wid, zeros(4,4))
+                   for wid in procs()]
+    # Cover the direct local batch, a single remote owner, and parallel owner
+    # batches. Dependency modifiers and views must each keep their own memo key.
+    groups = [[first(chunks)], [last(chunks)], chunks]
+    for group in groups
+        arg_ws = Dict{ArgumentWrapper,ArgumentWrapper}()
+        for chunk in group
+            for arg_w in (ArgumentWrapper(chunk, identity),
+                          ArgumentWrapper(chunk, UpperTriangular),
+                          ArgumentWrapper(view(chunk, 1:2, :), identity))
+                arg_ws[arg_w] = arg_w
+            end
+        end
+        memo = Dagger.ChunkAinfoMemo()
+        Dagger.with(Dagger.CHUNK_AINFO_MEMO => memo) do
+            _, _, arg_to_ainfo = Dagger.build_aliasing_parallel(arg_ws)
+            for arg_w in keys(arg_ws)
+                key = Dagger.ainfo_memo_key(arg_w.arg, arg_w.dep_mod)
+                @test haskey(memo.entries, key)
+                # A cache miss must fail, not silently recompute the same answer.
+                cached = Dagger.memoized_ainfo(() -> error("aliasing batch was not memoized"), key)
+                @test cached === arg_to_ainfo[arg_w].inner
+                @test aliasing(Dagger.current_acceleration(), arg_w.arg, arg_w.dep_mod) === cached
+            end
+        end
+    end
+end
+
 @testset "Memory Aliasing" begin
     A = rand(4)
     a = Dagger.aliasing(A)

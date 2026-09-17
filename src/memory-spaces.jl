@@ -661,34 +661,24 @@ aliasing_unwrapped(x) = aliasing(aliasing_root(x))
 aliasing_unwrapped(x, dep_mod) = aliasing(aliasing_root(x), dep_mod)
 
 function aliasing(x::Chunk, T)
-    # Under uniform execution (MPI), `root_worker_id` is always `myid()` and is
-    # not a valid owner key -- defer to the acceleration so non-owning ranks
-    # take the owner-broadcast path instead of a local unwrap.
-    accel = current_acceleration()
-    if uniform_execution(accel)
-        return aliasing(accel, x, T)
-    end
-    if root_worker_id(x.processor) == myid()
-        return aliasing_unwrapped(unwrap(x), T)
-    end
-    @assert x.handle isa DRef
-    return remotecall_fetch(root_worker_id(x.processor), x, T) do x, T
-        aliasing_unwrapped(unwrap(x), T)
-    end
-end
-function aliasing(x::Chunk)
-    accel = current_acceleration()
-    if uniform_execution(accel)
-        return aliasing(accel, x, identity)
-    end
-    if root_worker_id(x.processor) == myid()
-        return aliasing_unwrapped(unwrap(x))
-    end
-    @assert x.handle isa DRef
-    return remotecall_fetch(root_worker_id(x.processor), x) do x
-        aliasing_unwrapped(unwrap(x))
+    return memoized_chunk_aliasing(x, T) do
+        # Under uniform execution (MPI), `root_worker_id` is always `myid()` and is
+        # not a valid owner key -- defer to the acceleration so non-owning ranks
+        # take the owner-broadcast path instead of a local unwrap.
+        accel = current_acceleration()
+        if uniform_execution(accel)
+            return aliasing(accel, x, T)
+        end
+        if root_worker_id(x.processor) == myid()
+            return aliasing_unwrapped(unwrap(x), T)
+        end
+        @assert x.handle isa DRef
+        return remotecall_fetch(root_worker_id(x.processor), x, T) do x, T
+            aliasing_unwrapped(unwrap(x), T)
+        end
     end
 end
+aliasing(x::Chunk) = aliasing(x, identity)
 aliasing(x::DTask, T) = aliasing(fetch(x; move_value=false, unwrap=false), T)
 aliasing(x::DTask) = aliasing(fetch(x; move_value=false, unwrap=false))
 

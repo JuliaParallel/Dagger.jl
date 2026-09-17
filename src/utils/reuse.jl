@@ -565,19 +565,21 @@ end
 # N.B. Emptied on take (cheap when already empty), so users need no cleanup
 # registration for correctness — explicit `empty!` at the end of use remains
 # good hygiene to release references promptly.
+# The task-local globals are non-const, so assert the declared container type
+# before empty! to keep both that call and the caller's scratch use inferred.
 macro reusable_vector(name, T, null, N)
     vec_name = Symbol("__$(name)_TLV_ReusableVector")
     if !hasproperty(__module__, vec_name)
         __module__.eval(:(#=const=# $vec_name = $TaskLocalValue{$Vector{$T}}(()->$Vector{$T}())))
     end
-    return :(empty!($(esc(vec_name))[]))
+    return :(empty!($(esc(vec_name))[]::$Vector{$(esc(T))}))
 end
 macro reusable_dict(name, K, V, null_key, null_value, N)
     dict_name = Symbol("__$(name)_TLV_ReusableDict")
     if !hasproperty(__module__, dict_name)
         __module__.eval(:(#=const=# $dict_name = $TaskLocalValue{$Dict{$K,$V}}(()->$Dict{$K,$V}())))
     end
-    return :(empty!($(esc(dict_name))[]))
+    return :(empty!($(esc(dict_name))[]::$Dict{$(esc(K)),$(esc(V))}))
 end
 
 mutable struct ReusableTaskCache
@@ -591,21 +593,12 @@ mutable struct ReusableTaskCache
         tasks = Vector{Task}(undef, N)
         chans = Vector{Channel{Any}}(undef, N)
         ready = [Threads.Atomic{Bool}(true) for _ in 1:N]
-        for idx in 1:N
-            chans[idx] = Channel{Any}(1)
-            chan, r = chans[idx], ready[idx]
-            # N.B. These tasks are created on whichever call first touches this
-            # (task-local) cache and then serve every later payload, so they
-            # must not inherit that call's dynamic scope (see
-            # `clear_task_scope!`).
-            tasks[idx] = clear_task_scope!(@task reusable_task_loop(chan, r))
-        end
         cache = new(tasks, chans, ready, t->nothing, N, false)
         finalizer(cache) do cache
             # Ask tasks to shut down
             for idx in 1:N
                 Threads.atomic_xchg!(cache.ready[idx], false)
-                close(cache.chans[idx])
+                isassigned(cache.chans, idx) && close(cache.chans[idx])
             end
         end
         return cache
@@ -614,14 +607,26 @@ end
 function reusable_task_cache_init!(setup_f::Function, cache::ReusableTaskCache)
     cache.init && return
     cache.setup_f = setup_f
-    for idx in 1:cache.N
-        task = cache.tasks[idx]
-        setup_f(task)
-        schedule(task)
-        Sch.errormonitor_tracked("reusable_task_$idx", task)
-    end
     cache.init = true
     return
+end
+
+# A temporary completion/placement task often dispatches only one payload
+# through its task-local cache. Keep the full capacity without creating N
+# channels, tasks and monitors which that caller will never use.
+function initialize_reusable_task_slot!(cache::ReusableTaskCache, idx::Int)
+    chan = Channel{Any}(1)
+    ready = cache.ready[idx]
+    # Slots are created by whichever call first needs them, and then serve
+    # unrelated callers. Clear dynamic scope before scheduling, just as for
+    # the overflow path below.
+    task = clear_task_scope!(@task reusable_task_loop(chan, ready))
+    cache.setup_f(task)
+    cache.chans[idx] = chan
+    cache.tasks[idx] = task
+    schedule(task)
+    Sch.errormonitor_tracked("reusable_task_$idx", task)
+    return task
 end
 function reusable_task_loop(chan::Channel{Any}, ready::Threads.Atomic{Bool})
     r = rand(1:128)
@@ -653,12 +658,12 @@ function (cache::ReusableTaskCache)(f, name::String, register=nothing)
     idx = findfirst(getindex, cache.ready)
     if idx !== nothing
         @assert Threads.atomic_xchg!(cache.ready[idx], false)
-        t = cache.tasks[idx]
+        t = isassigned(cache.tasks, idx) ? cache.tasks[idx] : initialize_reusable_task_slot!(cache, idx)
         register === nothing || register(t)
         put!(cache.chans[idx], f)
         # N.B. No errormonitor_tracked_set! here: pooled tasks are registered
-        # once at init, and renaming the tracked entry per dispatch was an
-        # O(n) locked scan on the hot path for a debugging-only list
+        # once at slot creation; renaming the tracked entry per dispatch was
+        # an O(n) locked scan on the hot path for a debugging-only list.
         return t
     else
         t = @task try

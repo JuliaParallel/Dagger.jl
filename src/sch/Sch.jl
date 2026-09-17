@@ -1306,12 +1306,7 @@ end
     # to keep the local copy alive/untouched for the duration of the send.
     # The pool lives under `istate.queue`'s lock, and the whole batch is
     # borrowed in a single acquisition (rather than one per task).
-    #
-    # N.B. The `::Vector{TaskSpec}` assertion matters: `@reusable_vector`
-    # expands to a *non-const* global, so without it `spec` infers as `Any` and
-    # every field store below becomes a boxing dynamic `setproperty!` (which
-    # cost more than the pooling saved).
-    pooled = (@reusable_vector :fire_tasks!_spec_pool TaskSpec nothing 32)::Vector{TaskSpec}
+    pooled = @reusable_vector :fire_tasks!_spec_pool TaskSpec nothing 32
     fire_istate = nothing
     if root_worker_id(gproc) == myid()
         pstate = maybe_proc_state(state.uid, proc)

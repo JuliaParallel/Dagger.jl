@@ -208,7 +208,15 @@ end
 function maybe_default!(opts::Options, ::Val{opt}, sig::Signature) where opt
     if getfield(opts, opt) === nothing
         default_opt = get!(SIGNATURE_DEFAULT_CACHE[], (sig.hash_nokw, opt)) do
-            Dagger.default_option(Val{opt}(), sig.sig_nokw...)
+            # Julia can splat a Vector{Any} directly, whereas splatting its
+            # view boxes the view and allocates an iteration pair per type.
+            # Most calls have no kwargs: use the original vector in that case.
+            # Keep the kwarg view, without adding a copy on cache hits.
+            if length(sig.sig_nokw) == length(sig.sig)
+                Dagger.default_option(Val{opt}(), sig.sig...)
+            else
+                Dagger.default_option(Val{opt}(), sig.sig_nokw...)
+            end
         end
         setfield!(opts, opt, default_opt)
     end
@@ -307,7 +315,13 @@ This function may be executed within the scheduler, so it should generally be
 made very cheap to execute. If the function throws an error, the scheduler will
 use whatever the global default value is for that option instead.
 """
-default_option(::Val{name}, Tf, Targs...) where name = nothing
+function default_option(::Val{name}, Tf, Targs...) where name
+    # This fallback never inspects the types; specializing on them constructs
+    # otherwise-unused dispatch types on every dynamically-typed cache miss.
+    # User overrides still dispatch on the original, concrete argument types.
+    @nospecialize Tf Targs
+    return nothing
+end
 default_option(::Val) = throw(ArgumentError("default_option requires a function type and any argument types"))
 
 """

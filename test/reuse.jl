@@ -1,6 +1,58 @@
 using Test
 import Dagger: ReusableLinkedList, ReusableDict, ReusableCache
 import Dagger: take_or_alloc!, maybe_take_or_alloc!, maybetake!, putback!
+import Dagger: @reusable_vector, @reusable_dict
+
+include("reuse-task-cache.jl")
+
+struct ReusableScratchTestEntry
+    value::Int
+end
+const ReusableScratchTestPair = Pair{Symbol,ReusableScratchTestEntry}
+const ReusableScratchTestKey = Int
+
+reuse_test_vector() = @reusable_vector :test_reusable_vector ReusableScratchTestPair nothing 32
+reuse_test_dict() = @reusable_dict :test_reusable_dict ReusableScratchTestKey Union{Nothing,ReusableScratchTestEntry} 0 nothing 32
+reuse_test_any_vector() = @reusable_vector :test_reusable_any_vector Any nothing 32
+reuse_test_abstract_dict() = @reusable_dict :test_reusable_abstract_dict Number Any 0 nothing 32
+
+@testset "Reusable scratch macros" begin
+    # Types and aliases belong to the caller, not the macro's defining module.
+    # @inferred checks the expansion itself, without a call-site assertion.
+    vector = @inferred reuse_test_vector()
+    @test vector isa Vector{ReusableScratchTestPair}
+    push!(vector, :entry => ReusableScratchTestEntry(1))
+    @test (@inferred reuse_test_vector()) === vector
+    @test isempty(vector)
+
+    dict = @inferred reuse_test_dict()
+    @test dict isa Dict{Int,Union{Nothing,ReusableScratchTestEntry}}
+    dict[1] = ReusableScratchTestEntry(1)
+    dict[2] = nothing
+    @test (@inferred reuse_test_dict()) === dict
+    @test isempty(dict)
+
+    # The container type remains concrete with abstract element/key/value types.
+    @test (@inferred reuse_test_any_vector()) isa Vector{Any}
+    @test (@inferred reuse_test_abstract_dict()) isa Dict{Number,Any}
+
+    # A different task gets independent scratch; taking it must not clear ours.
+    push!(vector, :entry => ReusableScratchTestEntry(2))
+    dict[1] = ReusableScratchTestEntry(2)
+    other_vector, other_dict = fetch(Threads.@spawn begin
+        task_vector = @inferred reuse_test_vector()
+        task_dict = @inferred reuse_test_dict()
+        return task_vector, task_dict
+    end)
+    @test isempty(other_vector)
+    @test isempty(other_dict)
+    @test other_vector !== vector
+    @test other_dict !== dict
+    @test length(vector) == 1
+    @test length(dict) == 1
+    empty!(vector)
+    empty!(dict)
+end
 
 @testset "ReusableCache Tests" begin
     @testset "Construction and Basic Properties" begin
@@ -1118,5 +1170,39 @@ end
         list[1] = "apricot"
         @test dict["apple"] == 1  # Dict unchanged
         @test !haskey(dict, "apricot")  # New value not in dict
+    end
+end
+
+@testset "LFU eviction equivalence" begin
+    function reference_lfu_get!(cache, key)
+        if haskey(cache.cache, key)
+            cache.freq[key] += 1
+            return cache.cache[key]
+        end
+        value = key[1]
+        cache.cache[key] = value
+        cache.freq[key] = 1
+        if length(cache.cache) > cache.max_size
+            _, lfu_key = findmin(cache.freq)
+            delete!(cache.cache, lfu_key)
+            delete!(cache.freq, lfu_key)
+        end
+        return value
+    end
+
+    # Include zero capacity, ties, retained hot entries and immediate eviction
+    # of new entries. Compare the exact contents/frequencies after every call.
+    for capacity in (0, 1, 8, 256)
+        current = Dagger.BasicLFUCache{Tuple{UInt,Symbol},Any}(capacity)
+        original = Dagger.BasicLFUCache{Tuple{UInt,Symbol},Any}(capacity)
+        rng = MersenneTwister(1729)
+        for _ in 1:1_000
+            key = (rand(rng, UInt(1):UInt(512)), :meta)
+            @test get!(() -> key[1], current, key) == reference_lfu_get!(original, key)
+            @test current.cache == original.cache
+            @test current.freq == original.freq
+        end
+        @test empty!(current) === current
+        @test isempty(current.cache) && isempty(current.freq)
     end
 end
