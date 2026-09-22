@@ -126,6 +126,20 @@ function instrumented_move!(dep_mod, dest_space::MemorySpace, source_space::Memo
     return result
 end
 
+"""
+    is_move_task(f) -> Bool
+
+Whether `f` is the function of a Datadeps copy task: `move!`, or the
+`instrumented_move!` that Datadeps actually spawns.
+
+Execution backends that treat copy tasks specially must ask this instead of
+comparing `f` against `move!`. MPI is the sharp case: every rank has to take
+part in a copy, since the source rank does the send, so a copy that is not
+recognized as one runs on its destination rank alone and blocks forever in a
+receive nobody answers.
+"""
+is_move_task(f) = f === move! || f === instrumented_move!
+
 function _reduce_uint64(reducer::Function, vals::Vector{UInt64})
     isempty(vals) && return nothing
     raw = reducer(vals)

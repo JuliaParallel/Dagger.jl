@@ -2426,7 +2426,7 @@ end
 function execute!(proc::MPIProcessor, f, args...; kwargs...)
     local_rank = MPI.Comm_rank(proc.comm)
     islocal = local_rank == proc.rank
-    inplace_move = f === move!
+    inplace_move = Dagger.is_move_task(f)
     tag = to_tag()
     # Plan from SPMD-uniform chunktypes (Chunk / MPILocalArg); run on unwrapped values
     raw_args = map(mpi_unwrap_arg, args)

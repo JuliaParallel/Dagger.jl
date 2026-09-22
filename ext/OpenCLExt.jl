@@ -334,7 +334,7 @@ function Dagger.execute!(proc::CLArrayDeviceProc, f, args...; kwargs...)
     task = Threads.@spawn begin
         Dagger.set_tls!(tls)
         with_context!(proc)
-        # `CL_EXECUTE_LOCK`d, except for `move!`: `move!` (the MPI in-place
+        # `CL_EXECUTE_LOCK`d, except for copy tasks: a copy (the MPI in-place
         # move task) can begin with a long-blocking cross-rank recv before any
         # GPU work, so holding this lock for the whole call would risk
         # deadlocking against another local task that needs the lock to
@@ -342,7 +342,7 @@ function Dagger.execute!(proc::CLArrayDeviceProc, f, args...; kwargs...)
         # the received host buffer into device memory) takes the same lock
         # narrowly, around just that step -- see `multi_span_copy!`'s
         # `gpu_kernel_lock` call.
-        result = if f === Dagger.move!
+        result = if Dagger.is_move_task(f)
             Base.@invokelatest f(args...; kwargs...)
         else
             Base.@lock CL_EXECUTE_LOCK Base.@invokelatest f(args...; kwargs...)
