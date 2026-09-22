@@ -2645,6 +2645,40 @@ end
 # Hard-coding the CPU-only grid unconditionally would otherwise place every
 # chunk on a `ThreadProc`, which conflicts with a GPU-only ambient scope and
 # raises a `SchedulingException`.
+# Only rank 0 runs AOT planners; the others adopt its plan in
+# `uniform_aot_schedule!`, rather than computing one they would then discard.
+Dagger.aot_plans_locally(accel::MPIAcceleration) = MPI.Comm_rank(accel.comm) == 0
+
+# Processors travel as indices into `all_procs`, whose order is rank-uniform
+# (`select_processors_uniform!`, checked by the planners), and `pairs` is the
+# region's uniform submission order, so an index names the same task and
+# processor on every rank. 0 means the task was left to JIT placement.
+function Dagger.uniform_aot_schedule!(accel::MPIAcceleration,
+                                      schedule::Dict{Dagger.DTask,Processor},
+                                      pairs::Vector{Dagger.DTaskPair}, all_procs)
+    tag = to_tag()
+    check_uniform(tag)
+    check_uniform(length(pairs))
+    check_uniform(length(all_procs))
+    if MPI.Comm_rank(accel.comm) == 0
+        enc = Vector{Int32}(undef, length(pairs))
+        for (i, pair) in enumerate(pairs)
+            proc = get(schedule, pair.task, nothing)
+            idx = proc === nothing ? nothing : findfirst(==(proc), all_procs)
+            enc[i] = idx === nothing ? Int32(0) : Int32(idx)
+        end
+        @opcounter :aot_schedule_bcast_send_yield
+        bcast_yield(accel.comm, 0, tag, enc)
+    else
+        enc = bcast_yield(accel.comm, 0, tag)::Vector{Int32}
+    end
+    empty!(schedule)
+    for (i, idx) in enumerate(enc)
+        idx == 0 || (schedule[pairs[i].task] = all_procs[idx])
+    end
+    return schedule
+end
+
 function default_procgrid(accel::MPIAcceleration, nblocks::NTuple{N,Int}) where N
     Dagger.get_compute_scope() == Dagger.DefaultScope() || return nothing
     return CyclicProcGrid(uniform_mpi_processors(accel), nblocks)

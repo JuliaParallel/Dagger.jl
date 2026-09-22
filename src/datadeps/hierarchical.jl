@@ -1863,7 +1863,9 @@ function _distribute_tasks_hierarchical!(queue::DataDepsTaskQueue,
             # Leaving the schedule empty would silently reduce every AOT
             # scheduler to JIT round-robin there.
             shared_schedule = if precomputed_schedule !== nothing
-                precomputed_schedule
+                # The same exchange `datadeps_build_schedule!` makes on a miss,
+                # so every rank makes exactly one either way.
+                uniform_aot_schedule!(accel, precomputed_schedule, seen_tasks, all_procs)
             else
                 region_scope = UnionScope(map(ExactScope, all_procs))
                 _rdag, sched = datadeps_build_schedule!(queue.scheduler, seen_tasks,

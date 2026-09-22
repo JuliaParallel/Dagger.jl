@@ -200,24 +200,56 @@ function datadeps_build_schedule!(scheduler::DataDepsScheduler,
         end
     end
 
-    if !cache_hit && !isempty(dag_spec)
+    isempty(dag_spec) && return dag_spec, schedule
+
+    accel = current_acceleration()
+    if !cache_hit && aot_plans_locally(accel)
         # Compute a fresh AOT schedule (no-op for schedulers that fall back
         # to JIT in distribute_task!)
         datadeps_schedule_dag_aot!(scheduler, schedule, dag_spec, all_procs, all_scope)
+    end
+    # Hit or miss, every rank exchanges exactly once here, so the exchange
+    # stays aligned even if the ranks' caches were ever to disagree.
+    uniform_aot_schedule!(accel, schedule, pairs, all_procs)
 
-        # Persist the schedule for reuse by future equivalent DAGs
-        if !isempty(schedule)
-            spec_schedule = DAGSpecSchedule()
-            for (task, proc) in schedule
-                id = dag_spec.uid_to_id[task.uid]
-                spec_schedule.id_to_proc[id] = proc
-            end
-            push!(schedule_cache, dag_spec => spec_schedule)
+    # Persist the schedule for reuse by future equivalent DAGs. This follows
+    # the exchange, so under uniform execution every rank caches the same plan.
+    if !cache_hit && !isempty(schedule)
+        spec_schedule = DAGSpecSchedule()
+        for (task, proc) in schedule
+            id = dag_spec.uid_to_id[task.uid]
+            spec_schedule.id_to_proc[id] = proc
         end
+        push!(schedule_cache, dag_spec => spec_schedule)
     end
 
     return dag_spec, schedule
 end
+
+"""
+    aot_plans_locally(accel) -> Bool
+
+Whether this process computes AOT schedules itself, rather than adopting one
+computed elsewhere through [`uniform_aot_schedule!`](@ref). Under uniform
+execution only one rank needs to run the planner.
+"""
+aot_plans_locally(::Acceleration) = true
+
+"""
+    uniform_aot_schedule!(accel, schedule, pairs, all_procs) -> schedule
+
+Make an AOT `schedule` for the tasks in `pairs` identical on every process that
+plans the region. A no-op unless execution is uniform.
+
+Under uniform execution (MPI) every rank plans every region, and each must place
+every task exactly where its peers do. AOT schedulers cannot promise that on
+their own: their cost models read rank-local metrics (each rank records only the
+tasks it ran), and a search with a wall-clock budget stops after a different
+number of iterations on each rank. Two ranks that disagree about one task's
+processor desynchronize every later tag, so the acceleration has one rank plan
+and the others adopt that plan. Every rank must call this at the same point.
+"""
+uniform_aot_schedule!(::Acceleration, schedule, pairs, all_procs) = schedule
 
 function distribute_tasks!(queue::DataDepsTaskQueue)
     #= TODO: Improvements to be made:
