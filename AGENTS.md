@@ -603,3 +603,26 @@ lesson.
    planned region whether the local cache hit or missed, so that a cache that
    ever disagrees across ranks still cannot desync the exchange. Run
    `check_uniformity!(true)` on any new scheduler under MPI before timing it.
+
+55. **A task-local singleton is shared by everything its task does -- including
+   work the design deliberately split into per-partition shards.** Hierarchical
+   Datadeps gives each partition its own scheduler via `similar` because a
+   round-robin index advanced over one partition's processor list can overrun
+   another's. The AOT fallback (`AOT_JIT_FALLBACK`, a task-local
+   `RoundRobinScheduler`) walked around that: the sequential path schedules
+   every partition from one task, so one index walked lists of different
+   lengths, and Cholesky died with a `BoundsError` under any AOT scheduler as
+   soon as a worker had fewer threads than the driver. The scheduler sweep
+   never saw it, because every process there had the same thread count: a run
+   in which every process is identical cannot find a bug that needs them to
+   differ. When touching per-partition state, also run a mismatched
+   configuration (driver `-t 4`, workers `-t 2`).
+
+56. **Task-local is the lifetime of a task, not of a program.** The AOT schedule
+   cache was a `TaskLocalValue`, so "plan once per DAG shape" held only within
+   one task: every region submitted from `Threads.@spawn`, `@async` or a Dagger
+   task planned again from scratch, while a benchmark calling from its main
+   task only ever measured the cached case. Pick a cache's lifetime from what
+   its key depends on -- a plan depends on DAG structure, so the cache is
+   process-wide, behind a lock. Check a caching claim from a *second* task, not
+   by repeating calls in the first.
