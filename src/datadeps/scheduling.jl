@@ -223,24 +223,30 @@ end
 # Per-scheduler-type cache. Each entry in the inner Vector is a (DAGSpec =>
 # DAGSpecSchedule) pair recorded by a prior call. The outer Dict partitions
 # the cache by `typeof(scheduler)` so schedulers don't contaminate each other.
-const DATADEPS_DAG_SPECS =
-    TaskLocalValue{Dict{Type, Vector{Pair{DAGSpec, DAGSpecSchedule}}}}(
-        ()->Dict{Type, Vector{Pair{DAGSpec, DAGSpecSchedule}}}())
+# It is shared by every task in the process: a plan depends on the structure
+# of the DAG, not on which task submitted it. A task-local cache made every
+# region submitted from a new task (`Threads.@spawn`, `@async`, a region inside
+# a Dagger task) plan again from scratch. Hold `DATADEPS_DAG_SPECS_LOCK` while
+# reading or appending to any cache vector. `__init__` empties it, so nothing
+# planned during precompilation is baked into the image.
+const DATADEPS_DAG_SPECS = Dict{Type, Vector{Pair{DAGSpec, DAGSpecSchedule}}}()
+const DATADEPS_DAG_SPECS_LOCK = ReentrantLock()
 
 """
     datadeps_schedule_cache(scheduler) -> Vector{Pair{DAGSpec, DAGSpecSchedule}}
 
 Returns the schedule cache that `scheduler` should consult for prior schedules
 and append newly-computed schedules to. The default implementation returns a
-task-local, per-scheduler-type cache.
+per-scheduler-type cache shared by every task in the process, so a region's
+plan is computed once whichever task submits it. Dagger holds
+`DATADEPS_DAG_SPECS_LOCK` while it scans or appends to the returned vector.
 
 Override this to implement custom caching strategies (e.g., bounded LRU, no
-cache at all, cross-task shared cache).
+cache at all, task-local cache).
 """
 function datadeps_schedule_cache(scheduler::DataDepsScheduler)
-    cache_by_type = DATADEPS_DAG_SPECS[]
-    return get!(Vector{Pair{DAGSpec, DAGSpecSchedule}},
-                cache_by_type, typeof(scheduler))
+    return @lock DATADEPS_DAG_SPECS_LOCK get!(Vector{Pair{DAGSpec, DAGSpecSchedule}},
+                                              DATADEPS_DAG_SPECS, typeof(scheduler))
 end
 
 

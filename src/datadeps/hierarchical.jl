@@ -1413,7 +1413,8 @@ function schedule_partition_full!(queue::DataDepsTaskQueue,
     partition_pairs = DTaskPair[seen_tasks[v] for v in partition_verts]
     schedule = if precomputed_schedule === nothing
         _pdag, sched = datadeps_build_schedule!(temp_queue.scheduler, partition_pairs,
-                                                local_procs, local_scope; region_uids)
+                                                local_procs, local_scope; region_uids,
+                                                cache=false)
         sched
     else
         filtered = Dict{DTask,Processor}()
@@ -1655,7 +1656,8 @@ function _hierarchical_schedule_cache_lookup(scheduler::DataDepsScheduler,
     end
     isempty(dag_spec) && return dag_spec, nothing
 
-    for (other_spec, spec_schedule) in datadeps_schedule_cache(scheduler)
+    schedule_cache = datadeps_schedule_cache(scheduler)
+    @lock DATADEPS_DAG_SPECS_LOCK for (other_spec, spec_schedule) in schedule_cache
         if datadeps_dag_equivalent(scheduler, dag_spec, other_spec)
             @dagdebug nothing :spawn_datadeps "Found matching hierarchical DAG spec!"
             schedule = Dict{DTask,Processor}()
@@ -1692,7 +1694,8 @@ function _hierarchical_persist_schedule!(scheduler::DataDepsScheduler,
         end
     end
     isempty(spec_schedule.id_to_proc) && return
-    push!(datadeps_schedule_cache(scheduler), dag_spec => spec_schedule)
+    schedule_cache = datadeps_schedule_cache(scheduler)
+    @lock DATADEPS_DAG_SPECS_LOCK push!(schedule_cache, dag_spec => spec_schedule)
     return
 end
 

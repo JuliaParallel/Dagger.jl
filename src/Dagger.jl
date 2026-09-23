@@ -193,6 +193,8 @@ function __init__()
     # causing mismatches between process 1 and workers.
     delete!(SYSTEM_UUIDS, myid())
     system_uuid()
+    # Likewise, plans computed by the workload must not outlive precompilation.
+    empty!(DATADEPS_DAG_SPECS)
 
     @static if !isdefined(Base, :get_extension)
         @require Distributions="31c24e10-a181-5473-b8eb-7969acd0382f" begin

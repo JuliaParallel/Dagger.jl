@@ -344,6 +344,25 @@ end
     @test length(ls_cache) == 1
 end
 
+@testset "A plan computed in one task is reused from another" begin
+    # The cache is keyed on DAG structure, so a region submitted from a new
+    # task (here `Threads.@spawn`) must hit a plan an earlier task computed
+    # rather than planning again and appending a second entry.
+    cache = datadeps_schedule_cache(GreedyScheduler())
+    empty!(cache)
+    region() = Base.ScopedValues.with(DATADEPS_SCHEDULER => GreedyScheduler()) do
+        A = rand(64); B = rand(64)
+        Dagger.spawn_datadeps() do
+            Dagger.@spawn add!(InOut(A), In(B))
+        end
+    end
+    fetch(Threads.@spawn region())
+    @test length(cache) == 1
+    fetch(Threads.@spawn region())
+    region()
+    @test length(cache) == 1
+end
+
 @testset "RoundRobinScheduler wraps into a shorter processor list" begin
     # One RoundRobinScheduler can see processor lists of different lengths:
     # the AOT JIT fallback is shared by every partition of the sequential

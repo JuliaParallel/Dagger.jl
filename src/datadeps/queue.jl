@@ -140,7 +140,7 @@ end
 
 """
     datadeps_build_schedule!(scheduler, pairs, all_procs, all_scope;
-                             region_uids=nothing) -> (dag_spec, schedule)
+                             region_uids=nothing, cache=true) -> (dag_spec, schedule)
 
 Build a `DAGSpec` from `pairs` (in submission order) and compute an AOT
 processor assignment over `all_procs`/`all_scope`, reusing a cached schedule
@@ -158,13 +158,19 @@ ordinary external value and `fetch` it — blocking forever, since that partitio
 has not been submitted yet. For the flat path `pairs` is the whole region and
 `dag_add_task!`'s own in-DAG check suffices, so `region_uids` can be omitted.
 
+`cache=false` neither consults nor extends the schedule cache. The hierarchical
+path passes it when planning one partition: it caches the merged whole-region
+plan itself, under the whole-region `DAGSpec`, and a partition's partial spec
+would only lengthen every later lookup.
+
 Used by both `distribute_tasks!` (whole region) and
 `distribute_tasks_hierarchical!` (per partition).
 """
 function datadeps_build_schedule!(scheduler::DataDepsScheduler,
                                   pairs::Vector{DTaskPair},
                                   all_procs, all_scope;
-                                  region_uids::Union{Set{UInt},Nothing}=nothing)
+                                  region_uids::Union{Set{UInt},Nothing}=nothing,
+                                  cache::Bool=true)
     # A JIT scheduler never reads the result, and building the spec is neither
     # free nor side-effect-free (see `datadeps_uses_aot`), so don't build one.
     dag_spec = DAGSpec()
@@ -184,19 +190,21 @@ function datadeps_build_schedule!(scheduler::DataDepsScheduler,
 
     # Attempt to find any matching DAG specs and reuse their schedule
     schedule = Dict{DTask, Processor}()
-    schedule_cache = datadeps_schedule_cache(scheduler)
+    schedule_cache = cache ? datadeps_schedule_cache(scheduler) : nothing
     cache_hit = false
-    for (other_spec, spec_schedule) in schedule_cache
-        if datadeps_dag_equivalent(scheduler, dag_spec, other_spec)
-            @dagdebug nothing :spawn_datadeps "Found matching DAG spec!"
-            for (id, proc) in spec_schedule.id_to_proc
-                uid = dag_spec.id_to_uid[id]
-                task_idx = findfirst(spec_task -> spec_task.task.uid == uid, pairs)
-                task = pairs[task_idx].task
-                schedule[task] = proc
+    if schedule_cache !== nothing
+        @lock DATADEPS_DAG_SPECS_LOCK for (other_spec, spec_schedule) in schedule_cache
+            if datadeps_dag_equivalent(scheduler, dag_spec, other_spec)
+                @dagdebug nothing :spawn_datadeps "Found matching DAG spec!"
+                for (id, proc) in spec_schedule.id_to_proc
+                    uid = dag_spec.id_to_uid[id]
+                    task_idx = findfirst(spec_task -> spec_task.task.uid == uid, pairs)
+                    task = pairs[task_idx].task
+                    schedule[task] = proc
+                end
+                cache_hit = true
+                break
             end
-            cache_hit = true
-            break
         end
     end
 
@@ -214,13 +222,13 @@ function datadeps_build_schedule!(scheduler::DataDepsScheduler,
 
     # Persist the schedule for reuse by future equivalent DAGs. This follows
     # the exchange, so under uniform execution every rank caches the same plan.
-    if !cache_hit && !isempty(schedule)
+    if schedule_cache !== nothing && !cache_hit && !isempty(schedule)
         spec_schedule = DAGSpecSchedule()
         for (task, proc) in schedule
             id = dag_spec.uid_to_id[task.uid]
             spec_schedule.id_to_proc[id] = proc
         end
-        push!(schedule_cache, dag_spec => spec_schedule)
+        @lock DATADEPS_DAG_SPECS_LOCK push!(schedule_cache, dag_spec => spec_schedule)
     end
 
     return dag_spec, schedule
