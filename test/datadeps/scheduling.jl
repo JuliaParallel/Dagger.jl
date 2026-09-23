@@ -344,6 +344,38 @@ end
     @test length(ls_cache) == 1
 end
 
+@testset "RoundRobinScheduler wraps into a shorter processor list" begin
+    # One RoundRobinScheduler can see processor lists of different lengths:
+    # the AOT JIT fallback is shared by every partition of the sequential
+    # hierarchical path, which crashed Cholesky with a BoundsError as soon as a
+    # worker had fewer threads than the driver.
+    spec_pair = nothing
+    Base.ScopedValues.with(DATADEPS_SCHEDULER => GreedyScheduler()) do
+        cache = datadeps_schedule_cache(GreedyScheduler())
+        empty!(cache)
+        A = rand(8); B = rand(8)
+        Dagger.spawn_datadeps() do
+            Dagger.@spawn add!(InOut(A), In(B))
+        end
+        spec_pair = first(cache)
+    end
+    spec = spec_pair.first.id_to_spec[1]
+    task = spec_pair.first.id_to_task[1]
+    long = Dagger.Processor[Dagger.ThreadProc(1, i) for i in 1:4]
+    short = Dagger.Processor[Dagger.ThreadProc(1, 1), Dagger.ThreadProc(1, 2)]
+    long_scope = Dagger.UnionScope(map(Dagger.ExactScope, long))
+    short_scope = Dagger.UnionScope(map(Dagger.ExactScope, short))
+
+    rr = RoundRobinScheduler()
+    for _ in 1:3
+        Dagger.datadeps_schedule_task(rr, nothing, long, long_scope, long_scope, spec, task)
+    end
+    @test rr.proc_idx == 4
+    picks = [Dagger.datadeps_schedule_task(rr, nothing, short, short_scope, short_scope,
+                                           spec, task) for _ in 1:4]
+    @test sort(picks; by=p -> p.tid) == [short[1], short[1], short[2], short[2]]
+end
+
 # ---------- Benchmark algorithms ----------
 
 # A small mock-Cholesky-like algorithm that doesn't depend on DArray, to keep

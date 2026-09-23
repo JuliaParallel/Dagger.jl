@@ -285,7 +285,11 @@ Base.similar(::RoundRobinScheduler) = RoundRobinScheduler()
 # (e.g. `LayeredScheduler`) reuse this to round-robin within a layer, and at
 # planning time no `DataDepsState` exists yet.
 function datadeps_schedule_task(sched::RoundRobinScheduler, state::Union{DataDepsState,Nothing}, all_procs, all_scope, task_scope, spec::DTaskSpec, task::DTask)
-    proc_idx = sched.proc_idx
+    # The rotation may have been advanced over a longer processor list than
+    # this one: the AOT JIT fallback is one instance shared by every partition
+    # of the sequential hierarchical path, and a user's instance can be reused
+    # across regions with different scopes.
+    proc_idx = mod1(sched.proc_idx, length(all_procs))
     our_proc = all_procs[proc_idx]
     if task_scope === all_scope
         # all_procs is already limited to scope
@@ -317,6 +321,9 @@ end
 # Fallback round-robin state for schedulers that only plan ahead. Task-local so
 # the rotation is preserved across the tasks of one region without racing
 # between the hierarchical path's concurrent per-partition scheduling tasks.
+# The sequential (shared-state) path schedules every partition from one task,
+# so there it is shared across partitions whose processor lists differ in
+# length; `RoundRobinScheduler` wraps its index into each list for that reason.
 const AOT_JIT_FALLBACK = TaskLocalValue{RoundRobinScheduler}(()->RoundRobinScheduler())
 
 struct NaiveScheduler <: DataDepsScheduler end
