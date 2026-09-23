@@ -1010,6 +1010,35 @@ function _capture_cholesky_dag(grid_size::Int=3, block_size::Int=16)
     end)
 end
 
+@testset "Greedy costs a tile by where it lives" begin
+    # DArray tiles reach a region as the finished DTasks that produced them.
+    # Two 8 MiB tiles on a worker, each filled by a cheap task: moving either
+    # to the driver costs far more than queueing behind the other fill, so both
+    # tasks belong on the worker. A model that sees the tiles as free has
+    # nothing to keep them there and spreads the two tasks over both processes.
+    if nprocs() > 1
+        w = last(workers())
+        tiles = [Dagger.@spawn scope=Dagger.ExactScope(Dagger.ThreadProc(w, 1)) zeros(1024, 1024)
+                 for _ in 1:2]
+        foreach(wait, tiles)
+        # An explicit scope: with workers present the driver's processors are
+        # not in the default scope, and both processes must be candidates.
+        procs2 = Dagger.Processor[Dagger.ThreadProc(1, 1), Dagger.ThreadProc(w, 1)]
+        both = Dagger.UnionScope(map(Dagger.ExactScope, procs2))
+        dag_spec, _, snap = _capture_dag(() -> Dagger.spawn_datadeps() do
+            for t in tiles
+                Dagger.@spawn scope=both fill!(InOut(t), 1.0)
+            end
+        end)
+        state = ScheduleState()
+        greedy_schedule!(state, snap, dag_spec, procs2)
+        @test all(idx -> Dagger.root_worker_id(state.task_proc[idx]) == w, 1:2)
+        @test all(t -> fetch(t)[1] == 1.0, tiles)
+    else
+        @test_skip "needs a worker"
+    end
+end
+
 @testset "IteratedGreedyScheduler" begin
     @testset "Type registration and constructor validation" begin
         @test IteratedGreedyScheduler() isa DataDepsScheduler

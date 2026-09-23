@@ -510,13 +510,46 @@ const GREEDY_DEFAULT_OUTPUT_SIZE = UInt64(1_048_576)
 # subsequent lookup is a bounds-checked array read. Values are byte-identical
 # to what the uncached path would compute, so cost-model claims and every
 # non-worsening / determinism / correctness invariant are preserved.
+"""
+    EFTArg
+
+One argument's data, as the EFT cost model sees it: where it starts, how many
+bytes moving it costs, and whether the task writes it.
+
+A region's tile arguments are mostly *not* `Chunk`s: a DArray's `chunks` are
+the finished `DTask`s that produced each tile, and those reach a task as
+`DTask`s from outside the region. Costing only `Chunk`s left every such tile
+free to use on any processor, so the planners placed work without regard to
+where its data lived -- on a real Cholesky only a chance fraction of the tasks
+writing a tile landed on the tile's owner. Each external `DTask` is resolved to
+the `Chunk` it produced (it is already finished: `dag_add_task!` fetched it).
+
+A size the handle does not know, or reports as 0, is taken as the region's
+typical tile size: under MPI a rank holds only a size-0 placeholder for chunks
+another rank owns, and rank 0 plans for every rank.
+"""
+struct EFTArg
+    data_id::Int                  # index into a plan's last-writer table
+    src_space::MemorySpace        # where the data starts
+    src_rates::Vector{Float64}    # bytes/s from `src_space` to each proc
+    bytes::Float64
+    writes::Bool
+end
+
 struct EFTCostCache
     task_times::Matrix{Float64}
     proc_compatible::Matrix{Bool}
     proc_spaces::Vector{MemorySpace}
     proc_to_idx::Dict{Processor, Int}
     move_rates::Matrix{Float64}
+    # Per task, the data its arguments carry (see `EFTArg`) and the in-region
+    # producers it consumes by value; plus how many distinct data objects the
+    # region touches, which sizes a plan's last-writer table.
+    task_args::Vector{Vector{EFTArg}}
+    task_deps::Vector{Vector{Int}}
+    n_data::Int
 end
+
 
 """
     _propagate_aot_time_util_from_cache!(dag_spec, cache, task_idx, proc)
@@ -559,19 +592,104 @@ function _build_eft_cost_cache(snap::MT.MetricsSnapshot, dag_spec::DAGSpec,
     proc_spaces = MemorySpace[only(memory_spaces(p)) for p in all_procs]
     proc_to_idx = Dict{Processor, Int}(p => i for (i, p) in enumerate(all_procs))
 
+    # Rates between the processors' own spaces, looked up once per space pair.
+    space_rates = Dict{MemorySpace, Vector{Float64}}()
     move_rates = zeros(Float64, n_procs, n_procs)
-    @inbounds for w1 in 1:n_procs, w2 in 1:n_procs
-        w1 == w2 && continue
-        if proc_spaces[w1] == proc_spaces[w2]
-            move_rates[w1, w2] = 0.0
-        else
-            r = metrics_lookup_move_rate(snap, proc_spaces[w1], proc_spaces[w2])
-            move_rates[w1, w2] = r === nothing ? Float64(GREEDY_DEFAULT_TRANSFER_RATE) : Float64(r)
+    @inbounds for w1 in 1:n_procs
+        rates = get!(() -> _eft_rates_from(snap, proc_spaces[w1], proc_spaces), space_rates, proc_spaces[w1])
+        for w2 in 1:n_procs
+            move_rates[w1, w2] = rates[w2]
         end
     end
 
-    return EFTCostCache(task_times, proc_compatible, proc_spaces, proc_to_idx, move_rates)
+    task_args, task_deps, n_data = _eft_task_args(snap, dag_spec, proc_spaces, space_rates)
+    return EFTCostCache(task_times, proc_compatible, proc_spaces, proc_to_idx, move_rates,
+                        task_args, task_deps, n_data)
 end
+
+# Bytes/s from `src` to each processor's space; 0 where the spaces coincide.
+function _eft_rates_from(snap::MT.MetricsSnapshot, src::MemorySpace,
+                         proc_spaces::Vector{MemorySpace})
+    rates = zeros(Float64, length(proc_spaces))
+    by_dst = Dict{MemorySpace, Float64}()   # one lookup per space, not per proc
+    for (w, dst) in enumerate(proc_spaces)
+        src == dst && continue
+        rates[w] = get!(by_dst, dst) do
+            r = metrics_lookup_move_rate(snap, src, dst)
+            r === nothing ? Float64(GREEDY_DEFAULT_TRANSFER_RATE) : Float64(r)
+        end
+    end
+    return rates
+end
+
+_eft_handle_size(h) = hasproperty(h, :size) ? getproperty(h, :size) : nothing
+function _eft_known_size(c::Chunk)
+    sz = _eft_handle_size(c.handle)
+    (sz === nothing || sz <= 0) && return nothing
+    return Float64(sz)
+end
+
+# The data behind one argument value, if the cost model can see it: a `Chunk`,
+# or the `Chunk` a finished out-of-region `DTask` produced (see `EFTArg`).
+function _eft_resolve_chunk(raw, dag_spec::DAGSpec)
+    raw isa Chunk && return raw
+    if raw isa DTask && !haskey(dag_spec.uid_to_id, raw.uid) && isready(raw)
+        r = fetch(raw; raw=true)
+        r isa Chunk && return r
+    end
+    return nothing
+end
+
+function _eft_task_args(snap::MT.MetricsSnapshot, dag_spec::DAGSpec,
+                        proc_spaces::Vector{MemorySpace},
+                        space_rates::Dict{MemorySpace, Vector{Float64}})
+    n_tasks = nv(dag_spec.g)
+    # Pass 1: resolve every argument, and collect the sizes that are known.
+    resolved = Vector{Vector{Tuple{Chunk,Bool}}}(undef, n_tasks)
+    task_deps = Vector{Vector{Int}}(undef, n_tasks)
+    by_uid = Dict{UInt, Union{Chunk, Nothing}}()
+    known = Float64[]
+    for k in 1:n_tasks
+        chunks = Tuple{Chunk,Bool}[]
+        deps = Int[]
+        for arg in dag_spec.id_to_spec[k].fargs
+            raw, arg_deps = unwrap_inout(value(arg))
+            if raw isa DTask
+                dep_id = get(dag_spec.uid_to_id, raw.uid, nothing)
+                if dep_id !== nothing
+                    push!(deps, dep_id)
+                    continue
+                end
+            end
+            c = raw isa DTask ? get!(() -> _eft_resolve_chunk(raw, dag_spec), by_uid, raw.uid) :
+                                _eft_resolve_chunk(raw, dag_spec)
+            c === nothing && continue
+            writes = any(d -> d[3], arg_deps)
+            push!(chunks, (c, writes))
+            sz = _eft_known_size(c)
+            sz === nothing || push!(known, sz)
+        end
+        resolved[k] = chunks
+        task_deps[k] = deps
+    end
+    typical = isempty(known) ? Float64(GREEDY_DEFAULT_OUTPUT_SIZE) : Statistics.median(known)
+
+    # Pass 2: one `EFTArg` per argument, with a stable id per data object.
+    data_ids = IdDict{Chunk, Int}()
+    task_args = Vector{Vector{EFTArg}}(undef, n_tasks)
+    for k in 1:n_tasks
+        args = EFTArg[]
+        for (c, writes) in resolved[k]
+            id = get!(data_ids, c, length(data_ids) + 1)
+            src = memory_space(c)
+            rates = get!(() -> _eft_rates_from(snap, src, proc_spaces), space_rates, src)
+            push!(args, EFTArg(id, src, rates, something(_eft_known_size(c), typical), writes))
+        end
+        task_args[k] = args
+    end
+    return task_args, task_deps, length(data_ids)
+end
+
 
 """
     GreedyScheduler <: DataDepsScheduler
@@ -704,6 +822,53 @@ function cost_of_schedule(state::ScheduleState)
     return maximum(values(state.task_finish_ns))
 end
 
+"""
+    _eft_data_ready_ns(state, cache, idx, target_w, last_writer) -> Float64
+
+When task `idx`'s inputs could all be on processor `target_w`. An in-region
+producer consumed by value must finish and ship its output. A data argument
+must be moved from wherever it is *now*: from the processor of the last task
+this plan has writing it (after that task finishes), or else from where it
+started. `last_writer[data_id]` holds that task, or 0.
+"""
+function _eft_data_ready_ns(state::ScheduleState, cache::EFTCostCache, idx::Int,
+                            target_w::Int, last_writer::Vector{Int})
+    target_space = cache.proc_spaces[target_w]
+    ready = 0.0
+    @inbounds for dep_id in cache.task_deps[idx]
+        dep_proc = get(state.task_proc, dep_id, nothing)
+        dep_proc === nothing && continue
+        t = get(state.task_finish_ns, dep_id, 0.0)
+        dep_w = cache.proc_to_idx[dep_proc]
+        rate = cache.move_rates[dep_w, target_w]
+        rate > 0.0 && (t += Float64(GREEDY_DEFAULT_OUTPUT_SIZE) / rate * 1e9)
+        ready = max(ready, t)
+    end
+    @inbounds for a in cache.task_args[idx]
+        writer = last_writer[a.data_id]
+        if writer != 0
+            t = state.task_finish_ns[writer]
+            w = cache.proc_to_idx[state.task_proc[writer]]
+            rate = cache.move_rates[w, target_w]
+        else
+            t = 0.0
+            rate = a.src_space == target_space ? 0.0 : a.src_rates[target_w]
+        end
+        rate > 0.0 && (t += a.bytes / rate * 1e9)
+        ready = max(ready, t)
+    end
+    return ready
+end
+
+# Record task `idx` as the latest writer of every data object it writes.
+function _eft_record_writes!(last_writer::Vector{Int}, cache::EFTCostCache, idx::Int)
+    @inbounds for a in cache.task_args[idx]
+        a.writes && (last_writer[a.data_id] = idx)
+    end
+    return last_writer
+end
+_eft_last_writer(cache::EFTCostCache) = zeros(Int, cache.n_data)
+
 # --- Cached (fast) variants of the EFT helpers ---
 # Each cached function has an uncached wrapper below with the original
 # signature. The wrapper builds an `EFTCostCache` on demand and delegates,
@@ -712,7 +877,7 @@ end
 function greedy_assign_task!(state::ScheduleState, snap::MT.MetricsSnapshot,
                               dag_spec::DAGSpec, all_procs::Vector{Processor}, idx::Int,
                               cache::EFTCostCache;
-                              last_writer::Union{Nothing,IdDict{Any,Int}}=nothing)
+                              last_writer::Vector{Int}=_eft_last_writer(cache))
     spec = dag_spec.id_to_spec[idx]
     n_procs = length(all_procs)
 
@@ -723,8 +888,7 @@ function greedy_assign_task!(state::ScheduleState, snap::MT.MetricsSnapshot,
     @inbounds for w in 1:n_procs
         cache.proc_compatible[idx, w] || continue
         proc = all_procs[w]
-        target_space = cache.proc_spaces[w]
-        data_ready_ns = _greedy_earliest_data_ready_ns_cached(snap, dag_spec, spec, target_space, state, cache, w; last_writer=last_writer)
+        data_ready_ns = _eft_data_ready_ns(state, cache, idx, w, last_writer)
         runtime_ns = cache.task_times[idx, w]
         finish = _peek_slot(state, proc, data_ready_ns, runtime_ns)
         if finish < best_finish
@@ -744,6 +908,7 @@ function greedy_assign_task!(state::ScheduleState, snap::MT.MetricsSnapshot,
     # Commit to the slot that produced `best_finish`; `_claim_slot!` recomputes
     # the same value from the same earliest-free slot.
     state.task_finish_ns[idx] = _claim_slot!(state, best_proc, best_data_ready, best_runtime)
+    _eft_record_writes!(last_writer, cache, idx)
     return best_proc
 end
 
@@ -771,7 +936,8 @@ function greedy_assign_task_randomized!(state::ScheduleState, snap::MT.MetricsSn
                                         dag_spec::DAGSpec, all_procs::Vector{Processor},
                                         idx::Int, cache::EFTCostCache,
                                         rng::Random.AbstractRNG;
-                                        alpha::Float64=IG_DEFAULT_ALPHA)
+                                        alpha::Float64=IG_DEFAULT_ALPHA,
+                                        last_writer::Vector{Int}=_eft_last_writer(cache))
     spec = dag_spec.id_to_spec[idx]
     n_procs = length(all_procs)
 
@@ -784,8 +950,7 @@ function greedy_assign_task_randomized!(state::ScheduleState, snap::MT.MetricsSn
     @inbounds for w in 1:n_procs
         cache.proc_compatible[idx, w] || continue
         proc = all_procs[w]
-        target_space = cache.proc_spaces[w]
-        data_ready_ns = _greedy_earliest_data_ready_ns_cached(snap, dag_spec, spec, target_space, state, cache, w)
+        data_ready_ns = _eft_data_ready_ns(state, cache, idx, w, last_writer)
         runtime_ns = cache.task_times[idx, w]
         finish = _peek_slot(state, proc, data_ready_ns, runtime_ns)
         push!(cand, (proc, data_ready_ns, runtime_ns, finish))
@@ -815,6 +980,7 @@ function greedy_assign_task_randomized!(state::ScheduleState, snap::MT.MetricsSn
     proc, dr, rt, _ = chosen
     state.task_proc[idx] = proc
     state.task_finish_ns[idx] = _claim_slot!(state, proc, dr, rt)
+    _eft_record_writes!(last_writer, cache, idx)
     return proc
 end
 
@@ -827,32 +993,18 @@ end
 function greedy_schedule!(state::ScheduleState, snap::MT.MetricsSnapshot,
                           dag_spec::DAGSpec, all_procs::Vector{Processor};
                           task_order::Union{Nothing, AbstractVector{Int}}=nothing,
-                          cache::Union{EFTCostCache, Nothing}=nothing,
-                          producer_finish::Bool=false)
+                          cache::Union{EFTCostCache, Nothing}=nothing)
     if cache === nothing
         cache = _build_eft_cost_cache(snap, dag_spec, all_procs)
     end
     order = task_order === nothing ? (1:nv(dag_spec.g)) : task_order
-    # When `producer_finish` is on, track the most recent task that wrote each
-    # Chunk (by object identity) so a consumer's data-ready time includes the
-    # producer's finish (see `_greedy_earliest_data_ready_ns_cached`). Populated
-    # as we walk tasks in index order (a valid topological order), so every
-    # producer is registered before its consumers are scheduled. Off by default,
-    # so IG/SA seeds (which drive an untouched, producer-finish-free replay) are
-    # unchanged.
-    last_writer = producer_finish ? IdDict{Any,Int}() : nothing
+    # Track the latest task writing each data object as we go, so a later
+    # consumer is costed from where the plan leaves that data, after its
+    # writer finishes (see `_eft_data_ready_ns`). Index order is a valid
+    # topological order, so every writer is placed before its consumers.
+    last_writer = _eft_last_writer(cache)
     for idx in order
-        greedy_assign_task!(state, snap, dag_spec, all_procs, idx, cache; last_writer=last_writer)
-        if last_writer !== nothing
-            spec = dag_spec.id_to_spec[idx]
-            for arg in spec.fargs
-                raw, deps = unwrap_inout(value(arg))
-                raw isa Chunk || continue
-                for (_dep_mod, _readdep, writedep) in deps
-                    writedep && (last_writer[raw] = idx)
-                end
-            end
-        end
+        greedy_assign_task!(state, snap, dag_spec, all_procs, idx, cache; last_writer)
     end
     return state
 end
@@ -861,7 +1013,7 @@ function datadeps_schedule_dag_aot!(scheduler::GreedyScheduler, schedule, dag_sp
     snap = MT.snapshot(MT.global_metrics_cache())
     cache = _build_eft_cost_cache(snap, dag_spec, all_procs)
     state = ScheduleState()
-    greedy_schedule!(state, snap, dag_spec, all_procs; cache=cache, producer_finish=true)
+    greedy_schedule!(state, snap, dag_spec, all_procs; cache=cache)
     for idx in 1:nv(dag_spec.g)
         task = dag_spec.id_to_task[idx]
         proc = state.task_proc[idx]
@@ -892,16 +1044,20 @@ function _greedy_arg_ready_time_ns(val::Chunk, snap::MT.MetricsSnapshot, ::DAGSp
                                     target_space::MemorySpace, ::ScheduleState)
     source_space = memory_space(val)
     source_space == target_space && return 0.0
-    size_bytes = val.handle.size === nothing ? GREEDY_DEFAULT_OUTPUT_SIZE : UInt64(val.handle.size)
+    size_bytes = something(_eft_known_size(val), Float64(GREEDY_DEFAULT_OUTPUT_SIZE))
     rate_lookup = metrics_lookup_move_rate(snap, source_space, target_space)
     rate = rate_lookup === nothing ? GREEDY_DEFAULT_TRANSFER_RATE : rate_lookup
-    return Float64(size_bytes) / Float64(rate) * 1e9
+    return size_bytes / Float64(rate) * 1e9
 end
 
 function _greedy_arg_ready_time_ns(val::DTask, snap::MT.MetricsSnapshot, dag_spec::DAGSpec,
                                     target_space::MemorySpace, state::ScheduleState)
     dep_id = get(dag_spec.uid_to_id, val.uid, nothing)
-    dep_id === nothing && return 0.0
+    if dep_id === nothing
+        # Produced outside the region: cost the data it carries (see `EFTArg`).
+        c = _eft_resolve_chunk(val, dag_spec)
+        return c === nothing ? 0.0 : _greedy_arg_ready_time_ns(c, snap, dag_spec, target_space, state)
+    end
     dep_proc = get(state.task_proc, dep_id, nothing)
     dep_proc === nothing && return 0.0
     dep_finish = get(state.task_finish_ns, dep_id, 0.0)
@@ -919,82 +1075,6 @@ function _greedy_arg_ready_time_ns(::Any, ::MT.MetricsSnapshot, ::DAGSpec,
 end
 
 
-function _greedy_earliest_data_ready_ns_cached(snap, dag_spec::DAGSpec, spec,
-                                                 target_space::MemorySpace, state::ScheduleState,
-                                                 cache::EFTCostCache, target_w::Int;
-                                                 last_writer::Union{Nothing,IdDict{Any,Int}}=nothing)
-    earliest_ns = 0.0
-    for arg in spec.fargs
-        raw_val, _ = unwrap_inout(value(arg))
-        ready_ns = _greedy_arg_ready_time_ns_cached(raw_val, snap, dag_spec, target_space, state, cache, target_w)
-        # Producer-finish term. For a `Chunk` argument, the base helper above
-        # accounts only for moving the tile from its *initial* materialized
-        # location -- it has no notion of a producer task. So greedy is blind to
-        # the DAG's critical path: a consumer looks ready at t=0 even though its
-        # input is still being computed. When `last_writer` is supplied (built
-        # by `greedy_schedule!` as it walks tasks in index order), look up the
-        # most recent task that wrote this exact Chunk and require the consumer
-        # to wait for that producer to finish AND for its output to reach the
-        # target proc. Additive: if there is no prior writer (root/materialized
-        # data) the term is skipped and behavior is unchanged. `last_writer` is
-        # only threaded from the standalone GreedyScheduler; IG/SA seeds pass
-        # `nothing`, keeping them consistent with their (untouched) replay.
-        if last_writer !== nothing && raw_val isa Chunk
-            wid = get(last_writer, raw_val, nothing)
-            if wid !== nothing
-                wfinish = get(state.task_finish_ns, wid, 0.0)
-                wproc = get(state.task_proc, wid, nothing)
-                if wproc !== nothing
-                    prod_ready = wfinish
-                    dep_w = get(cache.proc_to_idx, wproc, 0)
-                    if dep_w != 0 && cache.proc_spaces[dep_w] != target_space
-                        rate = cache.move_rates[dep_w, target_w]
-                        if rate > 0.0
-                            sz = raw_val.handle.size === nothing ?
-                                 GREEDY_DEFAULT_OUTPUT_SIZE : UInt64(raw_val.handle.size)
-                            prod_ready += Float64(sz) / rate * 1e9
-                        end
-                    end
-                    ready_ns = max(ready_ns, prod_ready)
-                end
-            end
-        end
-        if ready_ns > earliest_ns
-            earliest_ns = ready_ns
-        end
-    end
-    return earliest_ns
-end
-
-function _greedy_arg_ready_time_ns_cached(val::DTask, snap::MT.MetricsSnapshot, dag_spec::DAGSpec,
-                                           target_space::MemorySpace, state::ScheduleState,
-                                           cache::EFTCostCache, target_w::Int)
-    dep_id = get(dag_spec.uid_to_id, val.uid, nothing)
-    dep_id === nothing && return 0.0
-    dep_proc = get(state.task_proc, dep_id, nothing)
-    dep_proc === nothing && return 0.0
-    dep_finish = get(state.task_finish_ns, dep_id, 0.0)
-    dep_w = get(cache.proc_to_idx, dep_proc, 0)
-    if dep_w == 0
-        # dep_proc unexpectedly outside all_procs — fall back to uncached path.
-        return _greedy_arg_ready_time_ns(val, snap, dag_spec, target_space, state)
-    end
-    cache.proc_spaces[dep_w] == target_space && return dep_finish
-    rate = cache.move_rates[dep_w, target_w]
-    rate == 0.0 && return dep_finish
-    transfer_ns = Float64(GREEDY_DEFAULT_OUTPUT_SIZE) / rate * 1e9
-    return dep_finish + transfer_ns
-end
-
-
-_greedy_arg_ready_time_ns_cached(val::Chunk, snap::MT.MetricsSnapshot, dag_spec::DAGSpec,
-                                   target_space::MemorySpace, state::ScheduleState,
-                                   ::EFTCostCache, ::Int) =
-    _greedy_arg_ready_time_ns(val, snap, dag_spec, target_space, state)
-
-_greedy_arg_ready_time_ns_cached(::Any, ::MT.MetricsSnapshot, ::DAGSpec,
-                                   ::MemorySpace, ::ScheduleState,
-                                   ::EFTCostCache, ::Int) = 0.0
 
 ### Iterated Greedy ###
 
@@ -1223,12 +1303,16 @@ function _replay_schedule!(state::ScheduleState, snap::MT.MetricsSnapshot,
     empty!(state.proc_ready_ns)
     empty!(state.proc_slots)
 
+    # Same data-location model as `greedy_schedule!`, so a replayed seed costs
+    # exactly what the seed did and IG/SA compare like with like.
+    last_writer = _eft_last_writer(cache)
     @inbounds for idx in 1:nv(dag_spec.g)
         if idx in destroyed
             if rng === nothing
-                greedy_assign_task!(state, snap, dag_spec, all_procs, idx, cache)
+                greedy_assign_task!(state, snap, dag_spec, all_procs, idx, cache; last_writer)
             else
-                greedy_assign_task_randomized!(state, snap, dag_spec, all_procs, idx, cache, rng; alpha=alpha)
+                greedy_assign_task_randomized!(state, snap, dag_spec, all_procs, idx, cache, rng;
+                                               alpha=alpha, last_writer)
             end
         else
             proc = state.task_proc[idx]
@@ -1239,11 +1323,11 @@ function _replay_schedule!(state::ScheduleState, snap::MT.MetricsSnapshot,
                 data_ready_ns = _greedy_earliest_data_ready_ns(snap, dag_spec, spec, target_space, state)
                 runtime_ns = _eft_runtime_ns(snap, spec, proc)
             else
-                target_space = cache.proc_spaces[w]
-                data_ready_ns = _greedy_earliest_data_ready_ns_cached(snap, dag_spec, spec, target_space, state, cache, w)
+                data_ready_ns = _eft_data_ready_ns(state, cache, idx, w, last_writer)
                 runtime_ns = cache.task_times[idx, w]
             end
             state.task_finish_ns[idx] = _claim_slot!(state, proc, data_ready_ns, runtime_ns)
+            _eft_record_writes!(last_writer, cache, idx)
         end
     end
     return state
@@ -1991,6 +2075,7 @@ end
 # deep copy; every other field is immutable configuration and is forwarded
 # verbatim.
 datadeps_uses_aot(::OptimizingScheduler) = true
+
 Base.similar(s::OptimizingScheduler) =
     OptimizingScheduler(; optimizer=s.optimizer,
                           milp_threshold=s.milp_threshold,
