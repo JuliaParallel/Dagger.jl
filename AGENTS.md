@@ -578,8 +578,9 @@ lesson.
 
 53. **Wrapping a function that other code recognizes by identity silently
    drops the special case.** Datadeps copy tasks used to be spawned as
-   `move!`; the metrics work wrapped them in `instrumented_move!`. Two backends
-   decide how to run a task with `f === move!`: MPIExt makes *every* rank run a
+   `move!`; the metrics work wrapped them in `move_toplevel!` (then named
+   `instrumented_move!`). Two backends decide how to run a task with
+   `f === move!`: MPIExt makes *every* rank run a
    copy (the source rank sends, the destination receives), and OpenCLExt skips
    its device lock so a copy's long cross-rank receive cannot deadlock against
    the task producing the data. With the wrapper, MPI copies ran on the

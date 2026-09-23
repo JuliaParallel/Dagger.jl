@@ -102,20 +102,21 @@ _move_source_size(source::Chunk) =
 _move_source_size(@nospecialize(source)) = nothing
 
 """
-    instrumented_move!(dep_mod, dest_space, source_space, dest, source)
+    move_toplevel!(dep_mod, dest_space, source_space, dest, source)
 
-`move!`, wrapped so the copy's source/destination spaces and size land in the
-metrics cache. Datadeps spawns its copy tasks through this, which is what gives
-`metrics_lookup_move_rate` per-space-pair transfer rates to cost data movement
-with.
+The entry point of a Datadeps copy task: runs `move!`, then records the copy's
+source/destination spaces and size in the metrics cache. Datadeps spawns its
+copy tasks through this (not `move!` directly, whose methods recurse into one
+another), which is what gives `metrics_lookup_move_rate` per-space-pair transfer
+rates to cost data movement with.
 
 The metrics are written directly into the executing thunk's cache (reached via
 the TLS), *not* through a `ScopedValue` or `TaskLocalValue`: `ThreadProc.execute!`
 runs the thunk on a sub-task, so a scope entered here has already exited — and a
 task-local set here is already gone — by the time `with_metrics` commits.
 """
-function instrumented_move!(dep_mod, dest_space::MemorySpace, source_space::MemorySpace,
-                            dest, source)
+function move_toplevel!(dep_mod, dest_space::MemorySpace, source_space::MemorySpace,
+                        dest, source)
     result = move!(dep_mod, dest_space, source_space, dest, source)
     tls = DTASK_TLS[]
     if tls !== nothing && tls.metrics_cache !== nothing
@@ -130,7 +131,7 @@ end
     is_move_task(f) -> Bool
 
 Whether `f` is the function of a Datadeps copy task: `move!`, or the
-`instrumented_move!` that Datadeps actually spawns.
+`move_toplevel!` that Datadeps actually spawns.
 
 Execution backends that treat copy tasks specially must ask this instead of
 comparing `f` against `move!`. MPI is the sharp case: every rank has to take
@@ -138,7 +139,7 @@ part in a copy, since the source rank does the send, so a copy that is not
 recognized as one runs on its destination rank alone and blocks forever in a
 receive nobody answers.
 """
-is_move_task(f) = f === move! || f === instrumented_move!
+is_move_task(f) = f === move! || f === move_toplevel!
 
 function _reduce_uint64(reducer::Function, vals::Vector{UInt64})
     isempty(vals) && return nothing

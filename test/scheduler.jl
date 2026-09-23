@@ -776,7 +776,7 @@ end
             end
         end
 
-        @testset "instrumented_move! records via TLS in real Dagger task" begin
+        @testset "move_toplevel! records via TLS in real Dagger task" begin
             cache = MetricsTracker.global_metrics_cache()
             pre_snap = MetricsTracker.snapshot(cache)
             pre_count = if haskey(pre_snap.contexts, (Dagger, :execute!))
@@ -792,7 +792,7 @@ end
             src_space = Dagger.memory_space(src_chunk)
             dst_space = Dagger.memory_space(dst_chunk)
 
-            move_task = Dagger.@spawn meta=true Dagger.instrumented_move!(identity, dst_space, src_space, dst_chunk, src_chunk)
+            move_task = Dagger.@spawn meta=true Dagger.move_toplevel!(identity, dst_space, src_space, dst_chunk, src_chunk)
             fetch(move_task)
             sleep(0.1)
 

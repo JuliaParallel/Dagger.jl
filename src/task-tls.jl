@@ -9,7 +9,7 @@ mutable struct DTaskTLS
     logging_enabled::Bool
     acceleration::Acceleration
     # Scratch metrics cache for the executing thunk, so instrumentation deep
-    # inside `execute!` (e.g. `instrumented_move!`) can record into the same
+    # inside `execute!` (e.g. `move_toplevel!`) can record into the same
     # cache `do_task` drains. Reached through the TLS rather than a
     # `ScopedValue`/`TaskLocalValue` because `ThreadProc.execute!` runs the
     # thunk on a *sub-task*, which neither of those propagate back out of.
