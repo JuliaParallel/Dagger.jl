@@ -245,6 +245,15 @@ function build_signature_runtime_index(snap::MT.MetricsSnapshot, sig::Vector)
         return SignatureRuntimeIndex(by_proc_worker, by_type_worker, by_type, any_matching)
     end
 
+    _index_signature_runtimes!(by_proc_worker, by_type_worker, by_type, any_matching,
+                               sig, sig_storage, time_storage, proc_storage, worker_storage)
+    return SignatureRuntimeIndex(by_proc_worker, by_type_worker, by_type, any_matching)
+end
+
+# N.B. A function barrier: the storages come out of the context as an abstract
+# type, and scanning one inline dispatched dynamically on every entry.
+function _index_signature_runtimes!(by_proc_worker, by_type_worker, by_type, any_matching,
+                                    sig, sig_storage, time_storage, proc_storage, worker_storage)
     # One O(N) scan across sig-matching keys; each bucket insertion is O(1)
     # amortised. `sig` is a `Vector{Any}` and the stored value is the same
     # type, so `==` compares element-wise — matching the semantics of
@@ -270,8 +279,7 @@ function build_signature_runtime_index(snap::MT.MetricsSnapshot, sig::Vector)
             end
         end
     end
-
-    return SignatureRuntimeIndex(by_proc_worker, by_type_worker, by_type, any_matching)
+    return
 end
 
 """

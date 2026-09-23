@@ -56,12 +56,7 @@ function cache_lookup(snap::MetricsSnapshot, mod::Module, context::Symbol,
     ctx === nothing && return nothing
     target_storage = get(ctx.storages, target_metric, nothing)
     target_storage === nothing && return nothing
-    for key in keys(target_storage.data)
-        if matches_all(ctx, key, (lookup,))
-            return target_storage.data[key]::T
-        end
-    end
-    return nothing
+    return _first_match(ctx, target_storage, (lookup,))::Union{T, Nothing}
 end
 
 function cache_lookup(snap::MetricsSnapshot, mod::Module, context::Symbol,
@@ -71,9 +66,18 @@ function cache_lookup(snap::MetricsSnapshot, mod::Module, context::Symbol,
     ctx === nothing && return nothing
     target_storage = get(ctx.storages, target_metric, nothing)
     target_storage === nothing && return nothing
+    return _first_match(ctx, target_storage, lookups)::Union{T, Nothing}
+end
+
+# N.B. The scans below take each storage as an argument, so they run
+# specialized on its concrete type. A context holds its storages behind an
+# abstract type; iterating one's `data` directly from the callers dispatches
+# dynamically on every entry, which made a single lookup cost ~1 us per stored
+# value -- milliseconds against a few thousand values.
+function _first_match(ctx::AbstractContextStorage, target_storage, lookups)
     for key in keys(target_storage.data)
         if matches_all(ctx, key, lookups)
-            return target_storage.data[key]::T
+            return target_storage.data[key]
         end
     end
     return nothing
@@ -90,16 +94,16 @@ end
 
 function matches_lookup(ctx::AbstractContextStorage, key, lookup::AbstractLookup)
     for (metric, storage) in ctx.storages
-        if lookup_match_metric(lookup, metric)
-            if haskey(storage.data, key)
-                value = storage.data[key]
-                if lookup_match_value(lookup, value)
-                    return true
-                end
-            end
+        if lookup_match_metric(lookup, metric) && _storage_matches(storage, key, lookup)
+            return true
         end
     end
     return false
+end
+
+function _storage_matches(storage, key, lookup::AbstractLookup)
+    haskey(storage.data, key) || return false
+    return lookup_match_value(lookup, storage.data[key])
 end
 
 function find_keys(snap::MetricsSnapshot, mod::Module, context::Symbol, lookup::AbstractLookup)
@@ -109,15 +113,27 @@ function find_keys(snap::MetricsSnapshot, mod::Module, context::Symbol, lookup::
     seen = Set{Any}()
     for (metric, storage) in ctx.storages
         if lookup_match_metric(lookup, metric)
-            for (key, value) in storage.data
-                if !(key in seen) && lookup_match_value(lookup, value)
-                    push!(seen, key)
-                    push!(result, key)
-                end
-            end
+            _collect_matching_keys!(result, seen, storage, lookup)
         end
     end
     return result
+end
+
+function _collect_matching_keys!(result::Vector{Any}, seen::Set{Any}, storage, lookup::AbstractLookup)
+    for (key, value) in storage.data
+        if !(key in seen) && lookup_match_value(lookup, value)
+            push!(seen, key)
+            push!(result, key)
+        end
+    end
+    return
+end
+
+function _collect_matching_keys!(matched::Set{Any}, storage, lookup::AbstractLookup)
+    for (key, value) in storage.data
+        lookup_match_value(lookup, value) && push!(matched, key)
+    end
+    return
 end
 
 function find_keys(snap::MetricsSnapshot, mod::Module, context::Symbol,
@@ -131,11 +147,7 @@ function find_keys(snap::MetricsSnapshot, mod::Module, context::Symbol,
         matched = Set{Any}()
         for (metric, storage) in ctx.storages
             if lookup_match_metric(lookup, metric)
-                for (key, value) in storage.data
-                    if lookup_match_value(lookup, value)
-                        push!(matched, key)
-                    end
-                end
+                _collect_matching_keys!(matched, storage, lookup)
             end
         end
         if first_pass
