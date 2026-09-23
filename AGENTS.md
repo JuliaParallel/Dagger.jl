@@ -575,3 +575,31 @@ lesson.
    against an empty cache that measures the early return rather than the scan
    behind it (lesson 51). When a check passes, ask what it would have done had
    the thing been broken.
+
+53. **Wrapping a function that other code recognizes by identity silently
+   drops the special case.** Datadeps copy tasks used to be spawned as
+   `move!`; the metrics work wrapped them in `instrumented_move!`. Two backends
+   decide how to run a task with `f === move!`: MPIExt makes *every* rank run a
+   copy (the source rank sends, the destination receives), and OpenCLExt skips
+   its device lock so a copy's long cross-rank receive cannot deadlock against
+   the task producing the data. With the wrapper, MPI copies ran on the
+   destination rank alone and blocked forever in a receive nobody answered --
+   every region that moved data across ranks hung, RoundRobin included, while
+   the whole Distributed suite stayed green. Before wrapping or renaming a task
+   function, grep for `=== thatfunction` (and `typeof(thatfunction)`) across
+   `src/` *and* `ext/`, and route every hit through one predicate
+   (`is_move_task`) instead of adding a second identity check next to it.
+
+54. **Under uniform execution, a planner that reads rank-local inputs must plan
+   on one rank.** Every MPI rank plans every region and must place every task
+   identically, but metrics caches are rank-local (a rank records only the
+   tasks it ran) and a search with a wall-clock budget stops at a different
+   iteration on each rank. So a cost-model scheduler that is perfectly
+   deterministic given its inputs still diverges the moment any task has run:
+   `check_uniform(proc)` fails in `distribute_task!` (without the checker, tags
+   desynchronize and the job hangs). Fixed RNG seeds do not help. The cure is
+   structural -- plan on rank 0 and adopt its plan everywhere
+   (`aot_plans_locally` / `uniform_aot_schedule!`), exchanging exactly once per
+   planned region whether the local cache hit or missed, so that a cache that
+   ever disagrees across ranks still cannot desync the exchange. Run
+   `check_uniformity!(true)` on any new scheduler under MPI before timing it.
