@@ -477,10 +477,11 @@ function extract_collected_metrics(local_cache::MT.MetricsCache, key)
 end
 
 # Bound the global metrics cache to the most-recent this-many tasks (distinct
-# thunk_id keys) per `(mod, context)`. Without a bound the cache grows one entry
-# per metric per task forever, which dominates scheduler allocations (Dict
-# rehash churn) on long-running workloads. The cost model only needs recent
-# samples, so we keep a rolling window.
+# thunk_id keys) per `(mod, context)`, plus a trim slack (see
+# `apply_collected_metrics!`). Without a bound the cache grows one entry per
+# metric per task forever, which dominates scheduler allocations (Dict rehash
+# churn) on long-running workloads. The cost model only needs recent samples,
+# so we keep a rolling window.
 const METRICS_CACHE_MAX_TASKS = Ref(100)
 
 """
@@ -514,10 +515,21 @@ function apply_collected_metrics!(cache::MT.MetricsCache, key::K, pairs) where K
             storage = MT.get_or_create_storage!(ctx, metric)
             MT.set_metric_value!(storage, key, value)
         end
-        MT.trim_context!(ctx, METRICS_CACHE_MAX_TASKS[])
+        # Trim in batches: let the context overshoot its bound by a slack
+        # before cutting it back. `trim_context!` is O(keys) per call, so
+        # trimming on every insert made each task completion cost O(bound) on
+        # the scheduler, which is what kept the bound too small to hold even one
+        # region's worth of samples.
+        keep = METRICS_CACHE_MAX_TASKS[]
+        if MT.context_key_count(ctx) > keep + metrics_cache_trim_slack(keep)
+            MT.trim_context!(ctx, keep)
+        end
     end
     return
 end
+
+# How far past its bound the cache may grow before a trim cuts it back.
+metrics_cache_trim_slack(keep::Integer) = max(keep >> 3, 1)
 
 function _move_matching_keys(snap::MT.MetricsSnapshot,
                              from_space::MemorySpace, to_space::MemorySpace)

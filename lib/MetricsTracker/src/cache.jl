@@ -289,12 +289,27 @@ function trim_context!(ctx::AbstractContextStorage, max_keys::Integer)
     end
     (canonical === nothing || canonical_len <= keep) && return ctx
     drop = canonical_len - keep
-    # Snapshot the keys to evict before mutating any insertion order.
-    evict = canonical[1:drop]
-    for k in evict
-        for (_, s) in ctx.storages
-            delete_metric_value!(s, k)
-        end
+    # Snapshot the keys to evict before mutating any insertion order, then make
+    # one pass per storage. Deleting key by key costs a scan and a shift of the
+    # insertion order per key, i.e. O(drop * n) per storage.
+    evict = Set(@view canonical[1:drop])
+    for (_, s) in ctx.storages
+        delete_metric_values!(s, evict)
     end
     return ctx
+end
+
+"""
+    context_key_count(ctx::AbstractContextStorage) -> Int
+
+The number of distinct keys in `ctx`'s largest storage, i.e. what
+[`trim_context!`](@ref) compares against its bound, in O(number of storages).
+Use it to decide cheaply whether a trim is due.
+"""
+function context_key_count(ctx::AbstractContextStorage)
+    n = 0
+    for (_, s) in ctx.storages
+        n = max(n, length(s))
+    end
+    return n
 end

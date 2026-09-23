@@ -49,6 +49,14 @@ function delete_metric_value!(s::MetricStorage{M, K, T}, key::K) where {M, K, T}
     return
 end
 
+function delete_metric_values!(s::MetricStorage{M, K, T}, keys::AbstractSet) where {M, K, T}
+    for key in keys
+        delete!(s.data, key)
+    end
+    filter!(k -> !(k in keys), s.insertion_order)
+    return
+end
+
 function sync_insertion_order!(s::MetricStorage{M, K, T}) where {M, K, T}
     if length(s.insertion_order) == length(s.data)
         all_present = true

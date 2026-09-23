@@ -594,6 +594,29 @@ end
     @test length(values_for_metric(snap, Main, :trim_multi, StringMetric())) == 2
 end
 
+@testset "trim_context! evicts the oldest keys from every storage" begin
+    cache = MetricsCache()
+    MetricsTracker.bulk_update!(cache) do c
+        ctx = MetricsTracker.pending_context!(c, Main, :trim_ctx, Int)
+        t = MetricsTracker.get_or_create_storage!(ctx, TimeMetric())
+        s = MetricsTracker.get_or_create_storage!(ctx, StringMetric())
+        for k in 1:10
+            set_metric_value!(t, k, UInt64(k))
+            iseven(k) && set_metric_value!(s, k, "v$k")
+        end
+        @test MetricsTracker.context_key_count(ctx) == 10
+        MetricsTracker.trim_context!(ctx, 4)
+        @test MetricsTracker.context_key_count(ctx) == 4
+        # The longest storage sets the order; a sparser one loses the same keys.
+        @test t.insertion_order == [7, 8, 9, 10]
+        @test sort(collect(keys(t.data))) == [7, 8, 9, 10]
+        @test s.insertion_order == [8, 10]
+        @test sort(collect(keys(s.data))) == [8, 10]
+        MetricsTracker.trim_context!(ctx, 4)   # already within bound: no-op
+        @test t.insertion_order == [7, 8, 9, 10]
+    end
+end
+
 @testset "Key Type Mismatch" begin
     cache = MetricsCache()
     write_metric_value!(cache, Main, :ktype, 1, TimeMetric(), UInt64(1))
