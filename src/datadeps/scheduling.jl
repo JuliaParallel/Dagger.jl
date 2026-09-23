@@ -1175,9 +1175,15 @@ _eft_unwrap_arg(arg) = with_value(arg, first(unwrap_inout(value(arg))))
 function _eft_runtime_ns(snap::MT.MetricsSnapshot, spec, proc::Processor)
     f = _eft_unwrap_arg(spec.fargs[1])
     tail = map(_eft_unwrap_arg, _eft_tail_args(spec.fargs))
-    sig = Sch.signature(f, tail).sig
+    sig = Sch.signature(f, tail)
     worker_id = root_worker_id(proc)
-    runtime_lookup = metrics_lookup_runtime_median(snap, sig, proc, worker_id)
+    # Through the per-signature index, built once per snapshot and signature,
+    # rather than `metrics_lookup_runtime_median`: that scans the cache on
+    # every call, and this runs once per (task, candidate processor). Same
+    # fallback chain (see `metrics_lookup_runtime_from_index`).
+    index = cached_signature_runtime_index(snap, sig.sig, sig.hash)
+    runtime_lookup = metrics_lookup_runtime_from_index(index, proc, worker_id;
+                                                       reducer=Statistics.median)
     if trace_eft_lookup()
         if runtime_lookup === nothing
             n = Threads.atomic_add!(EFT_LOOKUP_MISSES, 1)
