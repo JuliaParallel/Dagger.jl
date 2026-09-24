@@ -261,6 +261,28 @@ and the others adopt that plan. Every rank must call this at the same point.
 """
 uniform_aot_schedule!(::Acceleration, schedule, pairs, all_procs) = schedule
 
+"""
+    DATADEPS_LAUNCH_NS_PER_TASK
+
+How long flat-mode Datadeps takes to launch one task (computing its aliasing,
+allocating remote buffers, spawning its copies and the task itself): a running
+average over recent regions, in nanoseconds, or 0 before any has been timed.
+Planners use it as the interval at which a region releases its tasks
+(`DATADEPS_RELEASE_NS`). Process-local; under MPI only rank 0 plans.
+"""
+const DATADEPS_LAUNCH_NS_PER_TASK = Threads.Atomic{Float64}(0.0)
+
+# Regions smaller than this are dominated by fixed per-region costs.
+const LAUNCH_RATE_MIN_TASKS = 16
+
+function record_launch_rate!(ntasks::Int, ns::Integer)
+    ntasks < LAUNCH_RATE_MIN_TASKS && return
+    x = Float64(ns) / ntasks
+    old = DATADEPS_LAUNCH_NS_PER_TASK[]
+    DATADEPS_LAUNCH_NS_PER_TASK[] = old == 0.0 ? x : 0.7 * old + 0.3 * x
+    return
+end
+
 function distribute_tasks!(queue::DataDepsTaskQueue)
     #= TODO: Improvements to be made:
     # - Support for copying non-AbstractArray arguments
@@ -293,20 +315,30 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
 
     # Plan the whole region ahead of time, if the scheduler supports it.
     # Schedulers that don't define `datadeps_schedule_dag_aot!` leave `schedule`
-    # empty and every task falls through to JIT placement below.
-    _dag_spec, schedule = datadeps_build_schedule!(queue.scheduler, queue.seen_tasks,
-                                                   all_procs, all_scope)
+    # empty and every task falls through to JIT placement below. A planner is
+    # told how fast this loop will release the tasks it places (see
+    # `DATADEPS_RELEASE_NS`).
+    release_ns = DATADEPS_LAUNCH_NS_PER_TASK[]
+    _dag_spec, schedule = if datadeps_uses_aot(queue.scheduler) && release_ns > 0.0
+        with(DATADEPS_RELEASE_NS => release_ns) do
+            datadeps_build_schedule!(queue.scheduler, queue.seen_tasks, all_procs, all_scope)
+        end
+    else
+        datadeps_build_schedule!(queue.scheduler, queue.seen_tasks, all_procs, all_scope)
+    end
 
     # Start launching tasks and necessary copies
     state = DataDepsState()
     write_num = 1
     proc_to_scope_lfu = BasicLFUCache{Processor,AbstractScope}(1024)
+    launch_start = time_ns()
     for pair in queue.seen_tasks
         spec = pair.spec
         task = pair.task
         proc = get(schedule, task, nothing)
         write_num = distribute_task!(queue, state, all_procs, all_scope, spec, task, spec.fargs, proc_to_scope_lfu, write_num; proc)
     end
+    record_launch_rate!(length(queue.seen_tasks), time_ns() - launch_start)
 
     # Copy args from remote to local
     # N.B. We sort the keys to ensure a deterministic order for uniformity

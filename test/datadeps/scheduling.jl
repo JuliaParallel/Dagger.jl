@@ -1143,6 +1143,45 @@ end
     # Charging only the latest arrival, it would have moved (finishing at 3 s).
 end
 
+@testset "EFT tasks start no earlier than their launch" begin
+    # Flat Datadeps launches a region's tasks one at a time, so a plan must not
+    # start task k before the launcher reaches it.
+    p1, p2 = Dagger.ThreadProc(1, 1), Dagger.ThreadProc(2, 1)
+    sp = Dagger.MemorySpace[Dagger.CPURAMMemorySpace(1), Dagger.CPURAMMemorySpace(2)]
+    cache = Dagger.EFTCostCache(fill(1e6, 3, 2), trues(3, 2), sp,
+                                Dict{Dagger.Processor,Int}(p1 => 1, p2 => 2), [0.0 1e9; 1e9 0.0],
+                                [Dagger.EFTArg[] for _ in 1:3], [Int[] for _ in 1:3], sp,
+                                [1, 2], [1, 2], Float64[], Int[], Vector{Float64}[], 2e6)
+    copies = Dagger._eft_copies(cache)
+    state = ScheduleState()
+    @test Dagger._eft_ready_and_runtime(state, cache, 1, 1, copies) == (0.0, 1e6)
+    @test Dagger._eft_ready_and_runtime(state, cache, 3, 2, copies) == (4e6, 1e6)
+    # Hand-built caches default to no launch model.
+    nolaunch = Dagger.EFTCostCache(fill(1e6, 3, 2), trues(3, 2), sp,
+                                   Dict{Dagger.Processor,Int}(p1 => 1, p2 => 2), [0.0 1e9; 1e9 0.0],
+                                   [Dagger.EFTArg[] for _ in 1:3], [Int[] for _ in 1:3], sp,
+                                   [1, 2], [1, 2], Float64[], Int[], Vector{Float64}[])
+    @test nolaunch.release_ns == 0.0
+end
+
+@testset "Flat Datadeps measures its launch rate" begin
+    old = Dagger.DATADEPS_LAUNCH_NS_PER_TASK[]
+    try
+        Dagger.DATADEPS_LAUNCH_NS_PER_TASK[] = 0.0
+        Base.ScopedValues.with(Dagger.DATADEPS_HIERARCHICAL => false) do
+            Xs = [zeros(4) for _ in 1:Dagger.LAUNCH_RATE_MIN_TASKS]
+            Dagger.spawn_datadeps() do
+                for X in Xs
+                    Dagger.@spawn fill!(InOut(X), 1.0)
+                end
+            end
+        end
+        @test Dagger.DATADEPS_LAUNCH_NS_PER_TASK[] > 0.0
+    finally
+        Dagger.DATADEPS_LAUNCH_NS_PER_TASK[] = old
+    end
+end
+
 @testset "IteratedGreedyScheduler" begin
     @testset "Type registration and constructor validation" begin
         @test IteratedGreedyScheduler() isa DataDepsScheduler

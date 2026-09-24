@@ -620,7 +620,39 @@ struct EFTCostCache
     data_bytes::Vector{Float64}
     data_src::Vector{Int}
     data_src_rates::Vector{Vector{Float64}}
+    # Time between task launches: task `idx` cannot start before
+    # `(idx - 1) * release_ns` (see `DATADEPS_RELEASE_NS`).
+    release_ns::Float64
 end
+# A cache with no launch model, as for a region whose tasks all exist up front.
+EFTCostCache(task_times, proc_compatible, proc_spaces, proc_to_idx, move_rates,
+             task_args, task_deps, spaces, proc_space, space_rep,
+             data_bytes, data_src, data_src_rates) =
+    EFTCostCache(task_times, proc_compatible, proc_spaces, proc_to_idx, move_rates,
+                 task_args, task_deps, spaces, proc_space, space_rep,
+                 data_bytes, data_src, data_src_rates, 0.0)
+
+"""
+    DATADEPS_RELEASE_NS
+
+The interval, in nanoseconds, at which the region being planned will release
+its tasks, which the EFT planners respect as each task's earliest start.
+
+A planner that treats every task as available at time zero schedules the
+processors as though they were the bottleneck. In flat mode they are not:
+Datadeps launches a region's tasks one at a time, in program order, from one
+task -- computing aliasing, allocating remote buffers and spawning copies for
+each -- and that launch loop took 75-90% of a region's wall time (1.5 ms per
+matmul task at 256^2 tiles, 1.3 ms for Cholesky, 6-9 ms for the stencil, on 4
+Distributed processes). A plan that ignores it puts consecutive tasks on one
+processor while the others idle until later tasks are released. Respecting
+the release order, Greedy's matmul went from 1.06 s to 0.38 s and Cholesky
+from 0.48 s to 0.22-0.29 s (RoundRobin: 0.91 s and 0.55 s).
+
+Flat-mode Datadeps sets it from `DATADEPS_LAUNCH_NS_PER_TASK`, its measured
+launch rate; elsewhere it is 0, i.e. no launch model.
+"""
+const DATADEPS_RELEASE_NS = ScopedValue{Float64}(0.0)
 
 
 """
@@ -681,7 +713,7 @@ function _build_eft_cost_cache(snap::MT.MetricsSnapshot, dag_spec::DAGSpec,
         _eft_task_args(snap, dag_spec, proc_spaces, spaces, space_rates)
     return EFTCostCache(task_times, proc_compatible, proc_spaces, proc_to_idx, move_rates,
                         task_args, task_deps, spaces, proc_space, space_rep,
-                        data_bytes, data_src, data_src_rates)
+                        data_bytes, data_src, data_src_rates, DATADEPS_RELEASE_NS[])
 end
 
 # Bytes/s from `src` to each processor's space; 0 where the spaces coincide.
@@ -985,6 +1017,7 @@ end
 
 When task `idx` could start on processor `w`, and how long it would then occupy
 `w`: its own runtime plus bringing in every input it does not already have.
+It cannot start before it is launched (see `DATADEPS_RELEASE_NS`).
 
 Datadeps moves an input with a copy task scoped to the *receiving* processor,
 so moving data is work that processor does, one copy after another, before
@@ -1003,7 +1036,7 @@ placeholder output size. Each data argument comes from its nearest valid copy
 """
 function _eft_ready_and_runtime(state::ScheduleState, cache::EFTCostCache, idx::Int,
                                 w::Int, copies::EFTCopies)
-    ready = 0.0
+    ready = (idx - 1) * cache.release_ns
     inbound = 0.0
     @inbounds for dep_id in cache.task_deps[idx]
         dep_proc = get(state.task_proc, dep_id, nothing)
