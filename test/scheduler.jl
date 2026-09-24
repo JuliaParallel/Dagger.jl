@@ -600,6 +600,28 @@ end
             @test :metrics_cache in fieldnames(Dagger.DTaskTLS)
         end
 
+        @testset "Kernel time is clocked on the thread that ran the kernel" begin
+            # A runner not pinned to its processor's thread (as under MPI)
+            # has `ThreadProc.execute!` run the kernel on a pinned sub-task, so
+            # the runner's own thread clock never sees the kernel's work.
+            function burn()
+                t0 = MetricsTracker.cputhreadtime()
+                x = 0.0
+                for i in 1:2_000_000
+                    x += sin(i)
+                end
+                return (MetricsTracker.cputhreadtime() - t0, x)
+            end
+            proc = Dagger.ThreadProc(myid(), 1)
+            own, kernel = fetch(Threads.@spawn begin
+                Dagger.set_tls!(proc, UInt(0), nothing, nothing, Dagger.CancelToken(),
+                                false, Dagger.current_acceleration())
+                own = Dagger.execute!(proc, burn)[1]
+                (own, Dagger.get_tls().metrics_kernel_time)
+            end)
+            @test own <= kernel < own + 100_000_000
+        end
+
         @testset "Move Lookups" begin
             cache = MetricsTracker.global_metrics_cache()
             src_space = Dagger.memory_space(1)
@@ -663,7 +685,7 @@ end
                     sig_storage = MetricsTracker.get_or_create_storage!(ctx, Dagger.SignatureMetric())
                     proc_storage = MetricsTracker.get_or_create_storage!(ctx, Dagger.ProcessorMetric())
                     worker_storage = MetricsTracker.get_or_create_storage!(ctx, Dagger.WorkerMetric())
-                    time_storage = MetricsTracker.get_or_create_storage!(ctx, MetricsTracker.ThreadTimeMetric())
+                    time_storage = MetricsTracker.get_or_create_storage!(ctx, Dagger.KernelTimeMetric())
                     for (i, t) in enumerate([UInt64(100), UInt64(200), UInt64(300), UInt64(500), UInt64(900)])
                         key = base_key + i
                         push!(keys_used, key)
@@ -687,7 +709,7 @@ end
                 MetricsTracker.bulk_update!(cache) do c
                     ctx = MetricsTracker.pending_context!(c, Dagger, :execute!, Int)
                     for m in (Dagger.SignatureMetric(), Dagger.ProcessorMetric(),
-                              Dagger.WorkerMetric(), MetricsTracker.ThreadTimeMetric())
+                              Dagger.WorkerMetric(), Dagger.KernelTimeMetric())
                         storage = MetricsTracker.get_or_create_storage!(ctx, m)
                         for k in keys_used
                             MetricsTracker.delete_metric_value!(storage, k)

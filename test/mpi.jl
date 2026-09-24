@@ -788,17 +788,20 @@ end
     # Every rank runs every task, but only the owner computes it. What a
     # spectator measures is not the task's cost, and rank 0 plans every rank's
     # work from its own cache -- so each rank must record only the tasks it
-    # ran.
+    # ran, clocked on the thread that ran them (the MPI runner is not pinned
+    # to that thread; see `KernelTimeMetric`).
     ts = [Dagger.@spawn scope=rank_scope(r) metrics_probe() for r in 0:nranks-1]
-    foreach(fetch, ts)
+    own = [fetch(t)[1] for t in ts]
     snap = Dagger.MT.snapshot(Dagger.MT.global_metrics_cache())
     ctx = snap.contexts[(Dagger, :execute!)]
     sigs = ctx.storages[Dagger.SignatureMetric()].data
     procs = ctx.storages[Dagger.ProcessorMetric()].data
+    kernel = ctx.storages[Dagger.KernelTimeMetric()].data
     probe_keys = [k for (k, s) in sigs if s !== nothing && s[1] === typeof(metrics_probe)]
     @test length(probe_keys) == 1
     k = only(probe_keys)
     @test procs[k].rank == rank
+    @test own[rank+1] <= kernel[k] < own[rank+1] + 100_000_000
 end
 
 @testset "Nothing task results" begin

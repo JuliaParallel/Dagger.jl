@@ -20,7 +20,10 @@ function execute!(proc::ThreadProc, @nospecialize(f), @nospecialize(args...); @n
             TimespanLogging.prof_task_put!(tls.sch_handle.thunk_id.id)
         end
         try
-            return @invokelatest f(args...; kwargs...)
+            t0 = cputhreadtime()
+            ret = @invokelatest f(args...; kwargs...)
+            tls.metrics_kernel_time = cputhreadtime() - t0
+            return ret
         catch err
             err isa InterruptException && rethrow()
             rethrow(CapturedException(err, catch_backtrace()))
@@ -33,7 +36,11 @@ function execute!(proc::ThreadProc, @nospecialize(f), @nospecialize(args...); @n
         if task_logging_enabled()
             TimespanLogging.prof_task_put!(tls.sch_handle.thunk_id.id)
         end
+        # Clock the call here, on the thread it runs on (see
+        # `KernelTimeMetric`); `tls` is the caller's, read after `fetch`.
+        t0 = cputhreadtime()
         result[] = @invokelatest f(args...; kwargs...)
+        tls.metrics_kernel_time = cputhreadtime() - t0
         return
     end
     set_task_tid!(task, proc.tid)

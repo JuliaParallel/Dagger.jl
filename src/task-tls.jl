@@ -22,6 +22,10 @@ mutable struct DTaskTLS
     metrics_sig::Union{Vector{Any}, Nothing}
     metrics_transfer_size::UInt64
     metrics_transfer_time::UInt64
+    # CPU time of the thread that ran the thunk's function, as measured by
+    # the processor's `execute!` around the call (0 if it measured nothing);
+    # see `KernelTimeMetric`. Reset by `set_tls!`.
+    metrics_kernel_time::UInt64
 end
 
 const DTASK_TLS = TaskLocalValue{Union{DTaskTLS,Nothing}}(()->nothing)
@@ -37,7 +41,8 @@ Base.copy(tls::DTaskTLS) =
              tls.metrics_cache,
              tls.metrics_sig,
              tls.metrics_transfer_size,
-             tls.metrics_transfer_time)
+             tls.metrics_transfer_time,
+             tls.metrics_kernel_time)
 
 """
     get_tls() -> DTaskTLS
@@ -79,11 +84,13 @@ function set_tls!(processor, sch_uid, sch_handle, task_spec, cancel_token,
         dtls.metrics_sig = metrics_sig
         dtls.metrics_transfer_size = metrics_transfer_size
         dtls.metrics_transfer_time = metrics_transfer_time
+        dtls.metrics_kernel_time = UInt64(0)
     else
         DTASK_TLS[] = DTaskTLS(processor, sch_uid, sch_handle, task_spec,
                                cancel_token, logging_enabled, acceleration,
                                metrics_cache, metrics_sig,
-                               metrics_transfer_size, metrics_transfer_time)
+                               metrics_transfer_size, metrics_transfer_time,
+                               UInt64(0))
     end
     set_task_acceleration!(acceleration)
 end

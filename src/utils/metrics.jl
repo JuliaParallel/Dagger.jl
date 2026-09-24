@@ -64,9 +64,43 @@ struct MoveSizeMetric <: MT.AbstractMetric end
 MT.metric_applies(::MoveSizeMetric, ::Val{:execute!}) = true
 MT.metric_type(::Type{MoveSizeMetric}) = Union{UInt64, Nothing}
 
+"""
+    KernelTimeMetric
+
+A task's cost, for the cost model: the CPU time of the thread that ran the
+task's function.
+
+`ThreadProc.execute!` clocks the call itself (`DTaskTLS.metrics_kernel_time`),
+because the call does not always run on the scheduler task's thread. An
+`MPIProcessor`'s runner is not pinned (MPI's waits spin on `yield`, which a
+pinned task must not do), so its kernel runs on a sub-task pinned to the
+processor's thread while the runner waits -- and may resume elsewhere. Clocking
+the runner's thread, as `MT.ThreadTimeMetric` does, then measures whatever else
+that thread did meanwhile: a 256x256 matmul read 0.23 ms against 0.9 ms of wall
+time, and a runner that migrated subtracted one thread's clock from another's,
+wrapping to ~1.8e19 ns. Rank 0 plans every rank's work from these numbers.
+
+Processors whose `execute!` reports no time fall back to the runner thread's
+clock, but only if the runner stayed on one thread; otherwise the task records
+no runtime rather than a meaningless one.
+"""
+struct KernelTimeMetric <: MT.AbstractMetric end
+MT.metric_applies(::KernelTimeMetric, ::Val{:execute!}) = true
+MT.metric_type(::Type{KernelTimeMetric}) = Union{UInt64, Nothing}
+MT.start_metric(::KernelTimeMetric) = (Threads.threadid(), cputhreadtime())
+function MT.stop_metric(::KernelTimeMetric, start::Tuple{Int, UInt64})
+    tls = _metrics_tls()
+    if tls !== nothing && tls.metrics_kernel_time != 0
+        return tls.metrics_kernel_time
+    end
+    tid, t0 = start
+    Threads.threadid() == tid || return nothing
+    return cputhreadtime() - t0
+end
+
 const EXECUTE_METRICS_SPEC = MT.MetricsSpec(
     MT.TimeMetric(),
-    MT.ThreadTimeMetric(),
+    KernelTimeMetric(),
     MT.AllocMetric(),
     SignatureMetric(),
     ProcessorMetric(),
@@ -178,7 +212,7 @@ end
 function metrics_lookup_runtime(snap::MT.MetricsSnapshot, sig::Vector,
                                 proc::Processor, worker_id::Int;
                                 reducer::Function=first)
-    target = MT.ThreadTimeMetric()
+    target = KernelTimeMetric()
     for lookups in _runtime_lookup_chain(sig, proc, worker_id)
         matched = MT.find_keys(snap, Dagger, :execute!, lookups)
         isempty(matched) && continue
@@ -198,7 +232,7 @@ end
     SignatureRuntimeIndex
 
 Precomputed per-signature runtime index built by
-`build_signature_runtime_index`. Groups measured `ThreadTimeMetric`
+`build_signature_runtime_index`. Groups measured `KernelTimeMetric`
 runtimes for a fixed signature `sig` by `(processor, worker_id)`,
 `(processor_type, worker_id)`, `(processor_type)`, and all-matching so
 that per-processor lookups via
@@ -224,7 +258,7 @@ end
 
 Single-pass build: scan the SignatureMetric storage once, keep only keys
 matching `sig`, then for each such key materialise its
-(processor, worker_id, ThreadTimeMetric) tuple and index into the four
+(processor, worker_id, KernelTimeMetric) tuple and index into the four
 buckets used by the fallback chain in `metrics_lookup_runtime`. The
 result is safe to reuse across many `metrics_lookup_runtime_from_index`
 calls for different processors as long as `sig` and `snap` are
@@ -244,7 +278,7 @@ function build_signature_runtime_index(snap::MT.MetricsSnapshot, sig::Vector)
     sig_storage = get(ctx.storages, SignatureMetric(), nothing)
     proc_storage = get(ctx.storages, ProcessorMetric(), nothing)
     worker_storage = get(ctx.storages, WorkerMetric(), nothing)
-    time_storage = get(ctx.storages, MT.ThreadTimeMetric(), nothing)
+    time_storage = get(ctx.storages, KernelTimeMetric(), nothing)
 
     by_proc_worker = Dict{Tuple{Processor,Int},Vector{UInt64}}()
     by_type_worker = Dict{Tuple{DataType,Int},Vector{UInt64}}()
