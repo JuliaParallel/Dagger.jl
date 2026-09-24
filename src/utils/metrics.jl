@@ -477,19 +477,21 @@ end
 # metric per task forever, which dominates scheduler allocations (Dict rehash
 # churn) on long-running workloads. The cost model only needs recent samples,
 # so we keep a rolling window.
-const METRICS_CACHE_MAX_TASKS = Ref(100)
+const METRICS_CACHE_MAX_TASKS = Ref(1000)
 
 """
     metrics_cache_max_tasks!(n::Integer)
 
 Set the rolling-window bound described above, returning the previous value.
 
-The default of 100 is tuned for steady-state scheduling, where only recent
-samples matter. It is too small for benchmark harnesses that warm the cost
-model deliberately: a GPU warmup writes ~60 entries, after which CPU warmup and
-measured trials push past 100 and evict the GPU samples, so heterogeneous cost
-lookups silently fall back to CPU-derived estimates. Measured demand for a full
-warm+trials cycle is ~235 entries at cholesky nt=4 and ~835 at nt=8.
+The default is 1000. It was 100, which held fewer tasks than one region's
+kernels plus its copies: a 16x16-tile Cholesky runs ~800 kernels, so by the
+time a cost-model planner looked, most kernel signatures had been evicted and
+fell back to the 1 s placeholder runtime. (Likewise a GPU warmup's ~60 entries
+were evicted by the CPU trials after it.) Measured demand for a full
+warm+trials cycle is ~235 entries at cholesky nt=4 and ~835 at nt=8. A larger
+bound is not free: RoundRobin on the default path, 4 nodes, 256^2 tiles, ran
+MPI matmul in 4.15 s at 100, 3.75 s at 1000 and 5.61 s at 5000.
 
 Note this is process-local; multi-worker runs must set it on each worker.
 """
