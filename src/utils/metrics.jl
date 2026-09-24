@@ -320,8 +320,8 @@ end
 """
     SignatureRuntimeIndexCache
 
-Per-task memo of `build_signature_runtime_index` results, keyed by signature
-hash and valid only for one snapshot object.
+Memo of `build_signature_runtime_index` results (and alloc/transfer-rate lookups), keyed by signature
+hash and attached to the one snapshot object it describes.
 
 Building an index is a full scan of the snapshot's signature storage — measured
 at 770 allocations / 30 KB — and the scheduler builds one per scheduling pass.
@@ -330,20 +330,22 @@ both repeat: signatures recur across tasks, and the cost model reuses one
 snapshot for as long as it is allowed to go stale. Memoizing therefore collapses
 the per-task build to a dictionary lookup.
 
-Keyed on the snapshot's `objectid`, so a rebuild invalidates every entry at
-once. Task-local, so no locking and no sharing between the concurrent
-scheduling tasks the hierarchical path spawns.
+The memo lives on the snapshot (`MT.snapshot_memo!`), so a rebuild starts
+with an empty one and every task holding a snapshot shares its results. It
+used to be task-local, to avoid locking between concurrent scheduling tasks;
+but scheduling runs on a pool of tasks, so each one redid every scan after
+each snapshot rebuild, and that multiplied the cost of the metrics bound by the
+number of scheduling tasks -- at a 5000-task bound, MPI matmul on the default
+path ran 10x slower than at 100.
 """
 mutable struct SignatureRuntimeIndexCache
-    snap_id::UInt
+    lock::ReentrantLock
     entries::Dict{UInt, SignatureRuntimeIndex}
     # `metrics_lookup_alloc` and `metrics_lookup_transfer_rate` both resolve
     # through `MT.find_keys`, which scans every storage and every key of the
     # snapshot while building `Set{Any}`s -- and they run once per candidate
     # processor per task. Unlike the runtime lookup they have no index, so
-    # their (small) results are memoized directly. This is the single largest
-    # remaining cost on the scheduling path; profiling attributes it to
-    # `MetricsTracker/lookup.jl`'s scan loop.
+    # their (small) results are memoized directly.
     # N.B. A miss is a meaningful result and is cached as such: the scan costs
     # the same whether or not it finds anything, so `nothing` must be memoized
     # too or the common no-samples case keeps paying full price.
@@ -351,12 +353,22 @@ mutable struct SignatureRuntimeIndexCache
     rate::Dict{Tuple{UInt, Int}, Union{UInt64, Nothing}}
 end
 SignatureRuntimeIndexCache() =
-    SignatureRuntimeIndexCache(UInt(0), Dict{UInt, SignatureRuntimeIndex}(),
+    SignatureRuntimeIndexCache(ReentrantLock(), Dict{UInt, SignatureRuntimeIndex}(),
                                Dict{Tuple{UInt, UInt}, Union{UInt64, Nothing}}(),
                                Dict{Tuple{UInt, Int}, Union{UInt64, Nothing}}())
 
-const SIGNATURE_RUNTIME_INDEX_CACHE =
-    TaskLocalValue{SignatureRuntimeIndexCache}(() -> SignatureRuntimeIndexCache())
+_cost_memo(snap::MT.MetricsSnapshot) =
+    MT.snapshot_memo!(SignatureRuntimeIndexCache, snap)::SignatureRuntimeIndexCache
+
+# Look `key` up in one of `memo`'s tables, computing it with `f()` on a miss.
+# `f` runs outside the lock (it scans the snapshot); two tasks racing on one
+# key both compute it, and the first stored result is kept.
+function _memoized(f, memo::SignatureRuntimeIndexCache, table::Dict{K,V}, key::K) where {K,V}
+    existing = @lock memo.lock get(table, key, missing)
+    existing === missing || return existing::V
+    val = f()::V
+    return @lock memo.lock get!(table, key, val)
+end
 
 """
     cached_signature_runtime_index(snap, sig, sig_hash) -> SignatureRuntimeIndex
@@ -365,25 +377,8 @@ const SIGNATURE_RUNTIME_INDEX_CACHE =
 [`SignatureRuntimeIndexCache`](@ref).
 """
 function cached_signature_runtime_index(snap::MT.MetricsSnapshot, sig::Vector, sig_hash::UInt)
-    cache = SIGNATURE_RUNTIME_INDEX_CACHE[]
-    snap_id = objectid(snap)
-    _reset_cost_cache_if_stale!(cache, snap_id)
-    existing = get(cache.entries, sig_hash, nothing)
-    existing === nothing || return existing
-    idx = build_signature_runtime_index(snap, sig)
-    cache.entries[sig_hash] = idx
-    return idx
-end
-
-function _reset_cost_cache_if_stale!(cache::SignatureRuntimeIndexCache, snap_id::UInt)
-    if cache.snap_id != snap_id
-        # New snapshot: every memoized result describes the old one.
-        empty!(cache.entries)
-        empty!(cache.alloc)
-        empty!(cache.rate)
-        cache.snap_id = snap_id
-    end
-    return
+    memo = _cost_memo(snap)
+    return _memoized(() -> build_signature_runtime_index(snap, sig), memo, memo.entries, sig_hash)
 end
 
 """
@@ -394,13 +389,9 @@ end
 """
 function cached_metrics_lookup_alloc(snap::MT.MetricsSnapshot, sig::Vector,
                                      sig_hash::UInt, proc::Processor)
-    cache = SIGNATURE_RUNTIME_INDEX_CACHE[]
-    _reset_cost_cache_if_stale!(cache, objectid(snap))
-    key = (sig_hash, hash(proc))
-    haskey(cache.alloc, key) && return cache.alloc[key]
-    val = metrics_lookup_alloc(snap, sig, proc)
-    cache.alloc[key] = val
-    return val
+    memo = _cost_memo(snap)
+    return _memoized(() -> metrics_lookup_alloc(snap, sig, proc), memo, memo.alloc,
+                     (sig_hash, hash(proc)))
 end
 
 """
@@ -411,13 +402,9 @@ end
 """
 function cached_metrics_lookup_transfer_rate(snap::MT.MetricsSnapshot,
                                              proc::Processor, worker_id::Int)
-    cache = SIGNATURE_RUNTIME_INDEX_CACHE[]
-    _reset_cost_cache_if_stale!(cache, objectid(snap))
-    key = (hash(proc), worker_id)
-    haskey(cache.rate, key) && return cache.rate[key]
-    val = metrics_lookup_transfer_rate(snap, proc, worker_id)
-    cache.rate[key] = val
-    return val
+    memo = _cost_memo(snap)
+    return _memoized(() -> metrics_lookup_transfer_rate(snap, proc, worker_id), memo, memo.rate,
+                     (hash(proc), worker_id))
 end
 
 metrics_lookup_runtime_mean(snap, sig, proc, worker_id) =

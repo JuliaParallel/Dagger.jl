@@ -4,10 +4,31 @@ mutable struct MetricsSnapshot
     # When this snapshot was built, for `snapshot_stale` (see below).
     const built_ns::UInt64
     @atomic key_indexes::Union{Dict{Tuple{ContextKey, AbstractMetric, Any}, Any}, Nothing}
+    # Derived data a consumer computes from this snapshot (see
+    # `snapshot_memo!`): shared by every task that reads the snapshot, and
+    # dropped with it.
+    @atomic memo::Any
 end
 
 MetricsSnapshot(contexts::Dict{ContextKey, AbstractContextStorage}, generation::UInt64) =
-    MetricsSnapshot(contexts, generation, time_ns(), nothing)
+    MetricsSnapshot(contexts, generation, time_ns(), nothing, nothing)
+
+"""
+    snapshot_memo!(make, snap::MetricsSnapshot)
+
+The memo object attached to `snap`, created with `make()` by whichever task
+asks first. A snapshot is immutable, so anything derived from it can be
+computed once and shared by every task holding it; a consumer that kept such
+results per task would redo each one in every task. The memo must do its own
+locking.
+"""
+function snapshot_memo!(make, snap::MetricsSnapshot)
+    memo = @atomic snap.memo
+    memo === nothing || return memo
+    new_memo = make()
+    result = @atomicreplace snap.memo nothing => new_memo
+    return result.success ? new_memo : result.old
+end
 
 Base.length(s::MetricsSnapshot) = length(s.contexts)
 Base.isempty(s::MetricsSnapshot) = isempty(s.contexts)
