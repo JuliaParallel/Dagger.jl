@@ -992,7 +992,9 @@ end
     @testset "Algorithm correctness: Chunk ready time = transfer_time when cross-space" begin
         empty_dag = DAGSpec()
         empty_state = ScheduleState()
-        snap = Dagger.MT.snapshot(Dagger.MT.global_metrics_cache())
+        # An empty cache, so no measured CPU-to-CPU move rate (which the lookup
+        # would fall back to for this made-up space) can replace the default.
+        snap = Dagger.MT.snapshot(Dagger.MT.MetricsCache())
         data = rand(Float64, 128)
         c = Dagger.tochunk(data)
         chunk_space = Dagger.memory_space(c)
