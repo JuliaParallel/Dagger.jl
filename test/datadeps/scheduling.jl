@@ -1089,6 +1089,37 @@ end
     end
 end
 
+@testset "EFT copies: reads replicate, writes invalidate" begin
+    # Two processes, one data object of 1e9 bytes starting on the first, moved
+    # at 1e9 bytes/s (1 s). Task 1 reads it on proc 2; task 2 writes it on
+    # proc 1; task 3 reads it again on proc 2.
+    p1, p2 = Dagger.ThreadProc(1, 1), Dagger.ThreadProc(2, 1)
+    procs2 = Dagger.Processor[p1, p2]
+    sp = Dagger.MemorySpace[Dagger.CPURAMMemorySpace(1), Dagger.CPURAMMemorySpace(2)]
+    rates = [0.0 1e9; 1e9 0.0]
+    args = [[Dagger.EFTArg(1, false)], [Dagger.EFTArg(1, true)], [Dagger.EFTArg(1, false)]]
+    cache = Dagger.EFTCostCache(zeros(3, 2), trues(3, 2), sp,
+                                Dict{Dagger.Processor,Int}(p1 => 1, p2 => 2), rates,
+                                args, [Int[], Int[], Int[]], sp, [1, 2], [1, 2],
+                                [1e9], [1], [[0.0, 1e9]])
+    copies = Dagger._eft_copies(cache)
+    @test Dagger._eft_arrival_ns(copies, cache, 1, 1) == 0.0
+    @test Dagger._eft_arrival_ns(copies, cache, 1, 2) ≈ 1e9           # 1 s to move
+    Dagger._eft_record_copies!(copies, cache, 1, 2, 5e9)              # read on proc 2
+    @test Dagger._eft_arrival_ns(copies, cache, 1, 2) ≈ 1e9           # copy kept there
+    Dagger._eft_record_copies!(copies, cache, 2, 1, 7e9)              # written on proc 1
+    @test Dagger._eft_arrival_ns(copies, cache, 1, 1) == 7e9          # after the write
+    @test Dagger._eft_arrival_ns(copies, cache, 1, 2) ≈ 8e9           # stale copy dropped
+    # Data that starts outside the plan's spaces arrives from its source.
+    ext = Dagger.EFTCostCache(zeros(1, 2), trues(1, 2), sp,
+                              Dict{Dagger.Processor,Int}(p1 => 1, p2 => 2), rates,
+                              [[Dagger.EFTArg(1, false)]], [Int[]], sp, [1, 2], [1, 2],
+                              [2e9], [0], [[1e9, 2e9]])
+    ecopies = Dagger._eft_copies(ext)
+    @test Dagger._eft_arrival_ns(ecopies, ext, 1, 1) ≈ 2e9
+    @test Dagger._eft_arrival_ns(ecopies, ext, 1, 2) ≈ 1e9
+end
+
 @testset "IteratedGreedyScheduler" begin
     @testset "Type registration and constructor validation" begin
         @test IteratedGreedyScheduler() isa DataDepsScheduler
