@@ -360,9 +360,10 @@ function Dagger.datadeps_schedule_dag_aot!(s::CountingPlanner, schedule, dag_spe
     Dagger.datadeps_schedule_dag_aot!(s.inner, schedule, dag_spec, all_procs, all_scope)
 end
 
-# Defined everywhere: the plans may place these tasks on a worker.
-@everywhere provisional_probe!(x) = (x .+= 1; x)
-@everywhere provisional_probe_hier!(x) = (x .+= 2; x)
+# Defined everywhere: the plans may place these tasks on a worker. The `Val`
+# gives each run of the test below a signature no earlier run has measured.
+@everywhere provisional_probe!(x, ::Val) = (x .+= 1; x)
+@everywhere provisional_probe_hier!(x, ::Val) = (x .+= 2; x)
 
 @testset "A plan made before its kernels were measured is replanned once" begin
     # The first call of a region runs kernels that have never been measured,
@@ -370,6 +371,7 @@ end
     # must not be reused forever: the next call replans with the measurements
     # the first one recorded, and later calls reuse that plan.
     for (hier, probe!) in ((false, provisional_probe!), (true, provisional_probe_hier!))
+        fresh = Val(time_ns())
         s = CountingPlanner(GreedyScheduler(), Ref(0))
         cache = datadeps_schedule_cache(s)
         empty!(cache)
@@ -377,8 +379,8 @@ end
                                           Dagger.DATADEPS_HIERARCHICAL => hier) do
             A = rand(16); B = rand(16)
             Dagger.spawn_datadeps() do
-                Dagger.@spawn probe!(InOut(A))
-                Dagger.@spawn probe!(InOut(B))
+                Dagger.@spawn probe!(InOut(A), fresh)
+                Dagger.@spawn probe!(InOut(B), fresh)
             end
         end
         region()
