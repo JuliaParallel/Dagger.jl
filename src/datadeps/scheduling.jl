@@ -217,7 +217,48 @@ end
 
 struct DAGSpecSchedule
     id_to_proc::Dict{Int, Processor}
-    DAGSpecSchedule() = new(Dict{Int, Processor}())
+    # Planned before every task had a runtime measurement (see
+    # `datadeps_plan_informed`): the next equivalent region replans once
+    # instead of reusing it, and replaces this entry.
+    provisional::Bool
+    DAGSpecSchedule(provisional::Bool=false) = new(Dict{Int, Processor}(), provisional)
+end
+
+"""
+    datadeps_plan_informed(scheduler, dag_spec) -> Bool
+
+Whether a plan `scheduler` computes for `dag_spec` now rests on real
+measurements. The default is `true`.
+
+A plan that does not is still used, but it is cached as provisional: the next
+equivalent region replans once and replaces it, so a DAG shape is planned at
+most twice. That matters because plans are cached for the life of the process
+and the first call of a region is exactly when its kernels have never run: the
+cost-model planners then see the placeholder `GREEDY_DEFAULT_RUNTIME_NS` (1 s)
+for every task, which dwarfs every transfer, so the plan only balances task
+counts -- and that plan used to be reused forever.
+"""
+# N.B. `dag_spec` is untyped for the same reason as `datadeps_schedule_task`'s
+# trailing arguments: a wrapper scheduler's method conventionally leaves them
+# untyped, and a typed one here would make every such call ambiguous.
+datadeps_plan_informed(::DataDepsScheduler, dag_spec) = true
+
+# Whether every distinct task signature in `dag_spec` has a runtime measured on
+# some processor -- the last tier of `_runtime_lookup_chain`, so a task that
+# fails this check is costed at `GREEDY_DEFAULT_RUNTIME_NS` everywhere.
+function _eft_plan_informed(dag_spec::DAGSpec)
+    snap = MT.snapshot(MT.global_metrics_cache())
+    checked = Set{UInt}()
+    for k in 1:nv(dag_spec.g)
+        spec = dag_spec.id_to_spec[k]
+        f = _eft_unwrap_arg(spec.fargs[1])
+        sig = Sch.signature(f, map(_eft_unwrap_arg, _eft_tail_args(spec.fargs)))
+        sig.hash in checked && continue
+        push!(checked, sig.hash)
+        isempty(MT.find_keys(snap, Dagger, :execute!,
+                             (MT.LookupExact(SignatureMetric(), sig.sig),))) && return false
+    end
+    return true
 end
 
 # Per-scheduler-type cache. Each entry in the inner Vector is a (DAGSpec =>
@@ -247,6 +288,32 @@ cache at all, task-local cache).
 function datadeps_schedule_cache(scheduler::DataDepsScheduler)
     return @lock DATADEPS_DAG_SPECS_LOCK get!(Vector{Pair{DAGSpec, DAGSpecSchedule}},
                                               DATADEPS_DAG_SPECS, typeof(scheduler))
+end
+
+# Look `dag_spec` up in `schedule_cache`. Returns `(found, stale)`: `found` is a
+# matching plan to reuse, or `nothing`; `stale` is a matching *provisional* plan,
+# which the caller replans and then replaces via `_schedule_cache_store!`.
+function _schedule_cache_find(scheduler::DataDepsScheduler, schedule_cache, dag_spec::DAGSpec)
+    @lock DATADEPS_DAG_SPECS_LOCK for (other_spec, spec_schedule) in schedule_cache
+        datadeps_dag_equivalent(scheduler, dag_spec, other_spec) || continue
+        return spec_schedule.provisional ? (nothing, spec_schedule) : (spec_schedule, nothing)
+    end
+    return nothing, nothing
+end
+
+# Cache `spec_schedule` for `dag_spec`, in place of `stale` if that is still there.
+function _schedule_cache_store!(schedule_cache, dag_spec::DAGSpec,
+                                spec_schedule::DAGSpecSchedule,
+                                stale::Union{DAGSpecSchedule, Nothing})
+    @lock DATADEPS_DAG_SPECS_LOCK begin
+        idx = stale === nothing ? nothing : findfirst(p -> p.second === stale, schedule_cache)
+        if idx === nothing
+            push!(schedule_cache, dag_spec => spec_schedule)
+        else
+            schedule_cache[idx] = dag_spec => spec_schedule
+        end
+    end
+    return
 end
 
 
@@ -2075,6 +2142,12 @@ end
 # deep copy; every other field is immutable configuration and is forwarded
 # verbatim.
 datadeps_uses_aot(::OptimizingScheduler) = true
+
+# The cost-model planners all read per-signature runtimes (see
+# `datadeps_plan_informed`).
+datadeps_plan_informed(::Union{GreedyScheduler, IteratedGreedyScheduler,
+                               SimulatedAnnealingScheduler, OptimizingScheduler},
+                       dag_spec) = _eft_plan_informed(dag_spec)
 
 Base.similar(s::OptimizingScheduler) =
     OptimizingScheduler(; optimizer=s.optimizer,

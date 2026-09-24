@@ -192,19 +192,18 @@ function datadeps_build_schedule!(scheduler::DataDepsScheduler,
     schedule = Dict{DTask, Processor}()
     schedule_cache = cache ? datadeps_schedule_cache(scheduler) : nothing
     cache_hit = false
+    stale = nothing
     if schedule_cache !== nothing
-        @lock DATADEPS_DAG_SPECS_LOCK for (other_spec, spec_schedule) in schedule_cache
-            if datadeps_dag_equivalent(scheduler, dag_spec, other_spec)
-                @dagdebug nothing :spawn_datadeps "Found matching DAG spec!"
-                for (id, proc) in spec_schedule.id_to_proc
-                    uid = dag_spec.id_to_uid[id]
-                    task_idx = findfirst(spec_task -> spec_task.task.uid == uid, pairs)
-                    task = pairs[task_idx].task
-                    schedule[task] = proc
-                end
-                cache_hit = true
-                break
+        found, stale = _schedule_cache_find(scheduler, schedule_cache, dag_spec)
+        if found !== nothing
+            @dagdebug nothing :spawn_datadeps "Found matching DAG spec!"
+            for (id, proc) in found.id_to_proc
+                uid = dag_spec.id_to_uid[id]
+                task_idx = findfirst(spec_task -> spec_task.task.uid == uid, pairs)
+                task = pairs[task_idx].task
+                schedule[task] = proc
             end
+            cache_hit = true
         end
     end
 
@@ -223,12 +222,15 @@ function datadeps_build_schedule!(scheduler::DataDepsScheduler,
     # Persist the schedule for reuse by future equivalent DAGs. This follows
     # the exchange, so under uniform execution every rank caches the same plan.
     if schedule_cache !== nothing && !cache_hit && !isempty(schedule)
-        spec_schedule = DAGSpecSchedule()
+        # A plan replacing a provisional one is final either way, so a DAG shape
+        # is planned at most twice (see `datadeps_plan_informed`).
+        spec_schedule = DAGSpecSchedule(stale === nothing &&
+                                        !datadeps_plan_informed(scheduler, dag_spec))
         for (task, proc) in schedule
             id = dag_spec.uid_to_id[task.uid]
             spec_schedule.id_to_proc[id] = proc
         end
-        @lock DATADEPS_DAG_SPECS_LOCK push!(schedule_cache, dag_spec => spec_schedule)
+        _schedule_cache_store!(schedule_cache, dag_spec, spec_schedule, stale)
     end
 
     return dag_spec, schedule

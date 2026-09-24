@@ -344,6 +344,54 @@ end
     @test length(ls_cache) == 1
 end
 
+# A scheduler wrapper that counts planning passes. It must forward
+# `datadeps_plan_informed`, or every plan it makes would count as final.
+struct CountingPlanner{S<:DataDepsScheduler} <: DataDepsScheduler
+    inner::S
+    plans::Base.RefValue{Int}
+end
+Dagger.datadeps_uses_aot(s::CountingPlanner) = Dagger.datadeps_uses_aot(s.inner)
+Dagger.datadeps_plan_informed(s::CountingPlanner, dag_spec) = Dagger.datadeps_plan_informed(s.inner, dag_spec)
+Dagger.datadeps_schedule_cache(s::CountingPlanner) = datadeps_schedule_cache(s.inner)
+Dagger.datadeps_schedule_task(s::CountingPlanner, args...) = Dagger.datadeps_schedule_task(s.inner, args...)
+Base.similar(s::CountingPlanner) = CountingPlanner(similar(s.inner), s.plans)
+function Dagger.datadeps_schedule_dag_aot!(s::CountingPlanner, schedule, dag_spec, all_procs, all_scope)
+    s.plans[] += 1
+    Dagger.datadeps_schedule_dag_aot!(s.inner, schedule, dag_spec, all_procs, all_scope)
+end
+
+# Defined everywhere: the plans may place these tasks on a worker.
+@everywhere provisional_probe!(x) = (x .+= 1; x)
+@everywhere provisional_probe_hier!(x) = (x .+= 2; x)
+
+@testset "A plan made before its kernels were measured is replanned once" begin
+    # The first call of a region runs kernels that have never been measured,
+    # so a cost-model plan rests on a placeholder runtime for every task. It
+    # must not be reused forever: the next call replans with the measurements
+    # the first one recorded, and later calls reuse that plan.
+    for (hier, probe!) in ((false, provisional_probe!), (true, provisional_probe_hier!))
+        s = CountingPlanner(GreedyScheduler(), Ref(0))
+        cache = datadeps_schedule_cache(s)
+        empty!(cache)
+        region() = Base.ScopedValues.with(DATADEPS_SCHEDULER => s,
+                                          Dagger.DATADEPS_HIERARCHICAL => hier) do
+            A = rand(16); B = rand(16)
+            Dagger.spawn_datadeps() do
+                Dagger.@spawn probe!(InOut(A))
+                Dagger.@spawn probe!(InOut(B))
+            end
+        end
+        region()
+        @test s.plans[] == 1
+        @test length(cache) == 1 && cache[1].second.provisional
+        region()
+        @test s.plans[] == 2
+        @test length(cache) == 1 && !cache[1].second.provisional
+        region()
+        @test s.plans[] == 2
+    end
+end
+
 @testset "A plan computed in one task is reused from another" begin
     # The cache is keyed on DAG structure, so a region submitted from a new
     # task (here `Threads.@spawn`) must hit a plan an earlier task computed

@@ -1636,11 +1636,13 @@ end
 
 """
     _hierarchical_schedule_cache_lookup(scheduler, seen_tasks)
-        -> (dag_spec::DAGSpec, schedule::Union{Dict{DTask,Processor},Nothing})
+        -> (dag_spec::DAGSpec, schedule::Union{Dict{DTask,Processor},Nothing}, stale)
 
 Build the whole-region `DAGSpec` and look for a cached schedule matching it.
-Returns the spec (needed later to key the cache on a miss) and the recovered
-task-to-processor mapping, or `nothing` if nothing matched.
+Returns the spec (needed later to key the cache on a miss), the recovered
+task-to-processor mapping or `nothing` if nothing reusable matched, and any
+matching provisional plan, which the replan replaces (see
+`datadeps_plan_informed`).
 
 This deliberately does *not* compute a schedule on a miss: under hierarchical
 partitioning, planning happens per partition, over that partition's own
@@ -1650,27 +1652,23 @@ per-partition results back together.
 function _hierarchical_schedule_cache_lookup(scheduler::DataDepsScheduler,
                                              seen_tasks::Vector{DTaskPair})
     dag_spec = DAGSpec()
-    datadeps_uses_aot(scheduler) || return dag_spec, nothing
+    datadeps_uses_aot(scheduler) || return dag_spec, nothing, nothing
     for (spec, task) in seen_tasks
         dag_add_task!(dag_spec, spec, task) || break
     end
-    isempty(dag_spec) && return dag_spec, nothing
+    isempty(dag_spec) && return dag_spec, nothing, nothing
 
-    schedule_cache = datadeps_schedule_cache(scheduler)
-    @lock DATADEPS_DAG_SPECS_LOCK for (other_spec, spec_schedule) in schedule_cache
-        if datadeps_dag_equivalent(scheduler, dag_spec, other_spec)
-            @dagdebug nothing :spawn_datadeps "Found matching hierarchical DAG spec!"
-            schedule = Dict{DTask,Processor}()
-            for (id, proc) in spec_schedule.id_to_proc
-                uid = dag_spec.id_to_uid[id]
-                idx = findfirst(pair -> pair.task.uid == uid, seen_tasks)
-                idx === nothing && continue
-                schedule[seen_tasks[idx].task] = proc
-            end
-            return dag_spec, schedule
-        end
+    found, stale = _schedule_cache_find(scheduler, datadeps_schedule_cache(scheduler), dag_spec)
+    found === nothing && return dag_spec, nothing, stale
+    @dagdebug nothing :spawn_datadeps "Found matching hierarchical DAG spec!"
+    schedule = Dict{DTask,Processor}()
+    for (id, proc) in found.id_to_proc
+        uid = dag_spec.id_to_uid[id]
+        idx = findfirst(pair -> pair.task.uid == uid, seen_tasks)
+        idx === nothing && continue
+        schedule[seen_tasks[idx].task] = proc
     end
-    return dag_spec, nothing
+    return dag_spec, schedule, nothing
 end
 
 """
@@ -1682,9 +1680,11 @@ schedule in one lookup instead of replanning each partition.
 """
 function _hierarchical_persist_schedule!(scheduler::DataDepsScheduler,
                                          dag_spec::DAGSpec,
-                                         partition_schedules::Vector{Dict{DTask,Processor}})
+                                         partition_schedules::Vector{Dict{DTask,Processor}},
+                                         stale::Union{DAGSpecSchedule,Nothing}=nothing)
     isempty(dag_spec) && return
-    spec_schedule = DAGSpecSchedule()
+    spec_schedule = DAGSpecSchedule(stale === nothing &&
+                                    !datadeps_plan_informed(scheduler, dag_spec))
     for idx in eachindex(partition_schedules)
         isassigned(partition_schedules, idx) || continue
         for (task, proc) in partition_schedules[idx]
@@ -1694,8 +1694,7 @@ function _hierarchical_persist_schedule!(scheduler::DataDepsScheduler,
         end
     end
     isempty(spec_schedule.id_to_proc) && return
-    schedule_cache = datadeps_schedule_cache(scheduler)
-    @lock DATADEPS_DAG_SPECS_LOCK push!(schedule_cache, dag_spec => spec_schedule)
+    _schedule_cache_store!(datadeps_schedule_cache(scheduler), dag_spec, spec_schedule, stale)
     return
 end
 
@@ -1850,7 +1849,7 @@ function _distribute_tasks_hierarchical!(queue::DataDepsTaskQueue,
     # per-partition planning; on a hit each partition just filters it, and no
     # partition-local AOT runs at all.
     region_uids = Set{UInt}(pair.task.uid for pair in seen_tasks)
-    region_dag_spec, precomputed_schedule =
+    region_dag_spec, precomputed_schedule, stale_schedule =
         _hierarchical_schedule_cache_lookup(queue.scheduler, seen_tasks)
 
     partition_schedules = Vector{Dict{DTask,Processor}}(undef, n_partitions)
@@ -1923,7 +1922,7 @@ function _distribute_tasks_hierarchical!(queue::DataDepsTaskQueue,
     # DAG, so an equivalent region next time skips partition-local planning.
     if precomputed_schedule === nothing && !use_shared_state
         _hierarchical_persist_schedule!(queue.scheduler, region_dag_spec,
-                                        partition_schedules)
+                                        partition_schedules, stale_schedule)
     end
 
     # The shared-state path returns a one-element state vector and does not
