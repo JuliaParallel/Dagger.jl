@@ -659,7 +659,8 @@ end
 function count_move_tasks(logs)
     n = 0
     for w in keys(logs), name in logs[w][:tasknames]
-        if name isa String && occursin("move!", name)
+        # Datadeps spawns its copies as `move_toplevel!` (see `is_move_task`)
+        if name isa String && occursin(r"\bmove(_toplevel)?!", name)
             n += 1
         end
     end
