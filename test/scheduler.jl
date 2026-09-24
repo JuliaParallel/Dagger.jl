@@ -663,6 +663,33 @@ end
             end
         end
 
+        @testset "Move rate looks past exact samples without a size" begin
+            # Under MPI only a copy's source rank knows its size, so a rank
+            # holds unsized samples for every copy into it. Those must not
+            # shadow the rate it measured for other pairs of the same kind.
+            cache = MetricsTracker.MetricsCache()
+            a, b, c = (Dagger.CPURAMMemorySpace(w) for w in 1:3)
+            MetricsTracker.bulk_update!(cache) do cc
+                ctx = MetricsTracker.pending_context!(cc, Dagger, :execute!, Int)
+                from = MetricsTracker.get_or_create_storage!(ctx, Dagger.FromSpaceMetric())
+                to = MetricsTracker.get_or_create_storage!(ctx, Dagger.ToSpaceMetric())
+                size = MetricsTracker.get_or_create_storage!(ctx, Dagger.MoveSizeMetric())
+                time = MetricsTracker.get_or_create_storage!(ctx, MetricsTracker.TimeMetric())
+                # b -> a: timed, but unsized
+                MetricsTracker.set_metric_value!(from, 1, b)
+                MetricsTracker.set_metric_value!(to, 1, a)
+                MetricsTracker.set_metric_value!(time, 1, UInt64(1_000_000))
+                # a -> c: 1 MB in 1 ms
+                MetricsTracker.set_metric_value!(from, 2, a)
+                MetricsTracker.set_metric_value!(to, 2, c)
+                MetricsTracker.set_metric_value!(size, 2, UInt64(1_000_000))
+                MetricsTracker.set_metric_value!(time, 2, UInt64(1_000_000))
+            end
+            snap = MetricsTracker.snapshot(cache)
+            @test Dagger.metrics_lookup_move_rate(snap, a, c) == 1_000_000_000
+            @test Dagger.metrics_lookup_move_rate(snap, b, a) == 1_000_000_000
+        end
+
         @testset "metrics_lookup_move_* nothing on empty" begin
             empty_cache = MetricsTracker.MetricsCache()
             snap = MetricsTracker.snapshot(empty_cache)

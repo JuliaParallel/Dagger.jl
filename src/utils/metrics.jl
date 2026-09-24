@@ -635,13 +635,31 @@ GPU placement is effectively banned.
 Taking a median over per-move rates matches how the compute side already
 reduces its samples (`metrics_lookup_runtime_median`), so both halves of the
 cost model use the same estimator.
+
+Samples of this exact pair of spaces are preferred, then those of any pair of
+the same space types -- falling back when the exact samples yield no *rate*,
+not only when there are none. Under MPI only a copy's source rank knows its
+size (the destination holds a size-0 placeholder), so rank 0 records every
+copy *into* it without a size. Falling back only on a lack of keys priced all
+of those at the 1 MB/s default while every other pair got the ~1.5 GB/s it had
+measured, and rank 0, which plans for every rank, kept work off itself.
 """
 function metrics_lookup_move_rate(snap::MT.MetricsSnapshot,
                                    from_space::MemorySpace, to_space::MemorySpace;
                                    reducer::Function=Statistics.median)
-    matched = _move_matching_keys(snap, from_space, to_space)
-    isempty(matched) && return nothing
+    exact = MT.find_keys(snap, Dagger, :execute!,
+                         (MT.LookupExact(FromSpaceMetric(), from_space),
+                          MT.LookupExact(ToSpaceMetric(), to_space)))
+    rate = _move_rate_from(snap, exact, reducer)
+    rate === nothing || return rate
+    similar_pairs = MT.find_keys(snap, Dagger, :execute!,
+                                 (MT.LookupSubtype(FromSpaceMetric(), typeof(from_space)),
+                                  MT.LookupSubtype(ToSpaceMetric(), typeof(to_space))))
+    return _move_rate_from(snap, similar_pairs, reducer)
+end
 
+function _move_rate_from(snap::MT.MetricsSnapshot, matched, reducer::Function)
+    isempty(matched) && return nothing
     rates = Float64[]
     sizehint!(rates, length(matched))
     for k in matched
