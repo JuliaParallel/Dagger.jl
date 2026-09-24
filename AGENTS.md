@@ -627,3 +627,38 @@ lesson.
    its key depends on -- a plan depends on DAG structure, so the cache is
    process-wide, behind a lock. Check a caching claim from a *second* task, not
    by repeating calls in the first.
+
+57. **A cost model's catch-all method is where the arguments it cannot see go
+   to be priced at zero.** The EFT planners charged for moving an input only
+   when it was a `Chunk`; `DTask`s from outside the region and everything else
+   fell to methods returning 0. But a DArray's `chunks` are the finished
+   `DTask`s that produced each tile, so *every* tile reached a region that way:
+   the model saw all data as free on every processor, and plans for a real
+   Cholesky put tile writers on their tile's owner at exactly chance rates.
+   The unit tests passed throughout because they built their regions from
+   plain arrays and `Chunk`s. Before trusting a cost over argument values,
+   log what kinds of values a real workload actually delivers (a DArray
+   region, not a hand-built one) and check the catch-all is not where they go.
+
+58. **A plan is only as good as the measurements it was made with, and the
+   first call has none.** Three things conspired to make every AOT plan a
+   blind one. The metrics cache kept the last 100 tasks, fewer than one
+   region's kernels plus its copies, so by planning time most runtime samples
+   were gone. A region's kernels have never run when it is first planned, so
+   every task cost the 1 s placeholder, which dwarfs any transfer and reduces
+   the plan to balancing task counts. And that plan was cached for the life of
+   the process. The benchmark sweeps timed exactly those plans. A plan made
+   from placeholders is now provisional and replanned once
+   (`datadeps_plan_informed`), and a wrapper scheduler must forward that hook
+   just as it forwards `datadeps_uses_aot`, or its plans silently stay blind.
+
+59. **Iterating a container held behind an abstract type dispatches on every
+   element.** A metrics context stores its storages as
+   `AbstractMetricStorage`, and `find_keys` & co. looped over a storage's
+   `data` inline: ~1 us per stored value, so one runtime lookup took 1.9 ms
+   against a 100-entry cache and 14 ms at 5000. Passing the storage to a
+   small function (a function barrier) runs the loop specialized: 31 us and
+   1.7 ms. This is lesson 5 in a form easy to miss, because the container's
+   own type parameters are concrete; only the field holding it is not. The
+   same trap made trimming the cache O(bound) per recorded task until it was
+   batched (322 us per task at a 5000 bound, 11 us after).
