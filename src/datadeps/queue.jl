@@ -495,7 +495,19 @@ function distribute_task!(queue::DataDepsTaskQueue, state::DataDepsState, all_pr
             dep = deps_vec[di]
             arg_w = dep.arg_w
             dep_mod = arg_w.dep_mod
-            remainder, _ = compute_remainder_for_arg!(state, our_space, arg_w, write_num)
+            # A replica that is still current here needs no copy: copies only
+            # add replicas, and only writes make them stale (see `add_writer!`).
+            # The write history cannot tell, because it records each copy as a
+            # write in its destination space, so a read-only tile read on
+            # workers 3, 4 and 3 again was copied back and forth between them.
+            # The reader still waits on the copy that filled this replica, and
+            # is still registered as its reader, so later writes wait for it.
+            current = get(state.arg_current, arg_w, nothing)
+            remainder = if current !== nothing && our_space in current
+                NoAliasing()
+            else
+                first(compute_remainder_for_arg!(state, our_space, arg_w, write_num))
+            end
             if remainder isa MultiRemainderAliasing
                 enqueue_remainder_copy_to!(state, our_space, arg_w, remainder, value(f), idx, our_scope, task, write_num)
             elseif remainder isa FullCopy

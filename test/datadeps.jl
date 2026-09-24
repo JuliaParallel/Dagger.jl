@@ -1083,6 +1083,33 @@ function test_datadeps(;args_chunks::Bool,
     @test isapprox(M_dense, expected)
 end
 
+@testset "Read-only data is copied once per space" begin
+    # A copy only adds a replica; only a write makes other replicas stale.
+    # Copies used to be decided from the write history alone, which records a
+    # copy as a write in its destination space, so a tile read on workers
+    # 3, 4, 3, 4 bounced between them: four copies for the two it needed.
+    if nprocs() >= 4
+        @testset "hierarchical=$hier" for hier in (false, true)
+            A = Dagger.@spawn scope=Dagger.scope(worker=2) rand(4, 4)
+            wait(A)
+            logs = with_logs() do
+                Dagger.with(Dagger.DATADEPS_HIERARCHICAL => hier) do
+                    Dagger.spawn_datadeps() do
+                        for w in (3, 4, 3, 4)
+                            Dagger.@spawn scope=Dagger.scope(worker=w) sum(Dagger.In(A))
+                        end
+                    end
+                end
+            end
+            ncopies = 0
+            for w in keys(logs), ev in logs[w][:core]
+                ev.category == :datadeps_copy && ev.kind == :finish && (ncopies += 1)
+            end
+            @test ncopies == 2
+        end
+    end
+end
+
 @testset "$args_mode Data" for args_mode in (:Raw, :Chunk, :Thunk)
     args_chunks = args_mode == :Chunk
     args_thunks = args_mode == :Thunk
