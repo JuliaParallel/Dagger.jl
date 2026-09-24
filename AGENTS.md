@@ -662,3 +662,39 @@ lesson.
    own type parameters are concrete; only the field holding it is not. The
    same trap made trimming the cache O(bound) per recorded task until it was
    batched (322 us per task at a 5000 bound, 11 us after).
+
+60. **Under uniform execution, a rank's metrics must describe only the work it
+   did -- and rank 0 plans for everyone from its own.** Three independent
+   paths broke this, and together they had the EFT planners piling a region
+   onto whichever rank looked cheapest. Every rank runs every task's
+   `do_task`, so each recorded its own few-microsecond spectating as the
+   owner's runtime (`records_metrics` now drops those). An `MPIProcessor`'s
+   runner is not pinned (lesson 12 forbids it: MPI waits spin on `yield`), so
+   `ThreadProc.execute!` runs the kernel on a pinned sub-task and the runner's
+   thread clock measured something else entirely -- 4x too low, or wrapped to
+   1.8e19 ns when the runner migrated (`KernelTimeMetric` clocks the kernel
+   where it runs). And only a copy's source rank knows its size, so the
+   planning rank had unusable exact samples for every copy *into* it, and a
+   fallback taken only when no samples *exist* priced those at the 1 MB/s
+   default against 1.5 GB/s elsewhere. None of this was visible in plan
+   quality metrics or tests; dumping the `EFTCostCache` the planner actually
+   builds (per-processor runtimes, the space-to-space rate matrix, where each
+   datum starts) showed all three in one screen. Do that before tuning a
+   heuristic, and make any fallback chain fall through on unusable values,
+   not only on missing keys.
+
+61. **When a smart policy loses to a dumb one, check whether the dumb one is
+   dodging a cost the model does not know about.** With correct inputs, the
+   Greedy planner still lost to RoundRobin on matmul. Its plan predicted 382
+   copies; execution ran ~720. For RoundRobin's placement the same model
+   predicted 342 and execution ran 357. The gap was Datadeps, not the
+   planner: copy-ins were decided from a write history that records every
+   copy as a write, so a read-only tile read on workers 3, 4, 3, 4 bounced
+   between them, while `arg_current` knew both replicas were current.
+   On four processes RoundRobin's matmul read each tile on at most one other
+   process, so it never paid there -- but on 8 MPI ranks it paid too (2,477 MB
+   moved per matmul before the fix, 517 after), so the bug had been taxing
+   the default path all along. Count what the runtime actually does (copies here, via a trace
+   in `enqueue_*copy*!` or `:datadeps_copy` log events) and compare it with
+   what the model predicts, per policy; a model that is exact for one policy
+   and wrong for another points at the runtime.
