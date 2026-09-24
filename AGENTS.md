@@ -698,3 +698,28 @@ lesson.
    in `enqueue_*copy*!` or `:datadeps_copy` log events) and compare it with
    what the model predicts, per policy; a model that is exact for one policy
    and wrong for another points at the runtime.
+
+62. **Check a textbook scheduling model's assumptions against how the runtime
+   executes, one at a time.** The EFT planners used HEFT's model, and two of
+   its assumptions are false for Datadeps. HEFT prices a task's inputs as the
+   *latest* arrival, because transfers overlap on dedicated links; Datadeps
+   runs each copy as a task on the receiving processor, one after another,
+   so eight inbound tiles cost that processor eight transfers, not one.
+   HEFT assumes every task exists at time zero; flat Datadeps launches a
+   region's tasks serially from one task (aliasing, remote buffer
+   allocation and copy spawning per task), which took 75-90% of a region's
+   wall time -- 1.3-9 ms per task on Distributed, ~7 ms under MPI, where
+   every rank steps through every launch. Both errors pushed the plans the
+   same way: moving work off its data looked cheap, and the data's owner
+   looked busier than it would be when each task actually arrived. A
+   blocked stencil, already perfectly balanced owner-computes, got 21 of 64
+   tasks on their owner, and on 4 MPI nodes moved 3.5 GB per call where
+   hierarchical mode moved 24 MB. Charging copies to the receiver
+   (`_eft_ready_and_runtime`) and releasing tasks at the measured launch
+   rate (`DATADEPS_RELEASE_NS`) put all 64 on their owner and cut that
+   traffic to 38 MB. On 4 nodes, against RoundRobin in the same sweep, the
+   stencil went to 0.48-0.71x under MPI, Cholesky to about 0.5x, and matmul
+   under Distributed from 1.5-1.7x slower to 0.48-0.77x. Neither error shows
+   in a model-level test; both showed in a
+   timeline of `:add_thunk` launch events against `:compute` events, and in
+   counting where each planned task ran relative to its data.
