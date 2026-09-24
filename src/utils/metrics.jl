@@ -141,6 +141,21 @@ receive nobody answers.
 """
 is_move_task(f) = f === move! || f === move_toplevel!
 
+"""
+    records_metrics(proc::Processor, f, args) -> Bool
+
+Whether this process's measurements of task `f` (placed on `proc`, called with
+`args`) describe that task, and so belong in its metrics cache.
+
+Ordinarily a process runs exactly the tasks placed on it, so they always do.
+Under uniform execution (MPI) every rank runs every task, but only the rank
+owning `proc` computes it; the others return almost at once. What they measure
+is not the task's cost, and recording it tells the cost model that every other
+rank's processors are nearly free: rank 0, which plans for all ranks, then
+piles a region's tasks onto whichever remote rank looks cheapest.
+"""
+records_metrics(::Processor, f, args) = true
+
 function _reduce_uint64(reducer::Function, vals::Vector{UInt64})
     isempty(vals) && return nothing
     raw = reducer(vals)

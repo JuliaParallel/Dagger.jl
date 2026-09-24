@@ -2423,6 +2423,17 @@ function mpi_execute_bcast_plan(f, args, proc::MPIProcessor)
     return (; need_type_bcast=false, nothrow, inferred)
 end
 
+# Every rank runs every task below, but a non-owning rank only takes part, so
+# only the owner's measurements are the task's cost. A copy has two ranks doing
+# real work: the destination (which owns it) receives, and the source sends --
+# the only rank that knows the copy's size, so the only source of move rates.
+function Dagger.records_metrics(proc::MPIProcessor, f, args)
+    local_rank = MPI.Comm_rank(proc.comm)
+    local_rank == proc.rank && return true
+    Dagger.is_move_task(f) || return false
+    return (mpi_unwrap_arg(args[3])::MPIMemorySpace).rank == local_rank
+end
+
 function execute!(proc::MPIProcessor, f, args...; kwargs...)
     local_rank = MPI.Comm_rank(proc.comm)
     islocal = local_rank == proc.rank

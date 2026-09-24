@@ -109,6 +109,15 @@ concrete_fail(x) = x > 0 ? error("Test concrete") : x + 1 # inferred Int, throws
 nothrow_add(x) = x + 1 # concrete Int, proven nothrow → execute! skips status bcast
 mut_ref!(R) = (R[] .= 0; nothing)
 exec_rank() = MPI.Comm_rank(MPI.COMM_WORLD) # rank actually executing a task
+# Burns CPU, returning the thread CPU time it measured itself
+function metrics_probe()
+    t0 = Dagger.MT.cputhreadtime()
+    x = 0.0
+    for i in 1:2_000_000
+        x += sin(i)
+    end
+    return (Dagger.MT.cputhreadtime() - t0, x)
+end
 
 function fresh_cache(dst_space)
     backing = Dagger._with_default_acceleration() do
@@ -773,6 +782,23 @@ end
     @test fetch(t1) === 3
     t2 = Dagger.@spawn untyped_result(-3.0)
     @test fetch(t2) === -3.0
+end
+
+@testset "Metrics record only the tasks a rank ran" begin
+    # Every rank runs every task, but only the owner computes it. What a
+    # spectator measures is not the task's cost, and rank 0 plans every rank's
+    # work from its own cache -- so each rank must record only the tasks it
+    # ran.
+    ts = [Dagger.@spawn scope=rank_scope(r) metrics_probe() for r in 0:nranks-1]
+    foreach(fetch, ts)
+    snap = Dagger.MT.snapshot(Dagger.MT.global_metrics_cache())
+    ctx = snap.contexts[(Dagger, :execute!)]
+    sigs = ctx.storages[Dagger.SignatureMetric()].data
+    procs = ctx.storages[Dagger.ProcessorMetric()].data
+    probe_keys = [k for (k, s) in sigs if s !== nothing && s[1] === typeof(metrics_probe)]
+    @test length(probe_keys) == 1
+    k = only(probe_keys)
+    @test procs[k].rank == rank
 end
 
 @testset "Nothing task results" begin

@@ -38,7 +38,7 @@ import ..Dagger: SignatureMetric, ProcessorMetric, WorkerMetric, TransferSizeMet
 import ..Dagger: execute_metrics_spec, metrics_lookup_runtime, metrics_lookup_alloc, metrics_lookup_transfer_rate
 import ..Dagger: SignatureRuntimeIndex, build_signature_runtime_index, cached_signature_runtime_index, metrics_lookup_runtime_from_index
 import ..Dagger: cached_metrics_lookup_alloc, cached_metrics_lookup_transfer_rate
-import ..Dagger: extract_collected_metrics, apply_collected_metrics!
+import ..Dagger: extract_collected_metrics, apply_collected_metrics!, records_metrics
 import ..Dagger.MetricsTracker as MT
 
 
@@ -2423,6 +2423,8 @@ Executes a single task specified by `task` on `to_proc`.
     local_metrics_cache = DO_TASK_LOCAL_METRICS[]
     MT.reset_pending!(local_metrics_cache)
     mspec = execute_metrics_spec()
+    # Asked before executing: `fetched_args` is emptied afterwards.
+    keep_metrics = records_metrics(to_proc, f, fetched_args)
 
     @dagdebug thunk_id :execute "Executing $Tf"
 
@@ -2496,7 +2498,8 @@ Executes a single task specified by `task` on `to_proc`.
     @dagdebug thunk_id :execute "Returning $Tf with $(typeof(result_meta))"
 
     # TODO: debug_storage("Releasing $to_storage_name")
-    collected_metrics = extract_collected_metrics(local_metrics_cache, thunk_id)
+    collected_metrics = keep_metrics ?
+        extract_collected_metrics(local_metrics_cache, thunk_id) : nothing
 
     metadata = (
         time_pressure=real_time_util[],
