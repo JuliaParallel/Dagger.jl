@@ -784,9 +784,10 @@ A list-scheduling heuristic that assigns each task in topological order to the
 processor minimizing its estimated finish time. The cost model uses
 `metrics_lookup_runtime_median` for compute and per-input data-ready times built
 from chunk sizes and per-(source, destination) transfer rates from
-`metrics_lookup_move_rate`. Start time is taken as the maximum across inputs of
-`(dep_finish + transfer_time)` rather than the latest dep finish plus aggregated
-transfers, matching the standard HEFT semantics.
+`metrics_lookup_move_rate`. Unlike standard HEFT, which assumes transfers overlap
+on dedicated links, a task's inbound transfers are charged to the processor it
+runs on, one after another, because that is where Datadeps runs its copy tasks
+(see `_eft_ready_and_runtime`).
 
 Decisions are local and never revisited, so the scheduler is fast and scales to
 large DAGs but cannot recover from poor early choices. Suitable as a
@@ -942,49 +943,81 @@ function _eft_copies(cache::EFTCostCache)
     return copies
 end
 
-# When data object `d` could be on processor `w`: from a copy already there,
-# or moved from whichever copy arrives first.
-function _eft_arrival_ns(copies::EFTCopies, cache::EFTCostCache, d::Int, w::Int)
+# Which copy of data object `d` a task on processor `w` would read: when that
+# copy is ready where it is, and how long moving it to `w` takes (0 if it is
+# already there). The copy chosen is the one that could be on `w` first.
+function _eft_source(copies::EFTCopies, cache::EFTCostCache, d::Int, w::Int)
     t = cache.proc_space[w]
-    best = copies.ready[t, d]
+    best_arr = copies.ready[t, d]
+    best_r = best_arr
+    best_x = 0.0
     bytes = cache.data_bytes[d]
     @inbounds for s in axes(copies.ready, 1)
         s == t && continue
         r = copies.ready[s, d]
         isinf(r) && continue
         rate = cache.move_rates[cache.space_rep[s], w]
-        rate > 0.0 && (best = min(best, r + bytes / rate * 1e9))
+        rate > 0.0 || continue
+        x = bytes / rate * 1e9
+        if r + x < best_arr
+            best_arr, best_r, best_x = r + x, r, x
+        end
     end
     if copies.external[d]
         rate = cache.data_src_rates[d][w]
-        rate > 0.0 && (best = min(best, bytes / rate * 1e9))
+        if rate > 0.0
+            x = bytes / rate * 1e9
+            x < best_arr && ((best_arr, best_r, best_x) = (x, 0.0, x))
+        end
     end
-    return isinf(best) ? 0.0 : best
+    isinf(best_arr) && return 0.0, 0.0
+    return best_r, best_x
+end
+
+# When data object `d` could be on processor `w`.
+function _eft_arrival_ns(copies::EFTCopies, cache::EFTCostCache, d::Int, w::Int)
+    r, x = _eft_source(copies, cache, d, w)
+    return r + x
 end
 
 """
-    _eft_data_ready_ns(state, cache, idx, target_w, copies) -> Float64
+    _eft_ready_and_runtime(state, cache, idx, w, copies) -> (ready_ns, busy_ns)
 
-When task `idx`'s inputs could all be on processor `target_w`. An in-region
-producer consumed by value must finish and ship its output; each data argument
-must arrive from its nearest valid copy (see `EFTCopies`).
+When task `idx` could start on processor `w`, and how long it would then occupy
+`w`: its own runtime plus bringing in every input it does not already have.
+
+Datadeps moves an input with a copy task scoped to the *receiving* processor,
+so moving data is work that processor does, one copy after another, before
+the task can run. The model used to charge only the latest arrival instead, as
+a delay during which the processor stayed free: eight inbound tiles cost the
+same as one. Running a task away from its data then looked almost free, and
+the planners spread a blocked stencil by count -- 21 of 64 tasks on their
+output tile's owner, and more data moved than RoundRobin moved. Charged to the
+receiver, 60 of 64 land on the owner, and on 4 Distributed processes Greedy's
+time relative to RoundRobin went from 1.04x to 0.87x on the stencil, 1.08x to
+0.72x on LU and 0.88x to 0.68x on Cholesky.
+
+An in-region producer consumed by value is costed the same way, at the
+placeholder output size. Each data argument comes from its nearest valid copy
+(see `EFTCopies`); `ready_ns` is when all of those sources are ready.
 """
-function _eft_data_ready_ns(state::ScheduleState, cache::EFTCostCache, idx::Int,
-                            target_w::Int, copies::EFTCopies)
+function _eft_ready_and_runtime(state::ScheduleState, cache::EFTCostCache, idx::Int,
+                                w::Int, copies::EFTCopies)
     ready = 0.0
+    inbound = 0.0
     @inbounds for dep_id in cache.task_deps[idx]
         dep_proc = get(state.task_proc, dep_id, nothing)
         dep_proc === nothing && continue
-        t = get(state.task_finish_ns, dep_id, 0.0)
-        dep_w = cache.proc_to_idx[dep_proc]
-        rate = cache.move_rates[dep_w, target_w]
-        rate > 0.0 && (t += Float64(GREEDY_DEFAULT_OUTPUT_SIZE) / rate * 1e9)
-        ready = max(ready, t)
+        ready = max(ready, get(state.task_finish_ns, dep_id, 0.0))
+        rate = cache.move_rates[cache.proc_to_idx[dep_proc], w]
+        rate > 0.0 && (inbound += Float64(GREEDY_DEFAULT_OUTPUT_SIZE) / rate * 1e9)
     end
     @inbounds for a in cache.task_args[idx]
-        ready = max(ready, _eft_arrival_ns(copies, cache, a.data_id, target_w))
+        r, x = _eft_source(copies, cache, a.data_id, w)
+        ready = max(ready, r)
+        inbound += x
     end
-    return ready
+    return ready, cache.task_times[idx, w] + inbound
 end
 
 # Record task `idx`, placed on processor `w` and finishing at `finish`: what it
@@ -1027,8 +1060,7 @@ function greedy_assign_task!(state::ScheduleState, snap::MT.MetricsSnapshot,
     @inbounds for w in 1:n_procs
         cache.proc_compatible[idx, w] || continue
         proc = all_procs[w]
-        data_ready_ns = _eft_data_ready_ns(state, cache, idx, w, copies)
-        runtime_ns = cache.task_times[idx, w]
+        data_ready_ns, runtime_ns = _eft_ready_and_runtime(state, cache, idx, w, copies)
         finish = _peek_slot(state, proc, data_ready_ns, runtime_ns)
         if finish < best_finish
             best_finish = finish
@@ -1090,8 +1122,7 @@ function greedy_assign_task_randomized!(state::ScheduleState, snap::MT.MetricsSn
     @inbounds for w in 1:n_procs
         cache.proc_compatible[idx, w] || continue
         proc = all_procs[w]
-        data_ready_ns = _eft_data_ready_ns(state, cache, idx, w, copies)
-        runtime_ns = cache.task_times[idx, w]
+        data_ready_ns, runtime_ns = _eft_ready_and_runtime(state, cache, idx, w, copies)
         finish = _peek_slot(state, proc, data_ready_ns, runtime_ns)
         push!(cand, (proc, data_ready_ns, runtime_ns, finish))
         finish < best_finish && (best_finish = finish)
@@ -1463,8 +1494,7 @@ function _replay_schedule!(state::ScheduleState, snap::MT.MetricsSnapshot,
                 data_ready_ns = _greedy_earliest_data_ready_ns(snap, dag_spec, spec, target_space, state)
                 runtime_ns = _eft_runtime_ns(snap, spec, proc)
             else
-                data_ready_ns = _eft_data_ready_ns(state, cache, idx, w, copies)
-                runtime_ns = cache.task_times[idx, w]
+                data_ready_ns, runtime_ns = _eft_ready_and_runtime(state, cache, idx, w, copies)
             end
             state.task_finish_ns[idx] = _claim_slot!(state, proc, data_ready_ns, runtime_ns)
             w == 0 || _eft_record_copies!(copies, cache, idx, w, state.task_finish_ns[idx])

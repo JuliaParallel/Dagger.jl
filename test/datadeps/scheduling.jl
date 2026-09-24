@@ -1122,6 +1122,27 @@ end
     @test Dagger._eft_arrival_ns(ecopies, ext, 1, 2) ≈ 1e9
 end
 
+@testset "EFT charges inbound copies to the receiving processor" begin
+    # Datadeps runs each copy as a task on the receiving processor, so four
+    # inbound 1 s transfers occupy it for 4 s -- not for the 1 s of the latest
+    # one. Two processes; four 1e9-byte tiles on the second, moved at 1e9 B/s;
+    # one task reading all four, with a 2 s runtime anywhere.
+    p1, p2 = Dagger.ThreadProc(1, 1), Dagger.ThreadProc(2, 1)
+    sp = Dagger.MemorySpace[Dagger.CPURAMMemorySpace(1), Dagger.CPURAMMemorySpace(2)]
+    cache = Dagger.EFTCostCache(fill(2e9, 1, 2), trues(1, 2), sp,
+                                Dict{Dagger.Processor,Int}(p1 => 1, p2 => 2), [0.0 1e9; 1e9 0.0],
+                                [[Dagger.EFTArg(d, false) for d in 1:4]], [Int[]], sp,
+                                [1, 2], [1, 2], fill(1e9, 4), fill(2, 4),
+                                [[1e9, 0.0] for _ in 1:4])
+    copies = Dagger._eft_copies(cache)
+    state = ScheduleState()
+    @test Dagger._eft_ready_and_runtime(state, cache, 1, 2, copies) == (0.0, 2e9)
+    @test Dagger._eft_ready_and_runtime(state, cache, 1, 1, copies) == (0.0, 6e9)
+    # So a second such task queues behind the first where the tiles live
+    # (finishing at 4 s) rather than pulling all four to the idle process (6 s).
+    # Charging only the latest arrival, it would have moved (finishing at 3 s).
+end
+
 @testset "IteratedGreedyScheduler" begin
     @testset "Type registration and constructor validation" begin
         @test IteratedGreedyScheduler() isa DataDepsScheduler
