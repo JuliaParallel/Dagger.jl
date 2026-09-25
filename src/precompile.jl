@@ -9,6 +9,25 @@
     t2 = spawn(+, 1, t1)
     fetch(t2)
 
+    # Compile the metrics cache's trim, which first runs when a process has
+    # recorded more tasks than the cache's bound: one specialization per
+    # metric storage, ~0.5 s in all. Left to run time, that lands in the
+    # middle of a workload while `handle_result!` holds the scheduler lock --
+    # and under MPI every rank pays it at a different task, so a job stalls
+    # once per rank (measured: MPI Cholesky at 256² tiles on 4 nodes ran its
+    # second through fourth calls at 1.6-2.4 s against 0.9 s afterwards).
+    let cache = MT.MetricsCache(), old_bound = metrics_cache_max_tasks!(8)
+        sig = Sch.signature(+, [Argument(1, 1), Argument(2, 1)])
+        space = memory_space(1)
+        m = TaskMetrics(UInt64(1), UInt64(1), Base.GC_Diff(Base.gc_num(), Base.gc_num()),
+                        UInt64(1), UInt64(1), UInt64(1), space, space, UInt64(1))
+        for k in 1:32
+            apply_task_metrics!(cache, k, m, sig, ThreadProc(1, 1), 1)
+        end
+        metrics_cache_max_tasks!(old_bound)
+        empty!(global_cost_summary())
+    end
+
     # Clean up refs
     t1 = nothing; t2 = nothing
     state = Sch.EAGER_STATE[]
