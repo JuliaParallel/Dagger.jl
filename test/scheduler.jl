@@ -554,6 +554,75 @@ end
             @test any(v -> v isa Dagger.Processor, values(proc_values))
         end
 
+        @testset "Runtime estimates outlive the metrics cache bound" begin
+            # The scheduler prices a task from a running per-signature
+            # estimate, not from the per-task cache: that cache keeps only the
+            # most recent tasks, so a region larger than its bound evicts every
+            # sample of the signatures before it, and the 1 s placeholder for an
+            # unknown task then decides placement (spreading a task off its
+            # data as soon as its owner has one more task queued).
+            bounded_probe(x) = x + 1
+            bounded_filler(x) = x - 1
+            summary = Dagger.global_cost_summary()
+            old_bound = Dagger.metrics_cache_max_tasks!(4)
+            try
+                for _ in 1:3
+                    fetch(Dagger.@spawn bounded_probe(1))
+                end
+                sig = Dagger.Sch.signature(bounded_probe, [Dagger.Argument(1, 1)])
+                @test sig.hash == Dagger.signature_hash(sig.sig)
+                est = Dagger.runtime_estimate(summary, sig.hash, Dagger.ThreadProc(1, 1), 1)
+                @test est isa UInt64
+                @test est > 0
+                # Flush the per-task cache with more tasks than its bound
+                for _ in 1:20
+                    fetch(Dagger.@spawn bounded_filler(1))
+                end
+                snap = MetricsTracker.snapshot(MetricsTracker.global_metrics_cache())
+                @test Dagger.metrics_lookup_runtime(snap, sig.sig, Dagger.ThreadProc(1, 1), 1) === nothing
+                @test Dagger.runtime_estimate(summary, sig.hash, Dagger.ThreadProc(1, 1), 1) == est
+            finally
+                Dagger.metrics_cache_max_tasks!(old_bound)
+            end
+        end
+
+        @testset "CostSummary blends samples and falls back by processor" begin
+            summary = Dagger.CostSummary()
+            sig = Any[typeof(+), Int, Int]
+            h = Dagger.signature_hash(sig)
+            p1 = Dagger.ThreadProc(1, 1)
+            p2 = Dagger.ThreadProc(1, 2)
+            p3 = Dagger.ThreadProc(2, 1)
+            pairs(proc, wid, ns) = Tuple{MetricsTracker.AbstractMetric, Any}[
+                (Dagger.SignatureMetric(), sig),
+                (Dagger.ProcessorMetric(), proc),
+                (Dagger.WorkerMetric(), wid),
+                (Dagger.KernelTimeMetric(), UInt64(ns)),
+            ]
+            @test Dagger.runtime_estimate(summary, h, p1, 1) === nothing
+            Dagger.summarize_task_metrics!(summary, pairs(p1, 1, 100))
+            @test Dagger.runtime_estimate(summary, h, p1, 1) == UInt64(100)
+            # A second sample is blended, not replaced or appended
+            Dagger.summarize_task_metrics!(summary, pairs(p1, 1, 300))
+            @test Dagger.runtime_estimate(summary, h, p1, 1) == UInt64(200)
+            # Unseen processor of the same type on the same worker, then on
+            # another worker, then any processor at all
+            @test Dagger.runtime_estimate(summary, h, p2, 1) == UInt64(200)
+            @test Dagger.runtime_estimate(summary, h, p3, 2) == UInt64(200)
+            @test Dagger.runtime_estimate(summary, h, Dagger.OSProc(1), 1) == UInt64(200)
+            # Another signature is separate
+            @test Dagger.runtime_estimate(summary, Dagger.signature_hash(Any[typeof(-), Int]), p1, 1) === nothing
+            # A task without a kernel time (or without a signature) records nothing
+            Dagger.summarize_task_metrics!(summary, Tuple{MetricsTracker.AbstractMetric, Any}[
+                (Dagger.SignatureMetric(), Any[typeof(-), Int]),
+                (Dagger.ProcessorMetric(), p1),
+                (Dagger.KernelTimeMetric(), nothing)])
+            @test Dagger.runtime_estimate(summary, Dagger.signature_hash(Any[typeof(-), Int]), p1, 1) === nothing
+            Dagger.summarize_task_metrics!(summary, nothing)
+            empty!(summary)
+            @test Dagger.runtime_estimate(summary, h, p1, 1) === nothing
+        end
+
         @testset "Move Metric Types" begin
             @test MetricsTracker.metric_type(Dagger.FromSpaceMetric) === Union{Dagger.MemorySpace, Nothing}
             @test MetricsTracker.metric_type(Dagger.ToSpaceMetric) === Union{Dagger.MemorySpace, Nothing}

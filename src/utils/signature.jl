@@ -16,10 +16,7 @@ struct Signature
         # `SIGNATURE_DEFAULT_CACHE` (a `TaskLocalValue`) -- and `Signature`s
         # themselves are only stored in `Thunk.sig`, which is never serialized.
         # Hash full signature
-        h = hash(Signature)
-        for T in sig
-            h = hash(objectid(T), h)
-        end
+        h = signature_hash(sig)
 
         # Hash non-kwarg signature
         @assert isdefined(Core, :kwcall) "FIXME: No kwcall! Use kwfunc"
@@ -38,6 +35,20 @@ struct Signature
 
         return new(sig, h, sig_nokw, h_nokw)
     end
+end
+"""
+    signature_hash(sig::Vector) -> UInt
+
+The hash a `Signature` built from `sig` carries as its `hash` field, for code
+that holds only the vector (a task's metrics record `Signature.sig`, not the
+`Signature`). Keys derived from it are process-local, like the `Signature`'s.
+"""
+function signature_hash(sig::AbstractVector)
+    h = hash(Signature)
+    for T in sig
+        h = hash(objectid(T), h)
+    end
+    return h
 end
 Base.hash(sig::Signature, h::UInt) = hash(sig.hash, h)
 Base.isequal(sig1::Signature, sig2::Signature) = sig1.hash == sig2.hash

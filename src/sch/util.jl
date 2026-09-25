@@ -588,10 +588,10 @@ function can_use_proc(state, task, gproc, proc, opts, scope)
 end
 
 function has_capacity(state, p, gp, time_util, alloc_util, occupancy, sig;
-                      runtime_index::Union{Dagger.SignatureRuntimeIndex,Nothing}=nothing,
                       snap=nothing)
     T = typeof(p)
     sig_vec = sig isa Dagger.Signature ? sig.sig : sig
+    sig_hash = sig isa Dagger.Signature ? sig.hash : Dagger.signature_hash(sig_vec)
     # Reuse the caller's per-pass snapshot when given (see `schedule_one!`).
     # Snapshotting per candidate processor would deep-copy the whole metrics
     # cache once per processor on every scheduling decision, because other
@@ -602,11 +602,11 @@ function has_capacity(state, p, gp, time_util, alloc_util, occupancy, sig;
     est_time_util = if time_util !== nothing && haskey(time_util, T)
         round(UInt64, time_util[T] * 1000^3)::UInt64
     else
-        runtime = if runtime_index !== nothing
-            metrics_lookup_runtime_from_index(runtime_index, p, worker_id)
-        else
-            metrics_lookup_runtime(snap, sig_vec, p, worker_id)
-        end
+        # From the running per-signature summary, not the bounded per-task
+        # cache: a region larger than that cache's bound evicts every sample
+        # of the signatures before it, and the placeholder below then decides
+        # placement (see `CostSummary`).
+        runtime = runtime_estimate(global_cost_summary(), sig_hash, p, worker_id)
         runtime !== nothing ? runtime : UInt64(1000^3)
     end
     est_alloc_util = if alloc_util !== nothing && haskey(alloc_util, T)
@@ -723,7 +723,6 @@ end
 const DEFAULT_TRANSFER_RATE = UInt64(1_000_000)
 @reuse_scope function estimate_task_costs!(sorted_procs, costs, state, procs, task;
                                             sig=nothing,
-                                            runtime_index::Union{Dagger.SignatureRuntimeIndex,Nothing}=nothing,
                                             snap=nothing)
     if length(procs) == 1
         # Nothing to rank: the costs only exist to order the candidates, and a
@@ -751,21 +750,13 @@ const DEFAULT_TRANSFER_RATE = UInt64(1_000_000)
     if sig === nothing
         sig = signature(task.f, task.inputs)
     end
-    sig_vec = sig isa Dagger.Signature ? sig.sig : sig
+    sig_hash = sig isa Dagger.Signature ? sig.hash : Dagger.signature_hash(sig)
     # Reuse the caller's per-pass snapshot (schedule_one!) when provided.
     snap = snap === nothing ? MT.snapshot_stale(MT.global_metrics_cache(), COST_MODEL_SNAPSHOT_MAX_AGE_NS) : snap
-
-    # Build the per-signature runtime index once. Every candidate processor in
-    # this call shares `sig_vec`, so only the first pattern in the lookup chain
-    # (exact processor) is processor-specific; the rest are type/worker/global
-    # fallbacks resolving to the same measurements. A full
-    # `metrics_lookup_runtime` per processor walks the whole snapshot each
-    # time -- O(W x N) per task submission -- while the index makes it one
-    # O(N) scan plus O(1) lookups, with the fallback chain preserved exactly.
-    if runtime_index === nothing
-        runtime_index = cached_signature_runtime_index(snap, sig_vec,
-                                                       sig isa Dagger.Signature ? sig.hash : hash(sig_vec))
-    end
+    # Runtimes come from the running per-signature summary (see
+    # `CostSummary`): one O(1) lookup per candidate, and the estimate
+    # survives the per-task cache's bound.
+    summary = global_cost_summary()
 
     # Estimate network transfer cost per *parent* processor. Chunks are located
     # per worker, so this depends only on `get_parent(proc)`, and `procs` is
@@ -818,7 +809,7 @@ const DEFAULT_TRANSFER_RATE = UInt64(1_000_000)
 
         # Per-(signature, processor) runtime, so a processor type that has
         # measured faster for this signature ranks ahead of one that has not.
-        runtime = metrics_lookup_runtime_from_index(runtime_index, proc, pid)
+        runtime = runtime_estimate(summary, sig_hash, proc, pid)
         est_time_util = runtime !== nothing ? runtime : UInt64(1000^3)
 
         # N.B. `tx_rate` is in bytes per *second*, so `bytes/tx_rate` comes out

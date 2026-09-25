@@ -36,7 +36,7 @@ import ScopedValues: ScopedValue, @with, with
 
 import ..Dagger: SignatureMetric, ProcessorMetric, WorkerMetric, TransferSizeMetric, TransferTimeMetric, TransferRateMetric
 import ..Dagger: execute_metrics_spec, metrics_lookup_runtime, metrics_lookup_alloc, metrics_lookup_transfer_rate
-import ..Dagger: SignatureRuntimeIndex, build_signature_runtime_index, cached_signature_runtime_index, metrics_lookup_runtime_from_index
+import ..Dagger: global_cost_summary, runtime_estimate
 import ..Dagger: cached_metrics_lookup_alloc, cached_metrics_lookup_transfer_rate
 import ..Dagger: extract_collected_metrics, apply_collected_metrics!, records_metrics
 import ..Dagger.MetricsTracker as MT
@@ -1013,10 +1013,9 @@ concurrently across threads.
     # One metrics snapshot for the whole scheduling pass, shared by cost
     # estimation and every per-processor `has_capacity` below. Taken separately,
     # each of those rebuilds (deep-copies) the snapshot, because other threads
-    # bump the cache's generation on every task completion. Likewise, one
-    # per-signature index serves both callers: each is then O(1) per processor
-    # after a single O(N) build, instead of two independent end-to-end scans
-    # per task.
+    # bump the cache's generation on every task completion. (Runtimes no longer
+    # come from it -- see `CostSummary` -- only allocation and transfer-rate
+    # lookups do.)
     # N.B. `snapshot_stale`, not `snapshot`. A rebuild deep-copies every context
     # and storage (273 allocs / 67 KB against a 488-value cache), and the
     # cache's generation advances on every task completion -- so an exact
@@ -1026,11 +1025,7 @@ concurrently across threads.
     # indistinguishable in effect; this bounds rebuilds by time instead of by
     # task completion rate.
     snap = MT.snapshot_stale(MT.global_metrics_cache(), COST_MODEL_SNAPSHOT_MAX_AGE_NS)
-    sig_vec_for_index = sig isa Dagger.Signature ? sig.sig : sig
-    sig_hash_for_index = sig isa Dagger.Signature ? sig.hash : hash(sig_vec_for_index)
-    runtime_index = cached_signature_runtime_index(snap, sig_vec_for_index, sig_hash_for_index)
-    estimate_task_costs!(sorted_procs, costs, state, input_procs, task;
-                         sig, runtime_index, snap)
+    estimate_task_costs!(sorted_procs, costs, state, input_procs, task; sig, snap)
     empty!(input_procs)
 
     # Under uniform execution, measured costs are rank-local, so re-order by a
@@ -1047,7 +1042,7 @@ concurrently across threads.
         if can_use
             has_cap, est_time_util, est_alloc_util, est_occupancy =
                 has_capacity(state, proc, root_worker_id(gproc), options.time_util, options.alloc_util, options.occupancy, sig;
-                             runtime_index, snap)
+                             snap)
             # Under uniform execution capacity is rank-local; every rank must
             # take the first usable processor in the deterministic order.
             if has_cap || scheduling_ignore_capacity(accel)

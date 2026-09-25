@@ -542,6 +542,9 @@ warm+trials cycle is ~235 entries at cholesky nt=4 and ~835 at nt=8. A larger
 bound is not free: RoundRobin on the default path, 4 nodes, 256^2 tiles, ran
 MPI matmul in 4.15 s at 100, 3.75 s at 1000 and 5.61 s at 5000.
 
+The scheduler's own cost model no longer depends on this bound: it reads
+per-signature runtimes from the [`CostSummary`](@ref), which is not trimmed.
+
 Note this is process-local; multi-worker runs must set it on each worker.
 """
 function metrics_cache_max_tasks!(n::Integer)
@@ -551,9 +554,138 @@ function metrics_cache_max_tasks!(n::Integer)
     return old
 end
 
+"""
+    CostSummary
+
+The scheduler's cost model needs one number per question -- how long does a
+task with this signature take on this processor? -- not the samples behind it.
+This keeps that number: a running estimate per key, blended from each finished
+task's metrics as they arrive (`summarize_task_metrics!`), and read back in
+O(1) (`runtime_estimate`).
+
+It exists because the per-task metrics cache is the wrong place to answer that
+question from. That cache is bounded to the most recent `METRICS_CACHE_MAX_TASKS`
+tasks, so any region with more tasks than the bound evicts every sample of
+the signatures that ran before it. The scheduler then falls back to its 1 s
+placeholder for a task it has run thousands of times, and that placeholder
+decides placement: with pressure counted in whole seconds per reserved task,
+the 0.5 s transfer penalty that keeps a task next to its data is outweighed
+as soon as its owner has one more task queued than another worker. On four
+nodes, every `copy(A)` that Cholesky at 256² tiles makes ran after a region
+of ~2,000 tasks had flushed the cache, so a quarter of its tiles were copied
+to other workers, and the factorization moved 2.8x the data and took twice as
+long as on master (whose per-signature table was never bounded).
+
+Blending is `(old + new) ÷ 2`, as the scheduler's original table did: a
+first-call sample that includes compilation is halved out within a few
+tasks. The runtime fallback chain matches `metrics_lookup_runtime`: exact
+processor, then processor type on the same worker, then processor type
+anywhere, then any processor.
+
+Keys are the signature's process-local hash (`signature_hash`), which is also
+what `Signature` equality compares.
+"""
+struct CostSummary
+    lock::ReentrantLock
+    runtime_by_proc::Dict{Tuple{UInt,Processor},UInt64}
+    runtime_by_type_worker::Dict{Tuple{UInt,DataType,Int},UInt64}
+    runtime_by_type::Dict{Tuple{UInt,DataType},UInt64}
+    runtime_any::Dict{UInt,UInt64}
+end
+CostSummary() = CostSummary(ReentrantLock(),
+                            Dict{Tuple{UInt,Processor},UInt64}(),
+                            Dict{Tuple{UInt,DataType,Int},UInt64}(),
+                            Dict{Tuple{UInt,DataType},UInt64}(),
+                            Dict{UInt,UInt64}())
+
+const GLOBAL_COST_SUMMARY = CostSummary()
+global_cost_summary() = GLOBAL_COST_SUMMARY
+
+# Blend a new sample into `table[key]`; the first sample is taken as is.
+function _blend!(table::Dict{K,UInt64}, key::K, value::UInt64) where K
+    old = get(table, key, nothing)
+    table[key] = old === nothing ? value : (old + value) ÷ UInt64(2)
+    return
+end
+
+"""
+    summarize_task_metrics!(summary::CostSummary, pairs)
+
+Fold one finished task's collected metrics (`pairs`, as
+`extract_collected_metrics` returns them) into `summary`.
+"""
+function summarize_task_metrics!(summary::CostSummary, pairs)
+    pairs === nothing && return
+    sig = nothing
+    proc = nothing
+    worker = nothing
+    kernel = nothing
+    for (metric, value) in pairs
+        value === nothing && continue
+        if metric isa SignatureMetric
+            sig = value::Vector{Any}
+        elseif metric isa ProcessorMetric
+            proc = value::Processor
+        elseif metric isa WorkerMetric
+            worker = value::Int
+        elseif metric isa KernelTimeMetric
+            kernel = value::UInt64
+        end
+    end
+    sig === nothing && return
+    h = signature_hash(sig)
+    @lock summary.lock begin
+        if kernel !== nothing
+            _blend!(summary.runtime_any, h, kernel)
+            if proc !== nothing
+                T = typeof(proc)
+                _blend!(summary.runtime_by_type, (h, T), kernel)
+                _blend!(summary.runtime_by_proc, (h, proc), kernel)
+                if worker !== nothing
+                    _blend!(summary.runtime_by_type_worker, (h, T, worker), kernel)
+                end
+            end
+        end
+    end
+    return
+end
+
+"""
+    runtime_estimate(summary::CostSummary, sig_hash::UInt, proc::Processor, worker_id::Int)
+        -> Union{UInt64, Nothing}
+
+The estimated kernel time, in nanoseconds, of a task with signature hash
+`sig_hash` on `proc` (owned by `worker_id`), or `nothing` if no task with
+that signature has finished yet. See [`CostSummary`](@ref) for the fallback
+chain.
+"""
+function runtime_estimate(summary::CostSummary, sig_hash::UInt, proc::Processor, worker_id::Int)
+    T = typeof(proc)
+    @lock summary.lock begin
+        r = get(summary.runtime_by_proc, (sig_hash, proc), nothing)
+        r === nothing || return r
+        r = get(summary.runtime_by_type_worker, (sig_hash, T, worker_id), nothing)
+        r === nothing || return r
+        r = get(summary.runtime_by_type, (sig_hash, T), nothing)
+        r === nothing || return r
+        return get(summary.runtime_any, sig_hash, nothing)
+    end
+end
+
+function Base.empty!(summary::CostSummary)
+    @lock summary.lock begin
+        empty!(summary.runtime_by_proc)
+        empty!(summary.runtime_by_type_worker)
+        empty!(summary.runtime_by_type)
+        empty!(summary.runtime_any)
+    end
+    return summary
+end
+
 function apply_collected_metrics!(cache::MT.MetricsCache, key::K, pairs) where K
     pairs === nothing && return
     isempty(pairs) && return
+    summarize_task_metrics!(global_cost_summary(), pairs)
     MT.bulk_update!(cache) do c
         ctx = MT.pending_context!(c, Dagger, :execute!, K)
         for (metric, value) in pairs
