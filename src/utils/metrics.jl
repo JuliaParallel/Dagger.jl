@@ -731,6 +731,15 @@ function runtime_estimate(summary::CostSummary, sig_hash::UInt, proc::Processor,
 end
 
 """
+    runtime_estimate(summary::CostSummary, sig_hash::UInt) -> Union{UInt64, Nothing}
+
+The last tier of the chain alone: the estimate for a task with signature
+hash `sig_hash` on any processor, or `nothing` if none has finished.
+"""
+runtime_estimate(summary::CostSummary, sig_hash::UInt) =
+    @lock summary.lock get(summary.runtime_any, sig_hash, nothing)
+
+"""
     alloc_estimate(summary::CostSummary, sig_hash::UInt, proc::Processor)
         -> Union{UInt64, Nothing}
 

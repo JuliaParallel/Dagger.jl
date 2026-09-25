@@ -244,10 +244,10 @@ counts -- and that plan used to be reused forever.
 datadeps_plan_informed(::DataDepsScheduler, dag_spec) = true
 
 # Whether every distinct task signature in `dag_spec` has a runtime measured on
-# some processor -- the last tier of `_runtime_lookup_chain`, so a task that
+# some processor -- the last tier of the `CostSummary`'s chain, so a task that
 # fails this check is costed at `GREEDY_DEFAULT_RUNTIME_NS` everywhere.
 function _eft_plan_informed(dag_spec::DAGSpec)
-    snap = MT.snapshot(MT.global_metrics_cache())
+    summary = global_cost_summary()
     checked = Set{UInt}()
     for k in 1:nv(dag_spec.g)
         spec = dag_spec.id_to_spec[k]
@@ -255,8 +255,7 @@ function _eft_plan_informed(dag_spec::DAGSpec)
         sig = Sch.signature(f, map(_eft_unwrap_arg, _eft_tail_args(spec.fargs)))
         sig.hash in checked && continue
         push!(checked, sig.hash)
-        isempty(MT.find_keys(snap, Dagger, :execute!,
-                             (MT.LookupExact(SignatureMetric(), sig.sig),))) && return false
+        runtime_estimate(summary, sig.hash) === nothing && return false
     end
     return true
 end
@@ -685,7 +684,7 @@ function _build_eft_cost_cache(snap::MT.MetricsSnapshot, dag_spec::DAGSpec,
         for (w, proc) in enumerate(all_procs)
             if proc_in_scope(proc, task_scope)
                 proc_compatible[k, w] = true
-                task_times[k, w] = _eft_runtime_ns(snap, spec, proc)
+                task_times[k, w] = _eft_runtime_ns(spec, proc)
             else
                 # Placeholder — never consulted because compatibility guard skips it.
                 task_times[k, w] = Float64(GREEDY_DEFAULT_RUNTIME_NS)
@@ -1456,18 +1455,18 @@ end
 # `GREEDY_DEFAULT_RUNTIME_NS`, flattening the cost model.
 _eft_unwrap_arg(arg) = with_value(arg, first(unwrap_inout(value(arg))))
 
-function _eft_runtime_ns(snap::MT.MetricsSnapshot, spec, proc::Processor)
+function _eft_runtime_ns(spec, proc::Processor)
     f = _eft_unwrap_arg(spec.fargs[1])
     tail = map(_eft_unwrap_arg, _eft_tail_args(spec.fargs))
     sig = Sch.signature(f, tail)
     worker_id = root_worker_id(proc)
-    # Through the per-signature index, built once per snapshot and signature,
-    # rather than `metrics_lookup_runtime_median`: that scans the cache on
-    # every call, and this runs once per (task, candidate processor). Same
-    # fallback chain (see `metrics_lookup_runtime_from_index`).
-    index = cached_signature_runtime_index(snap, sig.sig, sig.hash)
-    runtime_lookup = metrics_lookup_runtime_from_index(index, proc, worker_id;
-                                                       reducer=Statistics.median)
+    # From the running per-signature summary (see `CostSummary`), not the
+    # per-task cache: that cache keeps only the most recent tasks, so for a
+    # region larger than its bound the signatures that ran first had no
+    # samples left by planning time and fell to the placeholder. The summary
+    # has the same fallback chain (exact processor, type on this worker,
+    # type, any) and costs one lookup per (task, candidate processor).
+    runtime_lookup = runtime_estimate(global_cost_summary(), sig.hash, proc, worker_id)
     if trace_eft_lookup()
         if runtime_lookup === nothing
             n = Threads.atomic_add!(EFT_LOOKUP_MISSES, 1)
@@ -1525,7 +1524,7 @@ function _replay_schedule!(state::ScheduleState, snap::MT.MetricsSnapshot,
             if w == 0
                 target_space = only(memory_spaces(proc))
                 data_ready_ns = _greedy_earliest_data_ready_ns(snap, dag_spec, spec, target_space, state)
-                runtime_ns = _eft_runtime_ns(snap, spec, proc)
+                runtime_ns = _eft_runtime_ns(spec, proc)
             else
                 data_ready_ns, runtime_ns = _eft_ready_and_runtime(state, cache, idx, w, copies)
             end

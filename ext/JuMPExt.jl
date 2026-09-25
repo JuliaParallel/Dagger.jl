@@ -81,7 +81,7 @@ function Dagger.datadeps_schedule_dag_aot!(sched::JuMPScheduler, schedule, dag_s
         for (w, proc) in enumerate(all_procs)
             if proc in compatible
                 proc_compatible[k, w] = true
-                task_times[k, w] = _eft_runtime_ns(snap, spec, proc)
+                task_times[k, w] = _eft_runtime_ns(spec, proc)
             else
                 task_times[k, w] = Float64(GREEDY_DEFAULT_RUNTIME_NS)
             end
