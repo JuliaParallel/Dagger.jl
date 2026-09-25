@@ -593,17 +593,11 @@ end
             p1 = Dagger.ThreadProc(1, 1)
             p2 = Dagger.ThreadProc(1, 2)
             p3 = Dagger.ThreadProc(2, 1)
-            pairs(proc, wid, ns) = Tuple{MetricsTracker.AbstractMetric, Any}[
-                (Dagger.SignatureMetric(), sig),
-                (Dagger.ProcessorMetric(), proc),
-                (Dagger.WorkerMetric(), wid),
-                (Dagger.KernelTimeMetric(), UInt64(ns)),
-            ]
             @test Dagger.runtime_estimate(summary, h, p1, 1) === nothing
-            Dagger.summarize_task_metrics!(summary, pairs(p1, 1, 100))
+            Dagger.summarize_task_metrics!(summary, h, p1, 1, UInt64(100))
             @test Dagger.runtime_estimate(summary, h, p1, 1) == UInt64(100)
             # A second sample is blended, not replaced or appended
-            Dagger.summarize_task_metrics!(summary, pairs(p1, 1, 300))
+            Dagger.summarize_task_metrics!(summary, h, p1, 1, UInt64(300))
             @test Dagger.runtime_estimate(summary, h, p1, 1) == UInt64(200)
             # Unseen processor of the same type on the same worker, then on
             # another worker, then any processor at all
@@ -612,15 +606,42 @@ end
             @test Dagger.runtime_estimate(summary, h, Dagger.OSProc(1), 1) == UInt64(200)
             # Another signature is separate
             @test Dagger.runtime_estimate(summary, Dagger.signature_hash(Any[typeof(-), Int]), p1, 1) === nothing
-            # A task without a kernel time (or without a signature) records nothing
-            Dagger.summarize_task_metrics!(summary, Tuple{MetricsTracker.AbstractMetric, Any}[
-                (Dagger.SignatureMetric(), Any[typeof(-), Int]),
-                (Dagger.ProcessorMetric(), p1),
-                (Dagger.KernelTimeMetric(), nothing)])
-            @test Dagger.runtime_estimate(summary, Dagger.signature_hash(Any[typeof(-), Int]), p1, 1) === nothing
-            Dagger.summarize_task_metrics!(summary, nothing)
             empty!(summary)
             @test Dagger.runtime_estimate(summary, h, p1, 1) === nothing
+        end
+
+        @testset "A task's metrics travel as measurements only" begin
+            # The worker sends a fixed record; the scheduler tags it with the
+            # signature and processor it knows the task by. Shipping the
+            # signature (a vector of types) with every result cost more than
+            # the rest of the scheduler path.
+            @test isbitstype(fieldtype(Dagger.TaskMetrics, :alloc))
+            cache = MetricsTracker.MetricsCache()
+            sig = Dagger.Sch.signature(+, [Dagger.Argument(1, 1), Dagger.Argument(2, 2)])
+            proc = Dagger.ThreadProc(1, 1)
+            m = Dagger.TaskMetrics(UInt64(5000), UInt64(4000),
+                                   Base.GC_Diff(Base.gc_num(), Base.gc_num()),
+                                   UInt64(0), UInt64(0), UInt64(0), nothing, nothing, UInt64(0))
+            key = 424242
+            Dagger.apply_task_metrics!(cache, key, m, sig, proc, 1)
+            snap = MetricsTracker.snapshot(cache)
+            @test MetricsTracker.lookup_value(snap, Dagger, :execute!, Dagger.SignatureMetric(), key) == sig.sig
+            @test MetricsTracker.lookup_value(snap, Dagger, :execute!, Dagger.ProcessorMetric(), key) == proc
+            @test MetricsTracker.lookup_value(snap, Dagger, :execute!, Dagger.WorkerMetric(), key) == 1
+            @test MetricsTracker.lookup_value(snap, Dagger, :execute!, Dagger.KernelTimeMetric(), key) == UInt64(4000)
+            @test MetricsTracker.lookup_value(snap, Dagger, :execute!, MetricsTracker.TimeMetric(), key) == UInt64(5000)
+            @test MetricsTracker.lookup_value(snap, Dagger, :execute!, Dagger.FromSpaceMetric(), key) === nothing
+            @test Dagger.metrics_lookup_runtime(snap, sig.sig, proc, 1) == UInt64(4000)
+            # A copy's spaces and size come along
+            space = Dagger.memory_space(1)
+            mc = Dagger.TaskMetrics(UInt64(1), UInt64(0), m.alloc, UInt64(0), UInt64(0), UInt64(0),
+                                    space, space, UInt64(4096))
+            Dagger.apply_task_metrics!(cache, key + 1, mc, sig, proc, 1)
+            snap = MetricsTracker.snapshot(cache)
+            @test MetricsTracker.lookup_value(snap, Dagger, :execute!, Dagger.FromSpaceMetric(), key + 1) === space
+            @test MetricsTracker.lookup_value(snap, Dagger, :execute!, Dagger.MoveSizeMetric(), key + 1) == UInt64(4096)
+            # No kernel time recorded: nothing to price by
+            @test MetricsTracker.lookup_value(snap, Dagger, :execute!, Dagger.KernelTimeMetric(), key + 1) === nothing
         end
 
         @testset "Move Metric Types" begin
@@ -656,13 +677,18 @@ end
             @test MetricsTracker.lookup_value(snap, Dagger, :execute!, Dagger.MoveSizeMetric(), test_key) === nothing
         end
 
-        @testset "EXECUTE_METRICS_SPEC excludes move metrics" begin
+        @testset "EXECUTE_METRICS_SPEC measures only" begin
+            # Move metrics are recorded by `move_toplevel!`; the signature,
+            # processor and worker are attached by the scheduler.
             spec_metrics = Dagger.execute_metrics_spec().metrics
             @test !any(m -> m isa Dagger.FromSpaceMetric, spec_metrics)
             @test !any(m -> m isa Dagger.ToSpaceMetric, spec_metrics)
             @test !any(m -> m isa Dagger.MoveSizeMetric, spec_metrics)
-            @test any(m -> m isa Dagger.SignatureMetric, spec_metrics)
+            @test !any(m -> m isa Dagger.SignatureMetric, spec_metrics)
+            @test !any(m -> m isa Dagger.ProcessorMetric, spec_metrics)
+            @test !any(m -> m isa Dagger.WorkerMetric, spec_metrics)
             @test any(m -> m isa MetricsTracker.TimeMetric, spec_metrics)
+            @test any(m -> m isa Dagger.KernelTimeMetric, spec_metrics)
         end
 
         @testset "DTaskTLS carries metrics_cache field" begin

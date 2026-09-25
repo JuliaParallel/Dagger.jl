@@ -7,23 +7,21 @@ import Statistics
 # runs once per thunk, so reading from it is free.
 _metrics_tls() = DTASK_TLS[]
 
+# The facts that identify a task's measurements: its signature, the processor
+# it ran on and that processor's worker. These are not measured on the worker
+# (see `TaskMetrics`); the scheduler writes them when it folds a task's
+# `TaskMetrics` into the cache, from the `Thunk` and processor it holds.
 struct SignatureMetric <: MT.AbstractMetric end
 MT.metric_applies(::SignatureMetric, ::Val{:execute!}) = true
 MT.metric_type(::Type{SignatureMetric}) = Union{Vector{Any}, Nothing}
-MT.start_metric(::SignatureMetric) = nothing
-MT.stop_metric(::SignatureMetric, _) = (tls = _metrics_tls(); tls === nothing ? nothing : tls.metrics_sig)
 
 struct ProcessorMetric <: MT.AbstractMetric end
 MT.metric_applies(::ProcessorMetric, ::Val{:execute!}) = true
 MT.metric_type(::Type{ProcessorMetric}) = Union{Processor, Nothing}
-MT.start_metric(::ProcessorMetric) = nothing
-MT.stop_metric(::ProcessorMetric, _) = (tls = _metrics_tls(); tls === nothing ? nothing : tls.processor)
 
 struct WorkerMetric <: MT.AbstractMetric end
 MT.metric_applies(::WorkerMetric, ::Val{:execute!}) = true
 MT.metric_type(::Type{WorkerMetric}) = Union{Int, Nothing}
-MT.start_metric(::WorkerMetric) = nothing
-MT.stop_metric(::WorkerMetric, _) = (_metrics_tls() === nothing ? nothing : myid())
 
 struct TransferSizeMetric <: MT.AbstractMetric end
 MT.metric_applies(::TransferSizeMetric, ::Val{:execute!}) = true
@@ -98,13 +96,13 @@ function MT.stop_metric(::KernelTimeMetric, start::Tuple{Int, UInt64})
     return cputhreadtime() - t0
 end
 
+# What `do_task` measures around a task's `execute!`. Only measurements: the
+# task's signature, processor and worker are attached where its result is
+# handled (see `apply_task_metrics!`).
 const EXECUTE_METRICS_SPEC = MT.MetricsSpec(
     MT.TimeMetric(),
     KernelTimeMetric(),
     MT.AllocMetric(),
-    SignatureMetric(),
-    ProcessorMetric(),
-    WorkerMetric(),
     TransferSizeMetric(),
     TransferTimeMetric(),
     TransferRateMetric(),
@@ -504,25 +502,78 @@ metrics_lookup_alloc_min(snap, sig, proc) =
 metrics_lookup_alloc_max(snap, sig, proc) =
     metrics_lookup_alloc(snap, sig, proc; reducer=maximum)
 
-function extract_collected_metrics(local_cache::MT.MetricsCache, key)
+"""
+    TaskMetrics
+
+What a worker reports about one finished task, for the scheduler to fold into
+its metrics cache with [`apply_task_metrics!`](@ref). Measurements only: the
+task's signature, processor and worker are known where the result arrives
+(`handle_result!` holds the `Thunk` and the processor it fired the task on),
+so they are not sent. They used to be: every result carried its signature, a
+vector of types, and serializing that (plus a `Processor` and a vector of
+boxed metric pairs) cost more than the rest of the scheduler path -- with
+three workers, an eager task went from 0.029 ms on master to 0.071 ms, and a
+Datadeps task from 0.175 ms to 0.280 ms; with nothing sent, 0.035 and 0.183.
+
+A zero means "not measured" for `kernel_time` and the transfer fields, and
+`move_from === nothing` means the task was not a copy.
+"""
+struct TaskMetrics
+    time::UInt64
+    kernel_time::UInt64
+    alloc::Base.GC_Diff
+    transfer_size::UInt64
+    transfer_time::UInt64
+    transfer_rate::UInt64
+    move_from::Union{MemorySpace, Nothing}
+    move_to::Union{MemorySpace, Nothing}
+    move_size::UInt64
+end
+
+# The storage for `m` in `ctx`, with its concrete type (the context holds
+# storages behind an abstract type; asserting it here keeps the reads below
+# statically dispatched), or `nothing` if `m` was never recorded.
+function _typed_storage(ctx::MT.ContextStorage{K}, m::M) where {K, M<:MT.AbstractMetric}
+    s = get(ctx.storages, m, nothing)
+    s === nothing && return nothing
+    return s::MT.MetricStorage{M, K, MT.metric_type(M)}
+end
+function _stored(ctx::MT.ContextStorage{K}, m::MT.AbstractMetric, key::K, default) where K
+    s = _typed_storage(ctx, m)
+    s === nothing && return default
+    v = get(s.data, key, nothing)
+    return v === nothing ? default : v
+end
+
+"""
+    collect_task_metrics(local_cache::MT.MetricsCache, key::Int) -> Union{TaskMetrics, Nothing}
+
+Read the metrics `with_metrics` (and `move_toplevel!`) recorded for `key`
+out of `do_task`'s task-local cache.
+"""
+function collect_task_metrics(local_cache::MT.MetricsCache, key::Int)
     # `local_cache` is task-local and already fully written by `with_metrics`
     # (on this same task) before we drain it, so read its pending storages
     # directly instead of taking a defensive deep-copy snapshot.
     ctx = MT.pending_context(local_cache, Dagger, :execute!)
     ctx === nothing && return nothing
-    pairs = Tuple{MT.AbstractMetric, Any}[]
-    for (metric, storage) in ctx.storages
-        if haskey(storage.data, key)
-            push!(pairs, (metric, storage.data[key]))
-        end
-    end
-    isempty(pairs) && return nothing
-    return pairs
+    ctx = ctx::MT.ContextStorage{Int}
+    time = _stored(ctx, MT.TimeMetric(), key, nothing)
+    time === nothing && return nothing
+    return TaskMetrics(time::UInt64,
+                       _stored(ctx, KernelTimeMetric(), key, UInt64(0))::UInt64,
+                       _stored(ctx, MT.AllocMetric(), key, Base.GC_Diff(Base.gc_num(), Base.gc_num()))::Base.GC_Diff,
+                       _stored(ctx, TransferSizeMetric(), key, UInt64(0))::UInt64,
+                       _stored(ctx, TransferTimeMetric(), key, UInt64(0))::UInt64,
+                       _stored(ctx, TransferRateMetric(), key, UInt64(0))::UInt64,
+                       _stored(ctx, FromSpaceMetric(), key, nothing),
+                       _stored(ctx, ToSpaceMetric(), key, nothing),
+                       _stored(ctx, MoveSizeMetric(), key, UInt64(0))::UInt64)
 end
 
 # Bound the global metrics cache to the most-recent this-many tasks (distinct
 # thunk_id keys) per `(mod, context)`, plus a trim slack (see
-# `apply_collected_metrics!`). Without a bound the cache grows one entry per
+# `apply_task_metrics!`). Without a bound the cache grows one entry per
 # metric per task forever, which dominates scheduler allocations (Dict rehash
 # churn) on long-running workloads. The cost model only needs recent samples,
 # so we keep a rolling window.
@@ -609,43 +660,19 @@ function _blend!(table::Dict{K,UInt64}, key::K, value::UInt64) where K
 end
 
 """
-    summarize_task_metrics!(summary::CostSummary, pairs)
+    summarize_task_metrics!(summary::CostSummary, sig_hash::UInt, proc::Processor,
+                            worker_id::Int, kernel_ns::UInt64)
 
-Fold one finished task's collected metrics (`pairs`, as
-`extract_collected_metrics` returns them) into `summary`.
+Blend one finished task's kernel time into `summary`.
 """
-function summarize_task_metrics!(summary::CostSummary, pairs)
-    pairs === nothing && return
-    sig = nothing
-    proc = nothing
-    worker = nothing
-    kernel = nothing
-    for (metric, value) in pairs
-        value === nothing && continue
-        if metric isa SignatureMetric
-            sig = value::Vector{Any}
-        elseif metric isa ProcessorMetric
-            proc = value::Processor
-        elseif metric isa WorkerMetric
-            worker = value::Int
-        elseif metric isa KernelTimeMetric
-            kernel = value::UInt64
-        end
-    end
-    sig === nothing && return
-    h = signature_hash(sig)
+function summarize_task_metrics!(summary::CostSummary, sig_hash::UInt, proc::Processor,
+                                 worker_id::Int, kernel_ns::UInt64)
+    T = typeof(proc)
     @lock summary.lock begin
-        if kernel !== nothing
-            _blend!(summary.runtime_any, h, kernel)
-            if proc !== nothing
-                T = typeof(proc)
-                _blend!(summary.runtime_by_type, (h, T), kernel)
-                _blend!(summary.runtime_by_proc, (h, proc), kernel)
-                if worker !== nothing
-                    _blend!(summary.runtime_by_type_worker, (h, T, worker), kernel)
-                end
-            end
-        end
+        _blend!(summary.runtime_any, sig_hash, kernel_ns)
+        _blend!(summary.runtime_by_type, (sig_hash, T), kernel_ns)
+        _blend!(summary.runtime_by_proc, (sig_hash, proc), kernel_ns)
+        _blend!(summary.runtime_by_type_worker, (sig_hash, T, worker_id), kernel_ns)
     end
     return
 end
@@ -682,16 +709,44 @@ function Base.empty!(summary::CostSummary)
     return summary
 end
 
-function apply_collected_metrics!(cache::MT.MetricsCache, key::K, pairs) where K
-    pairs === nothing && return
-    isempty(pairs) && return
-    summarize_task_metrics!(global_cost_summary(), pairs)
+"""
+    apply_task_metrics!(cache::MT.MetricsCache, key::Int, m::TaskMetrics,
+                        sig::Signature, proc::Processor, worker_id::Int)
+
+Fold a finished task's [`TaskMetrics`](@ref) into `cache` under `key`, tagged
+with the signature, processor and worker the scheduler knows the task by, and
+blend its kernel time into the [`CostSummary`](@ref).
+"""
+function apply_task_metrics!(cache::MT.MetricsCache, key::Int, m::TaskMetrics,
+                             sig::Signature, proc::Processor, worker_id::Int)
+    if m.kernel_time != 0
+        summarize_task_metrics!(global_cost_summary(), sig.hash, proc, worker_id, m.kernel_time)
+    end
     MT.bulk_update!(cache) do c
-        ctx = MT.pending_context!(c, Dagger, :execute!, K)
-        for (metric, value) in pairs
-            value === nothing && continue
-            storage = MT.get_or_create_storage!(ctx, metric)
-            MT.set_metric_value!(storage, key, value)
+        ctx = MT.pending_context!(c, Dagger, :execute!, Int)
+        MT.set_metric_value!(MT.get_or_create_storage!(ctx, MT.TimeMetric()), key, m.time)
+        if m.kernel_time != 0
+            MT.set_metric_value!(MT.get_or_create_storage!(ctx, KernelTimeMetric()), key, m.kernel_time)
+        end
+        MT.set_metric_value!(MT.get_or_create_storage!(ctx, MT.AllocMetric()), key, m.alloc)
+        MT.set_metric_value!(MT.get_or_create_storage!(ctx, SignatureMetric()), key, sig.sig)
+        MT.set_metric_value!(MT.get_or_create_storage!(ctx, ProcessorMetric()), key, proc)
+        MT.set_metric_value!(MT.get_or_create_storage!(ctx, WorkerMetric()), key, worker_id)
+        if m.transfer_size != 0
+            MT.set_metric_value!(MT.get_or_create_storage!(ctx, TransferSizeMetric()), key, m.transfer_size)
+        end
+        if m.transfer_time != 0
+            MT.set_metric_value!(MT.get_or_create_storage!(ctx, TransferTimeMetric()), key, m.transfer_time)
+        end
+        if m.transfer_rate != 0
+            MT.set_metric_value!(MT.get_or_create_storage!(ctx, TransferRateMetric()), key, m.transfer_rate)
+        end
+        if m.move_from !== nothing && m.move_to !== nothing
+            MT.set_metric_value!(MT.get_or_create_storage!(ctx, FromSpaceMetric()), key, m.move_from)
+            MT.set_metric_value!(MT.get_or_create_storage!(ctx, ToSpaceMetric()), key, m.move_to)
+            if m.move_size != 0
+                MT.set_metric_value!(MT.get_or_create_storage!(ctx, MoveSizeMetric()), key, m.move_size)
+            end
         end
         # Trim in batches: let the context overshoot its bound by a slack
         # before cutting it back. `trim_context!` is O(keys) per call, so

@@ -38,7 +38,7 @@ import ..Dagger: SignatureMetric, ProcessorMetric, WorkerMetric, TransferSizeMet
 import ..Dagger: execute_metrics_spec, metrics_lookup_runtime, metrics_lookup_alloc, metrics_lookup_transfer_rate
 import ..Dagger: global_cost_summary, runtime_estimate
 import ..Dagger: cached_metrics_lookup_alloc, cached_metrics_lookup_transfer_rate
-import ..Dagger: extract_collected_metrics, apply_collected_metrics!, records_metrics
+import ..Dagger: collect_task_metrics, apply_task_metrics!, records_metrics
 import ..Dagger.MetricsTracker as MT
 
 
@@ -564,12 +564,16 @@ function handle_result!(ctx, state::ComputeState, pid, proc, thunk_id, res, meta
             #state.worker_storage_pressure[pid][to_storage] = metadata.storage_pressure
             #state.worker_storage_capacity[pid][to_storage] = metadata.storage_capacity
             #state.worker_loadavg[pid] = metadata.loadavg
-            # Fold the task's collected metrics into the global MetricsTracker
-            # cache (its own synchronization makes this safe under state.lock and
-            # from concurrent in-process finishers). The scheduler's cost model
-            # (has_capacity/estimate_task_costs!) reads these back via snapshots.
+            # Fold the task's metrics into the global MetricsTracker cache (its
+            # own synchronization makes this safe under state.lock and from
+            # concurrent in-process finishers), tagged with the signature and
+            # processor known here rather than sent back by the worker (see
+            # `TaskMetrics`). The cost model reads them back from the
+            # `CostSummary` and via snapshots.
             if metadata.metrics !== nothing
-                apply_collected_metrics!(MT.global_metrics_cache(), thunk_id, metadata.metrics)
+                apply_task_metrics!(MT.global_metrics_cache(), thunk_id,
+                                    metadata.metrics::Dagger.TaskMetrics,
+                                    signature(state, node), proc, pid)
             end
         end
         if res isa Chunk && res.handle isa DRef
@@ -2406,11 +2410,10 @@ Executes a single task specified by `task` on `to_proc`.
     @logstart ctx LogCompute LogComputeId(thunk_id, to_proc) f
 
     # Metrics for this task are collected by MetricsTracker (see
-    # `execute_metrics_spec`), which records wall time, thread time,
-    # allocations, and the task's signature/processor/worker/transfer facts
-    # under one key. `local_metrics_cache` is drained into the scheduler's
-    # global cache by `handle_result!`.
-    task_sig = signature(first(data), @view data[2:end]).sig
+    # `execute_metrics_spec`), which records wall time, kernel time,
+    # allocations and transfer facts under one key. `local_metrics_cache` is
+    # drained into a `TaskMetrics` below, which `handle_result!` folds into
+    # the scheduler's global cache.
     # Reuse this task's scratch cache rather than allocating a fresh
     # `MetricsCache` (and its per-metric storage) per thunk. `do_task` runs on a
     # pool of reusable tasks, so the same task services many thunks; `reset_pending!`
@@ -2430,14 +2433,14 @@ Executes a single task specified by `task` on `to_proc`.
         Dagger.set_tls!(to_proc, task.sch_uid, task.sch_handle::SchedulerHandle, task,
                         Dagger.DTASK_CANCEL_TOKEN[], logging_enabled,
                         Dagger.current_acceleration(), local_metrics_cache,
-                        task_sig, transfer_size, transfer_time)
+                        transfer_size, transfer_time)
 
         result = Dagger.with_options(propagated) do
-            # N.B. The facts these metrics record (signature, processor,
-            # worker, transfer stats) reach them through the thunk's TLS, set
-            # just above. They used to be passed in a `@with` over five
-            # `ScopedValue`s, which cost ~939 allocations / 32 KB per task --
-            # more than the entire rest of the scheduler path.
+            # N.B. The facts these metrics record (transfer stats, the kernel
+            # time `ThreadProc.execute!` clocks) reach them through the
+            # thunk's TLS, set just above. They used to be passed in a `@with`
+            # over five `ScopedValue`s, which cost ~939 allocations / 32 KB
+            # per task -- more than the entire rest of the scheduler path.
             MT.with_metrics(mspec, Dagger, :execute!, thunk_id, MT.SyncInto(local_metrics_cache)) do
                 # Execute
                 # N.B. Splatting an empty kwargs Vector still materializes a
@@ -2494,7 +2497,7 @@ Executes a single task specified by `task` on `to_proc`.
 
     # TODO: debug_storage("Releasing $to_storage_name")
     collected_metrics = keep_metrics ?
-        extract_collected_metrics(local_metrics_cache, thunk_id) : nothing
+        collect_task_metrics(local_metrics_cache, thunk_id) : nothing
 
     metadata = (
         time_pressure=real_time_util[],
