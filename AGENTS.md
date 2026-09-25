@@ -723,3 +723,41 @@ lesson.
    in a model-level test; both showed in a
    timeline of `:add_thunk` launch events against `:compute` events, and in
    counting where each planned task ran relative to its data.
+
+63. **A bounded sample cache is the wrong place to keep an estimate, because
+   the estimate vanishes exactly when the workload is large.** The scheduler
+   priced every task from the per-task metrics cache, which keeps the most
+   recent 1000 tasks. A Cholesky region at 256² tiles is ~2000 tasks, so by
+   the next `copy(A)` every sample of its signature was gone and each of its
+   tasks cost the 1 s placeholder for an unknown signature. With pressure
+   then counted in whole seconds per reserved task, the 0.5 s transfer
+   penalty that keeps a task next to its data lost as soon as its owner had
+   one more task queued than another worker: a quarter of the copied tiles
+   went to other workers, and on four nodes the default path ran Cholesky
+   2x slower than master while moving 2.8x the data. Master never had the
+   problem only because its per-signature table was unbounded. The first
+   call of a workload is always fine (the cache is empty of *everything*, so
+   the placeholder applies evenly), which is why the warmup looked like
+   master and the samples did not -- when a workload is fast once and slow
+   afterwards, look for state that a previous call leaves behind. Keep the
+   samples bounded and the estimates separate (`CostSummary`: one blended
+   number per key, O(1) to update and read); a test that floods the cache
+   past its bound and then asks for the estimate is what guards it.
+
+64. **Do not ship what the receiver already knows, and measure per-task
+   overhead against the same workload with the feature switched off.** Each
+   task result carried its signature (a vector of types) and processor so
+   the driver could tag its metrics -- but `handle_result!` holds the
+   `Thunk`, whose signature it memoized when scheduling it, and the
+   processor it fired the task on. Serializing those, plus a vector of
+   boxed metric pairs applied with a dynamic dispatch each, cost more than
+   the rest of the scheduler path: with three workers an eager task took
+   0.071 ms against master's 0.029 and a Datadeps task 0.280 against 0.175.
+   The quickest attribution was not a profiler but a switch: with
+   `records_metrics` returning `false` on the workers the same benchmark
+   gave 0.035 and 0.183, so shipping and applying was ~90% of the gap. A
+   fixed record of measurements (`TaskMetrics`), tagged on the driver,
+   brought it to 0.038 and 0.207 (on a quiet VM, within 7% of master on the
+   Datadeps path). Profile in one process only after that kind of A/B has
+   said where to look, and run timing comparisons on a quiet machine: on a
+   shared one the same build varied 2x between back-to-back runs.
