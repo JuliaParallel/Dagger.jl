@@ -761,3 +761,24 @@ lesson.
    Datadeps path). Profile in one process only after that kind of A/B has
    said where to look, and run timing comparisons on a quiet machine: on a
    shared one the same build varied 2x between back-to-back runs.
+
+65. **A first-use compilation inside a lock is a stall for everyone waiting
+   on that lock -- and under uniform execution, once per rank.** The metrics
+   cache trims itself the first time a process has recorded more tasks than
+   its bound, and that first trim compiled one specialization of the
+   eviction helpers per metric storage: 500 ms in a fresh process, 0.6 ms
+   ever after. It ran inside `handle_result!`, which holds the scheduler
+   lock, so no task was scheduled for half a second; and under MPI each rank
+   fills its cache at a different task (it records only what it ran), so a
+   job stalled once per rank, spread across the first few calls big enough
+   to fill the cache. The symptom was a call sequence that master never
+   showed -- 1.7, 2.4, 2.4, 1.6, 0.9 s, the same on every sweep -- with the
+   first call clean (the cache was still filling) and the same bytes moved.
+   Two things found it: the same pattern in every earlier sweep's CSV since
+   the metrics work landed, and a rank-0 profile of the slow call whose own
+   time sat in `trim_context!` while the rest waited on other ranks. Then a
+   200-task micro-benchmark across the bound, run twice in one process,
+   separated compilation from work. Put such paths in the precompile
+   workload (`src/precompile.jl` now crosses a bound of 8 with every storage
+   present), and when a workload is slow only on calls two to four, suspect
+   something that runs once per process at a size threshold.
