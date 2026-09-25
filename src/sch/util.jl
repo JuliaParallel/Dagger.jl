@@ -587,33 +587,27 @@ function can_use_proc(state, task, gproc, proc, opts, scope)
     return true, scope
 end
 
-function has_capacity(state, p, gp, time_util, alloc_util, occupancy, sig;
-                      snap=nothing)
+function has_capacity(state, p, gp, time_util, alloc_util, occupancy, sig)
     T = typeof(p)
-    sig_vec = sig isa Dagger.Signature ? sig.sig : sig
-    sig_hash = sig isa Dagger.Signature ? sig.hash : Dagger.signature_hash(sig_vec)
-    # Reuse the caller's per-pass snapshot when given (see `schedule_one!`).
-    # Snapshotting per candidate processor would deep-copy the whole metrics
-    # cache once per processor on every scheduling decision, because other
-    # threads bump the cache's generation on every task completion.
-    snap = snap === nothing ? MT.snapshot_stale(MT.global_metrics_cache(), COST_MODEL_SNAPSHOT_MAX_AGE_NS) : snap
+    sig_hash = sig isa Dagger.Signature ? sig.hash : Dagger.signature_hash(sig)
     worker_id = gp isa Int ? gp : (gp isa OSProc ? gp.pid : myid())
+    # Estimates come from the running per-signature summary, not the bounded
+    # per-task cache: a region larger than that cache's bound evicts every
+    # sample of the signatures before it, and the placeholder below then
+    # decides placement (see `CostSummary`). Reading the summary is a few
+    # dictionary lookups; the cache needed a snapshot and a scan per task.
+    summary = global_cost_summary()
     # FIXME: MaxUtilization
     est_time_util = if time_util !== nothing && haskey(time_util, T)
         round(UInt64, time_util[T] * 1000^3)::UInt64
     else
-        # From the running per-signature summary, not the bounded per-task
-        # cache: a region larger than that cache's bound evicts every sample
-        # of the signatures before it, and the placeholder below then decides
-        # placement (see `CostSummary`).
-        runtime = runtime_estimate(global_cost_summary(), sig_hash, p, worker_id)
+        runtime = runtime_estimate(summary, sig_hash, p, worker_id)
         runtime !== nothing ? runtime : UInt64(1000^3)
     end
     est_alloc_util = if alloc_util !== nothing && haskey(alloc_util, T)
         (alloc_util[T])::UInt64
     else
-        alloc = cached_metrics_lookup_alloc(snap, sig_vec,
-                                            sig isa Dagger.Signature ? sig.hash : hash(sig_vec), p)
+        alloc = alloc_estimate(summary, sig_hash, p)
         alloc !== nothing ? alloc : UInt64(0)
     end
     est_occupancy::UInt32 = typemax(UInt32)
@@ -722,8 +716,7 @@ function estimate_task_costs(state, procs, task; sig=nothing)
 end
 const DEFAULT_TRANSFER_RATE = UInt64(1_000_000)
 @reuse_scope function estimate_task_costs!(sorted_procs, costs, state, procs, task;
-                                            sig=nothing,
-                                            snap=nothing)
+                                            sig=nothing)
     if length(procs) == 1
         # Nothing to rank: the costs only exist to order the candidates, and a
         # scan of the task's chunks to order one of them is pure overhead. This
@@ -751,11 +744,9 @@ const DEFAULT_TRANSFER_RATE = UInt64(1_000_000)
         sig = signature(task.f, task.inputs)
     end
     sig_hash = sig isa Dagger.Signature ? sig.hash : Dagger.signature_hash(sig)
-    # Reuse the caller's per-pass snapshot (schedule_one!) when provided.
-    snap = snap === nothing ? MT.snapshot_stale(MT.global_metrics_cache(), COST_MODEL_SNAPSHOT_MAX_AGE_NS) : snap
-    # Runtimes come from the running per-signature summary (see
-    # `CostSummary`): one O(1) lookup per candidate, and the estimate
-    # survives the per-task cache's bound.
+    # Runtimes and transfer rates come from the running summary (see
+    # `CostSummary`): a few dictionary lookups per candidate, and the
+    # estimates survive the per-task cache's bound.
     summary = global_cost_summary()
 
     # Estimate network transfer cost per *parent* processor. Chunks are located
@@ -816,7 +807,7 @@ const DEFAULT_TRANSFER_RATE = UInt64(1_000_000)
         # in seconds while every other term here is in nanoseconds. Scale it
         # up, or transfer cost is discounted by a factor of a billion and data
         # locality never affects the choice of processor.
-        rate = cached_metrics_lookup_transfer_rate(snap, proc, pid)
+        rate = transfer_rate_estimate(summary, proc, pid)
         tx_rate = rate !== nothing ? rate : DEFAULT_TRANSFER_RATE
         tx_cost = (tx_costs[gproc]/tx_rate) * 1e9
         cost = est_time_util + pressures[idx] + tx_cost + task_xfer_cost

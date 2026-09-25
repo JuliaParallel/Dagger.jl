@@ -36,15 +36,10 @@ import ScopedValues: ScopedValue, @with, with
 
 import ..Dagger: SignatureMetric, ProcessorMetric, WorkerMetric, TransferSizeMetric, TransferTimeMetric, TransferRateMetric
 import ..Dagger: execute_metrics_spec, metrics_lookup_runtime, metrics_lookup_alloc, metrics_lookup_transfer_rate
-import ..Dagger: global_cost_summary, runtime_estimate
-import ..Dagger: cached_metrics_lookup_alloc, cached_metrics_lookup_transfer_rate
+import ..Dagger: global_cost_summary, runtime_estimate, alloc_estimate, transfer_rate_estimate
 import ..Dagger: collect_task_metrics, apply_task_metrics!, records_metrics
 import ..Dagger.MetricsTracker as MT
 
-
-# How stale a metrics snapshot the cost model will accept before rebuilding.
-# See the `snapshot_stale` call in `schedule_one!`.
-const COST_MODEL_SNAPSHOT_MAX_AGE_NS = UInt64(100_000_000) # 100ms
 
 include("util.jl")
 include("fault-handler.jl")
@@ -1014,22 +1009,11 @@ concurrently across threads.
     sorted_procs = @reusable_vector :schedule_one!_sorted_procs Processor OSProc() 32
     resize!(sorted_procs, length(input_procs))
     costs = @reusable_dict :schedule_one!_costs Processor Float64 OSProc() 0.0 32
-    # One metrics snapshot for the whole scheduling pass, shared by cost
-    # estimation and every per-processor `has_capacity` below. Taken separately,
-    # each of those rebuilds (deep-copies) the snapshot, because other threads
-    # bump the cache's generation on every task completion. (Runtimes no longer
-    # come from it -- see `CostSummary` -- only allocation and transfer-rate
-    # lookups do.)
-    # N.B. `snapshot_stale`, not `snapshot`. A rebuild deep-copies every context
-    # and storage (273 allocs / 67 KB against a 488-value cache), and the
-    # cache's generation advances on every task completion -- so an exact
-    # snapshot here means a full copy per scheduling pass, which is what put
-    # `test/allocations.jl` 2.5-6x over bound. The cost model reduces many
-    # samples to an estimate, so a view a few milliseconds old is
-    # indistinguishable in effect; this bounds rebuilds by time instead of by
-    # task completion rate.
-    snap = MT.snapshot_stale(MT.global_metrics_cache(), COST_MODEL_SNAPSHOT_MAX_AGE_NS)
-    estimate_task_costs!(sorted_procs, costs, state, input_procs, task; sig, snap)
+    # The cost model reads its estimates from the `CostSummary` (a few
+    # dictionary lookups); it used to take a metrics snapshot here, and a
+    # rebuild deep-copied every context and storage (273 allocs / 67 KB
+    # against a 488-value cache) besides the scans each lookup then made.
+    estimate_task_costs!(sorted_procs, costs, state, input_procs, task; sig)
     empty!(input_procs)
 
     # Under uniform execution, measured costs are rank-local, so re-order by a
@@ -1045,8 +1029,7 @@ concurrently across threads.
         can_use, scope = can_use_proc(state, task, gproc, proc, options, scope)
         if can_use
             has_cap, est_time_util, est_alloc_util, est_occupancy =
-                has_capacity(state, proc, root_worker_id(gproc), options.time_util, options.alloc_util, options.occupancy, sig;
-                             snap)
+                has_capacity(state, proc, root_worker_id(gproc), options.time_util, options.alloc_util, options.occupancy, sig)
             # Under uniform execution capacity is rank-local; every rank must
             # take the first usable processor in the deterministic order.
             if has_cap || scheduling_ignore_capacity(accel)

@@ -609,10 +609,12 @@ end
     CostSummary
 
 The scheduler's cost model needs one number per question -- how long does a
-task with this signature take on this processor? -- not the samples behind it.
-This keeps that number: a running estimate per key, blended from each finished
+task with this signature take on this processor? how much does it allocate?
+how fast do inputs reach that processor? -- not the samples behind it. This
+keeps those numbers: a running estimate per key, blended from each finished
 task's metrics as they arrive (`summarize_task_metrics!`), and read back in
-O(1) (`runtime_estimate`).
+O(1) (`runtime_estimate`, `alloc_estimate`, `transfer_rate_estimate`), so the
+scheduler never takes or scans a snapshot of the per-task cache.
 
 It exists because the per-task metrics cache is the wrong place to answer that
 question from. That cache is bounded to the most recent `METRICS_CACHE_MAX_TASKS`
@@ -642,12 +644,25 @@ struct CostSummary
     runtime_by_type_worker::Dict{Tuple{UInt,DataType,Int},UInt64}
     runtime_by_type::Dict{Tuple{UInt,DataType},UInt64}
     runtime_any::Dict{UInt,UInt64}
+    # Bytes allocated by a task, by (signature, processor) and by signature.
+    alloc_by_proc::Dict{Tuple{UInt,Processor},UInt64}
+    alloc_any::Dict{UInt,UInt64}
+    # Bytes per second moving a task's inputs to a processor, by processor,
+    # by (processor type, worker) and by processor type.
+    rate_by_proc::Dict{Processor,UInt64}
+    rate_by_type_worker::Dict{Tuple{DataType,Int},UInt64}
+    rate_by_type::Dict{DataType,UInt64}
 end
 CostSummary() = CostSummary(ReentrantLock(),
                             Dict{Tuple{UInt,Processor},UInt64}(),
                             Dict{Tuple{UInt,DataType,Int},UInt64}(),
                             Dict{Tuple{UInt,DataType},UInt64}(),
-                            Dict{UInt,UInt64}())
+                            Dict{UInt,UInt64}(),
+                            Dict{Tuple{UInt,Processor},UInt64}(),
+                            Dict{UInt,UInt64}(),
+                            Dict{Processor,UInt64}(),
+                            Dict{Tuple{DataType,Int},UInt64}(),
+                            Dict{DataType,UInt64}())
 
 const GLOBAL_COST_SUMMARY = CostSummary()
 global_cost_summary() = GLOBAL_COST_SUMMARY
@@ -661,18 +676,34 @@ end
 
 """
     summarize_task_metrics!(summary::CostSummary, sig_hash::UInt, proc::Processor,
-                            worker_id::Int, kernel_ns::UInt64)
+                            worker_id::Int; kernel_ns=0, alloc_bytes=nothing, rate=0)
 
-Blend one finished task's kernel time into `summary`.
+Blend one finished task's measurements into `summary`: its kernel time
+(`kernel_ns`, 0 if not measured), bytes allocated (`alloc_bytes`, `nothing`
+if not measured) and the rate its inputs moved at (`rate`, 0 if it moved
+none).
 """
 function summarize_task_metrics!(summary::CostSummary, sig_hash::UInt, proc::Processor,
-                                 worker_id::Int, kernel_ns::UInt64)
+                                 worker_id::Int; kernel_ns::UInt64=UInt64(0),
+                                 alloc_bytes::Union{UInt64,Nothing}=nothing,
+                                 rate::UInt64=UInt64(0))
     T = typeof(proc)
     @lock summary.lock begin
-        _blend!(summary.runtime_any, sig_hash, kernel_ns)
-        _blend!(summary.runtime_by_type, (sig_hash, T), kernel_ns)
-        _blend!(summary.runtime_by_proc, (sig_hash, proc), kernel_ns)
-        _blend!(summary.runtime_by_type_worker, (sig_hash, T, worker_id), kernel_ns)
+        if kernel_ns != 0
+            _blend!(summary.runtime_any, sig_hash, kernel_ns)
+            _blend!(summary.runtime_by_type, (sig_hash, T), kernel_ns)
+            _blend!(summary.runtime_by_proc, (sig_hash, proc), kernel_ns)
+            _blend!(summary.runtime_by_type_worker, (sig_hash, T, worker_id), kernel_ns)
+        end
+        if alloc_bytes !== nothing
+            _blend!(summary.alloc_any, sig_hash, alloc_bytes)
+            _blend!(summary.alloc_by_proc, (sig_hash, proc), alloc_bytes)
+        end
+        if rate != 0
+            _blend!(summary.rate_by_proc, proc, rate)
+            _blend!(summary.rate_by_type_worker, (T, worker_id), rate)
+            _blend!(summary.rate_by_type, T, rate)
+        end
     end
     return
 end
@@ -699,12 +730,51 @@ function runtime_estimate(summary::CostSummary, sig_hash::UInt, proc::Processor,
     end
 end
 
+"""
+    alloc_estimate(summary::CostSummary, sig_hash::UInt, proc::Processor)
+        -> Union{UInt64, Nothing}
+
+The estimated bytes a task with signature hash `sig_hash` allocates on
+`proc`, falling back to any processor, or `nothing` if none has finished.
+"""
+function alloc_estimate(summary::CostSummary, sig_hash::UInt, proc::Processor)
+    @lock summary.lock begin
+        r = get(summary.alloc_by_proc, (sig_hash, proc), nothing)
+        r === nothing || return r
+        return get(summary.alloc_any, sig_hash, nothing)
+    end
+end
+
+"""
+    transfer_rate_estimate(summary::CostSummary, proc::Processor, worker_id::Int)
+        -> Union{UInt64, Nothing}
+
+The estimated rate, in bytes per second, at which a task's inputs reach
+`proc` (owned by `worker_id`): by that processor, then its type on that
+worker, then its type anywhere; `nothing` if no task there has moved inputs.
+"""
+function transfer_rate_estimate(summary::CostSummary, proc::Processor, worker_id::Int)
+    T = typeof(proc)
+    @lock summary.lock begin
+        r = get(summary.rate_by_proc, proc, nothing)
+        r === nothing || return r
+        r = get(summary.rate_by_type_worker, (T, worker_id), nothing)
+        r === nothing || return r
+        return get(summary.rate_by_type, T, nothing)
+    end
+end
+
 function Base.empty!(summary::CostSummary)
     @lock summary.lock begin
         empty!(summary.runtime_by_proc)
         empty!(summary.runtime_by_type_worker)
         empty!(summary.runtime_by_type)
         empty!(summary.runtime_any)
+        empty!(summary.alloc_by_proc)
+        empty!(summary.alloc_any)
+        empty!(summary.rate_by_proc)
+        empty!(summary.rate_by_type_worker)
+        empty!(summary.rate_by_type)
     end
     return summary
 end
@@ -715,13 +785,14 @@ end
 
 Fold a finished task's [`TaskMetrics`](@ref) into `cache` under `key`, tagged
 with the signature, processor and worker the scheduler knows the task by, and
-blend its kernel time into the [`CostSummary`](@ref).
+blend its measurements into the [`CostSummary`](@ref).
 """
 function apply_task_metrics!(cache::MT.MetricsCache, key::Int, m::TaskMetrics,
                              sig::Signature, proc::Processor, worker_id::Int)
-    if m.kernel_time != 0
-        summarize_task_metrics!(global_cost_summary(), sig.hash, proc, worker_id, m.kernel_time)
-    end
+    summarize_task_metrics!(global_cost_summary(), sig.hash, proc, worker_id;
+                            kernel_ns=m.kernel_time,
+                            alloc_bytes=UInt64(max(m.alloc.allocd, 0)),
+                            rate=m.transfer_rate)
     MT.bulk_update!(cache) do c
         ctx = MT.pending_context!(c, Dagger, :execute!, Int)
         MT.set_metric_value!(MT.get_or_create_storage!(ctx, MT.TimeMetric()), key, m.time)

@@ -405,8 +405,7 @@ end
         end
         pres1_1 = get_pressure(1, tproc1_1)
         pres2_1 = get_pressure(first(workers()), tproc2_1)
-        snap = MetricsTracker.snapshot(MetricsTracker.global_metrics_cache())
-        observed_rate = Dagger.metrics_lookup_transfer_rate(snap, tproc2_1, first(workers()))
+        observed_rate = Dagger.transfer_rate_estimate(Dagger.global_cost_summary(), tproc2_1, first(workers()))
         tx_rate = observed_rate !== nothing ? observed_rate : Dagger.Sch.DEFAULT_TRANSFER_RATE
         tx_xfer_cost = 1e6
         sig_unknown_cost = 1e9
@@ -481,41 +480,31 @@ end
 
         @testset "Per-Processor Transfer Rate" begin
             wid = first(workers())
+            summary = Dagger.global_cost_summary()
+            saved_local = Dagger.transfer_rate_estimate(summary, tproc1_1, 1)
+            saved_remote = Dagger.transfer_rate_estimate(summary, tproc2_1, wid)
+            # Rates are per processor: a slow link to one worker must cost
+            # transfers there more, and not elsewhere.
+            sig_h = Dagger.signature_hash(Any[typeof(mynothing), Int])
+            try
+                @lock summary.lock begin
+                    summary.rate_by_proc[tproc1_1] = UInt64(2_000_000)
+                    summary.rate_by_proc[tproc2_1] = UInt64(500_000)
+                end
+                args = [Dagger.tochunk(1), Dagger.tochunk(2)]
+                tx_size = 2 * sizeof(Int)
+                t = delayed(mynothing)(args...)
+                Dagger.Sch.collect_task_inputs!(state, t)
+                _, costs = Dagger.Sch.estimate_task_costs(state, procs, t)
 
-            cache = MetricsTracker.global_metrics_cache()
-            test_local_id = 999_999_000
-            test_remote_id = 999_999_001
-
-            MetricsTracker.bulk_update!(cache) do c
-                ctx = MetricsTracker.pending_context!(c, Dagger, :execute!, Int)
-                proc_storage = MetricsTracker.get_or_create_storage!(ctx, Dagger.ProcessorMetric())
-                worker_storage = MetricsTracker.get_or_create_storage!(ctx, Dagger.WorkerMetric())
-                rate_storage = MetricsTracker.get_or_create_storage!(ctx, Dagger.TransferRateMetric())
-                MetricsTracker.set_metric_value!(proc_storage, test_local_id, tproc1_1)
-                MetricsTracker.set_metric_value!(worker_storage, test_local_id, 1)
-                MetricsTracker.set_metric_value!(rate_storage, test_local_id, UInt64(2_000_000))
-                MetricsTracker.set_metric_value!(proc_storage, test_remote_id, tproc2_1)
-                MetricsTracker.set_metric_value!(worker_storage, test_remote_id, wid)
-                MetricsTracker.set_metric_value!(rate_storage, test_remote_id, UInt64(500_000))
-            end
-
-            args = [Dagger.tochunk(1), Dagger.tochunk(2)]
-            tx_size = 2 * sizeof(Int)
-            t = delayed(mynothing)(args...)
-            Dagger.Sch.collect_task_inputs!(state, t)
-            _, costs = Dagger.Sch.estimate_task_costs(state, procs, t)
-
-            if nprocs() > 1
-                @test costs[tproc2_1] ≈ sig_unknown_cost + (tx_size / 500_000)*1e9 + tx_xfer_cost
-            end
-            @test costs[tproc1_1] ≈ sig_unknown_cost
-
-            MetricsTracker.bulk_update!(cache) do c
-                ctx = MetricsTracker.pending_context!(c, Dagger, :execute!, Int)
-                for m in (Dagger.ProcessorMetric(), Dagger.WorkerMetric(), Dagger.TransferRateMetric())
-                    storage = MetricsTracker.get_or_create_storage!(ctx, m)
-                    MetricsTracker.delete_metric_value!(storage, test_local_id)
-                    MetricsTracker.delete_metric_value!(storage, test_remote_id)
+                if nprocs() > 1
+                    @test costs[tproc2_1] ≈ sig_unknown_cost + (tx_size / 500_000)*1e9 + tx_xfer_cost
+                end
+                @test costs[tproc1_1] ≈ sig_unknown_cost
+            finally
+                @lock summary.lock begin
+                    saved_local === nothing ? delete!(summary.rate_by_proc, tproc1_1) : (summary.rate_by_proc[tproc1_1] = saved_local)
+                    saved_remote === nothing ? delete!(summary.rate_by_proc, tproc2_1) : (summary.rate_by_proc[tproc2_1] = saved_remote)
                 end
             end
         end
@@ -594,10 +583,10 @@ end
             p2 = Dagger.ThreadProc(1, 2)
             p3 = Dagger.ThreadProc(2, 1)
             @test Dagger.runtime_estimate(summary, h, p1, 1) === nothing
-            Dagger.summarize_task_metrics!(summary, h, p1, 1, UInt64(100))
+            Dagger.summarize_task_metrics!(summary, h, p1, 1; kernel_ns=UInt64(100))
             @test Dagger.runtime_estimate(summary, h, p1, 1) == UInt64(100)
             # A second sample is blended, not replaced or appended
-            Dagger.summarize_task_metrics!(summary, h, p1, 1, UInt64(300))
+            Dagger.summarize_task_metrics!(summary, h, p1, 1; kernel_ns=UInt64(300))
             @test Dagger.runtime_estimate(summary, h, p1, 1) == UInt64(200)
             # Unseen processor of the same type on the same worker, then on
             # another worker, then any processor at all
@@ -606,8 +595,22 @@ end
             @test Dagger.runtime_estimate(summary, h, Dagger.OSProc(1), 1) == UInt64(200)
             # Another signature is separate
             @test Dagger.runtime_estimate(summary, Dagger.signature_hash(Any[typeof(-), Int]), p1, 1) === nothing
+            # Allocation is by signature and processor; a transfer rate is by
+            # processor alone
+            @test Dagger.alloc_estimate(summary, h, p1) === nothing
+            @test Dagger.transfer_rate_estimate(summary, p1, 1) === nothing
+            Dagger.summarize_task_metrics!(summary, h, p1, 1; alloc_bytes=UInt64(4096), rate=UInt64(1_000_000))
+            @test Dagger.alloc_estimate(summary, h, p1) == UInt64(4096)
+            @test Dagger.alloc_estimate(summary, h, p3) == UInt64(4096)
+            @test Dagger.transfer_rate_estimate(summary, p1, 1) == UInt64(1_000_000)
+            @test Dagger.transfer_rate_estimate(summary, p2, 1) == UInt64(1_000_000)
+            @test Dagger.transfer_rate_estimate(summary, p3, 2) == UInt64(1_000_000)
+            # A task that moved nothing leaves the rate alone
+            Dagger.summarize_task_metrics!(summary, h, p1, 1; kernel_ns=UInt64(1))
+            @test Dagger.transfer_rate_estimate(summary, p1, 1) == UInt64(1_000_000)
             empty!(summary)
             @test Dagger.runtime_estimate(summary, h, p1, 1) === nothing
+            @test Dagger.alloc_estimate(summary, h, p1) === nothing
         end
 
         @testset "A task's metrics travel as measurements only" begin
