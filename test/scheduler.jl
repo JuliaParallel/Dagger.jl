@@ -478,6 +478,34 @@ end
             end
         end
 
+        @testset "Identical processors cost the same" begin
+            # Candidates are ranked by a type-level runtime estimate, so two
+            # threads of one worker tie whatever each measured for the
+            # signature, and the tie is broken by the shuffle rather than by
+            # measurement noise or by which thread compiled the task.
+            summary = Dagger.global_cost_summary()
+            sig = Dagger.Sch.signature(mynothing, [Dagger.Argument(1, 1), Dagger.Argument(2, 2)])
+            tproc1_2 = Dagger.ThreadProc(1, 2)
+            @lock summary.lock begin
+                summary.runtime_by_proc[(sig.hash, tproc1_1)] = UInt64(280_000_000)
+                summary.runtime_by_proc[(sig.hash, tproc1_2)] = UInt64(10_000)
+                summary.runtime_by_type[(sig.hash, Dagger.ThreadProc)] = UInt64(20_000)
+            end
+            try
+                t = delayed(mynothing)(1, 2)
+                Dagger.Sch.collect_task_inputs!(state, t)
+                _, costs = Dagger.Sch.estimate_task_costs(state, [tproc1_1, tproc1_2], t; sig)
+                @test costs[tproc1_1] - get_pressure(1, tproc1_1) ≈ 20_000
+                @test costs[tproc1_2] - get_pressure(1, tproc1_2) ≈ 20_000
+            finally
+                @lock summary.lock begin
+                    delete!(summary.runtime_by_proc, (sig.hash, tproc1_1))
+                    delete!(summary.runtime_by_proc, (sig.hash, tproc1_2))
+                    delete!(summary.runtime_by_type, (sig.hash, Dagger.ThreadProc))
+                end
+            end
+        end
+
         @testset "Per-Processor Transfer Rate" begin
             wid = first(workers())
             summary = Dagger.global_cost_summary()
@@ -585,14 +613,25 @@ end
             @test Dagger.runtime_estimate(summary, h, p1, 1) === nothing
             Dagger.summarize_task_metrics!(summary, h, p1, 1; kernel_ns=UInt64(100))
             @test Dagger.runtime_estimate(summary, h, p1, 1) == UInt64(100)
-            # A second sample is blended, not replaced or appended
+            # The first sample of a key (it compiled the task) is replaced by
+            # the second, not blended with it
             Dagger.summarize_task_metrics!(summary, h, p1, 1; kernel_ns=UInt64(300))
-            @test Dagger.runtime_estimate(summary, h, p1, 1) == UInt64(200)
+            @test Dagger.runtime_estimate(summary, h, p1, 1) == UInt64(300)
+            # From the third on, samples blend
+            Dagger.summarize_task_metrics!(summary, h, p1, 1; kernel_ns=UInt64(500))
+            @test Dagger.runtime_estimate(summary, h, p1, 1) == UInt64(400)
             # Unseen processor of the same type on the same worker, then on
             # another worker, then any processor at all
-            @test Dagger.runtime_estimate(summary, h, p2, 1) == UInt64(200)
-            @test Dagger.runtime_estimate(summary, h, p3, 2) == UInt64(200)
-            @test Dagger.runtime_estimate(summary, h, Dagger.OSProc(1), 1) == UInt64(200)
+            @test Dagger.runtime_estimate(summary, h, p2, 1) == UInt64(400)
+            @test Dagger.runtime_estimate(summary, h, p3, 2) == UInt64(400)
+            @test Dagger.runtime_estimate(summary, h, Dagger.OSProc(1), 1) == UInt64(400)
+            # The type-level estimate the scheduler ranks by is shared by every
+            # processor of the type, whatever each one measured
+            Dagger.summarize_task_metrics!(summary, h, p2, 1; kernel_ns=UInt64(50_000))
+            @test Dagger.runtime_estimate(summary, h, p2, 1) == UInt64(50_000)
+            @test Dagger.runtime_estimate(summary, h, p1, 1) == UInt64(400)
+            @test Dagger.runtime_estimate(summary, h, Dagger.ThreadProc) == (UInt64(400) + UInt64(50_000)) ÷ 2
+            @test Dagger.runtime_estimate(summary, h, Dagger.OSProc) == Dagger.runtime_estimate(summary, h)
             # Another signature is separate
             @test Dagger.runtime_estimate(summary, Dagger.signature_hash(Any[typeof(-), Int]), p1, 1) === nothing
             # Allocation is by signature and processor; a transfer rate is by

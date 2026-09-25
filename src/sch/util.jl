@@ -601,7 +601,7 @@ function has_capacity(state, p, gp, time_util, alloc_util, occupancy, sig)
     est_time_util = if time_util !== nothing && haskey(time_util, T)
         round(UInt64, time_util[T] * 1000^3)::UInt64
     else
-        runtime = runtime_estimate(summary, sig_hash, p, worker_id)
+        runtime = runtime_estimate(summary, sig_hash, T)
         runtime !== nothing ? runtime : UInt64(1000^3)
     end
     est_alloc_util = if alloc_util !== nothing && haskey(alloc_util, T)
@@ -798,9 +798,10 @@ const DEFAULT_TRANSFER_RATE = UInt64(1_000_000)
         # TODO: Actually estimate/benchmark this
         task_xfer_cost = pid != myid() ? 1_000_000 : 0 # 1ms
 
-        # Per-(signature, processor) runtime, so a processor type that has
-        # measured faster for this signature ranks ahead of one that has not.
-        runtime = runtime_estimate(summary, sig_hash, proc, pid)
+        # Per-(signature, processor type) runtime, so a processor type that
+        # has measured faster for this signature ranks ahead of one that has
+        # not, while identical processors tie (see `runtime_estimate`).
+        runtime = runtime_estimate(summary, sig_hash, typeof(proc))
         est_time_util = runtime !== nothing ? runtime : UInt64(1000^3)
 
         # N.B. `tx_rate` is in bytes per *second*, so `bytes/tx_rate` comes out

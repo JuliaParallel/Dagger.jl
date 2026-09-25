@@ -652,6 +652,16 @@ struct CostSummary
     rate_by_proc::Dict{Processor,UInt64}
     rate_by_type_worker::Dict{Tuple{DataType,Int},UInt64}
     rate_by_type::Dict{DataType,UInt64}
+    # Keys of each table holding exactly one sample (see `_blend!`).
+    once_runtime_by_proc::Set{Tuple{UInt,Processor}}
+    once_runtime_by_type_worker::Set{Tuple{UInt,DataType,Int}}
+    once_runtime_by_type::Set{Tuple{UInt,DataType}}
+    once_runtime_any::Set{UInt}
+    once_alloc_by_proc::Set{Tuple{UInt,Processor}}
+    once_alloc_any::Set{UInt}
+    once_rate_by_proc::Set{Processor}
+    once_rate_by_type_worker::Set{Tuple{DataType,Int}}
+    once_rate_by_type::Set{DataType}
 end
 CostSummary() = CostSummary(ReentrantLock(),
                             Dict{Tuple{UInt,Processor},UInt64}(),
@@ -662,15 +672,40 @@ CostSummary() = CostSummary(ReentrantLock(),
                             Dict{UInt,UInt64}(),
                             Dict{Processor,UInt64}(),
                             Dict{Tuple{DataType,Int},UInt64}(),
-                            Dict{DataType,UInt64}())
+                            Dict{DataType,UInt64}(),
+                            Set{Tuple{UInt,Processor}}(),
+                            Set{Tuple{UInt,DataType,Int}}(),
+                            Set{Tuple{UInt,DataType}}(),
+                            Set{UInt}(),
+                            Set{Tuple{UInt,Processor}}(),
+                            Set{UInt}(),
+                            Set{Processor}(),
+                            Set{Tuple{DataType,Int}}(),
+                            Set{DataType}())
 
 const GLOBAL_COST_SUMMARY = CostSummary()
 global_cost_summary() = GLOBAL_COST_SUMMARY
 
-# Blend a new sample into `table[key]`; the first sample is taken as is.
-function _blend!(table::Dict{K,UInt64}, key::K, value::UInt64) where K
+# Blend a new sample into `table[key]`. The first sample of a key is taken as
+# is and then *replaced* by the second, not blended with it: the first task
+# of a signature on a process compiles it, and that sample can be 1000x the
+# real cost. Blending would decay it, but only as more samples reach the same
+# key -- and a key a processor sees once (a driver thread that ran one of a
+# region's allocation tasks while the rest went elsewhere) keeps its outlier
+# indefinitely. Measured: two driver threads at 140 ms and 281 ms for a task
+# every other thread put at 10-130 us, which sent every later allocation off
+# the driver. Keys not seen a second time are marked in `once`.
+function _blend!(table::Dict{K,UInt64}, once::Set{K}, key::K, value::UInt64) where K
     old = get(table, key, nothing)
-    table[key] = old === nothing ? value : (old + value) ÷ UInt64(2)
+    if old === nothing
+        table[key] = value
+        push!(once, key)
+    elseif key in once
+        table[key] = value
+        delete!(once, key)
+    else
+        table[key] = (old + value) ÷ UInt64(2)
+    end
     return
 end
 
@@ -690,19 +725,19 @@ function summarize_task_metrics!(summary::CostSummary, sig_hash::UInt, proc::Pro
     T = typeof(proc)
     @lock summary.lock begin
         if kernel_ns != 0
-            _blend!(summary.runtime_any, sig_hash, kernel_ns)
-            _blend!(summary.runtime_by_type, (sig_hash, T), kernel_ns)
-            _blend!(summary.runtime_by_proc, (sig_hash, proc), kernel_ns)
-            _blend!(summary.runtime_by_type_worker, (sig_hash, T, worker_id), kernel_ns)
+            _blend!(summary.runtime_any, summary.once_runtime_any, sig_hash, kernel_ns)
+            _blend!(summary.runtime_by_type, summary.once_runtime_by_type, (sig_hash, T), kernel_ns)
+            _blend!(summary.runtime_by_proc, summary.once_runtime_by_proc, (sig_hash, proc), kernel_ns)
+            _blend!(summary.runtime_by_type_worker, summary.once_runtime_by_type_worker, (sig_hash, T, worker_id), kernel_ns)
         end
         if alloc_bytes !== nothing
-            _blend!(summary.alloc_any, sig_hash, alloc_bytes)
-            _blend!(summary.alloc_by_proc, (sig_hash, proc), alloc_bytes)
+            _blend!(summary.alloc_any, summary.once_alloc_any, sig_hash, alloc_bytes)
+            _blend!(summary.alloc_by_proc, summary.once_alloc_by_proc, (sig_hash, proc), alloc_bytes)
         end
         if rate != 0
-            _blend!(summary.rate_by_proc, proc, rate)
-            _blend!(summary.rate_by_type_worker, (T, worker_id), rate)
-            _blend!(summary.rate_by_type, T, rate)
+            _blend!(summary.rate_by_proc, summary.once_rate_by_proc, proc, rate)
+            _blend!(summary.rate_by_type_worker, summary.once_rate_by_type_worker, (T, worker_id), rate)
+            _blend!(summary.rate_by_type, summary.once_rate_by_type, T, rate)
         end
     end
     return
@@ -724,6 +759,29 @@ function runtime_estimate(summary::CostSummary, sig_hash::UInt, proc::Processor,
         r === nothing || return r
         r = get(summary.runtime_by_type_worker, (sig_hash, T, worker_id), nothing)
         r === nothing || return r
+        r = get(summary.runtime_by_type, (sig_hash, T), nothing)
+        r === nothing || return r
+        return get(summary.runtime_any, sig_hash, nothing)
+    end
+end
+
+"""
+    runtime_estimate(summary::CostSummary, sig_hash::UInt, T::Type{<:Processor})
+        -> Union{UInt64, Nothing}
+
+The estimate for a task with signature hash `sig_hash` on any processor of
+type `T`, falling back to any processor. This is what the scheduler ranks
+candidates by: identical processors then cost the same and the tie is broken
+fairly (a shuffle), where per-processor estimates differ by measurement noise
+and by which thread happened to compile the task, and a sort then sends every
+such task to whichever processor once measured lowest (or, with a compiled
+first sample on the driver's threads, away from the driver: a matmul's output
+tiles scattered over remote workers, 1587 MB moved per call against master's
+239 MB). What per-processor estimates exist for -- a processor *type* that is
+genuinely faster for the signature -- this keeps.
+"""
+function runtime_estimate(summary::CostSummary, sig_hash::UInt, T::Type{<:Processor})
+    @lock summary.lock begin
         r = get(summary.runtime_by_type, (sig_hash, T), nothing)
         r === nothing || return r
         return get(summary.runtime_any, sig_hash, nothing)
@@ -784,6 +842,15 @@ function Base.empty!(summary::CostSummary)
         empty!(summary.rate_by_proc)
         empty!(summary.rate_by_type_worker)
         empty!(summary.rate_by_type)
+        empty!(summary.once_runtime_by_proc)
+        empty!(summary.once_runtime_by_type_worker)
+        empty!(summary.once_runtime_by_type)
+        empty!(summary.once_runtime_any)
+        empty!(summary.once_alloc_by_proc)
+        empty!(summary.once_alloc_any)
+        empty!(summary.once_rate_by_proc)
+        empty!(summary.once_rate_by_type_worker)
+        empty!(summary.once_rate_by_type)
     end
     return summary
 end
