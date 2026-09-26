@@ -1799,11 +1799,15 @@ function _distribute_tasks_hierarchical!(queue::DataDepsTaskQueue,
     # partitions are planned individually below. `datadeps_build_schedule!`
     # consults and fills the plan cache, and under uniform execution makes the
     # one exchange every rank must make at this same point.
+    # The planner is told how fast this path will release the tasks it places
+    # (see `DATADEPS_HIER_LAUNCH_NS_PER_TASK`).
     region_plan = if datadeps_uses_aot(queue.scheduler) &&
                      length(unique(partition_affinity_id.(all_procs))) > 1
         region_scope = UnionScope(map(ExactScope, all_procs))
-        _rdag, sched = @hier_phase plan datadeps_build_schedule!(queue.scheduler, seen_tasks,
-                                                                 all_procs, region_scope)
+        release_ns = DATADEPS_HIER_LAUNCH_NS_PER_TASK[]
+        _rdag, sched = @hier_phase plan with(DATADEPS_RELEASE_NS => release_ns) do
+            datadeps_build_schedule!(queue.scheduler, seen_tasks, all_procs, region_scope)
+        end
         sched
     else
         nothing
@@ -1929,10 +1933,13 @@ function _distribute_tasks_hierarchical!(queue::DataDepsTaskQueue,
             for pid in 1:n_partitions
                 partition_schedules[pid] = Dict{DTask,Processor}()
             end
-            schedule_partitions_sequential!(
+            launch_start = time_ns()
+            states = schedule_partitions_sequential!(
                 queue, queue_lock, partitions, dag, seen_tasks,
                 partition_procs, vertex_to_partition, registry,
                 wait_all_queue, value_dep_verts, shared_schedule)
+            record_hier_launch_rate!(length(seen_tasks), time_ns() - launch_start)
+            states
         else
             states = Vector{DataDepsState}(undef, n_partitions)
             @sync for pid in 1:n_partitions

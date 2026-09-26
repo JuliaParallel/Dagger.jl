@@ -443,6 +443,23 @@ end
     end
 end
 
+@testset "Hierarchical Datadeps measures its launch rate" begin
+    # The shared-state path (every multi-worker run) launches a region's
+    # tasks serially, like flat mode, and its planners need that rate too.
+    if nprocs() > 1
+        Dagger.DATADEPS_HIER_LAUNCH_NS_PER_TASK[] = 0.0
+        xs = [zeros(Int, 4) for _ in 1:Dagger.LAUNCH_RATE_MIN_TASKS]
+        Base.ScopedValues.with(DATADEPS_SCHEDULER => RoundRobinScheduler(), Dagger.DATADEPS_HIERARCHICAL => true) do
+            Dagger.spawn_datadeps() do
+                for x in xs
+                    Dagger.@spawn record_worker!(InOut(x))
+                end
+            end
+        end
+        @test Dagger.DATADEPS_HIER_LAUNCH_NS_PER_TASK[] > 0.0
+    end
+end
+
 @testset "A plan computed in one task is reused from another" begin
     # The cache is keyed on DAG structure, so a region submitted from a new
     # task (here `Threads.@spawn`) must hit a plan an earlier task computed

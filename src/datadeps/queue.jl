@@ -272,14 +272,33 @@ Planners use it as the interval at which a region releases its tasks
 """
 const DATADEPS_LAUNCH_NS_PER_TASK = Threads.Atomic{Float64}(0.0)
 
+"""
+    DATADEPS_HIER_LAUNCH_NS_PER_TASK
+
+The same for the hierarchical path's shared-state launch loop
+(`schedule_partitions_sequential!`), which walks every partition's tasks
+from one task just as the flat loop does, only with the aliasing and
+dependency work done beforehand. Kept apart from the flat rate because the
+two loops cost differently per task, and a plan for one path released at the
+other's rate is wrong in the way lesson 62 describes: planned without any
+release times, the hierarchical planners moved a blocked stencil off its
+owners on four MPI nodes (1.7 GB per call against RoundRobin's 24 MB), where
+the flat planners, released at the measured rate, kept it on them.
+"""
+const DATADEPS_HIER_LAUNCH_NS_PER_TASK = Threads.Atomic{Float64}(0.0)
+
 # Regions smaller than this are dominated by fixed per-region costs.
 const LAUNCH_RATE_MIN_TASKS = 16
 
-function record_launch_rate!(ntasks::Int, ns::Integer)
+record_launch_rate!(ntasks::Int, ns::Integer) =
+    _record_launch_rate!(DATADEPS_LAUNCH_NS_PER_TASK, ntasks, ns)
+record_hier_launch_rate!(ntasks::Int, ns::Integer) =
+    _record_launch_rate!(DATADEPS_HIER_LAUNCH_NS_PER_TASK, ntasks, ns)
+function _record_launch_rate!(rate::Threads.Atomic{Float64}, ntasks::Int, ns::Integer)
     ntasks < LAUNCH_RATE_MIN_TASKS && return
     x = Float64(ns) / ntasks
-    old = DATADEPS_LAUNCH_NS_PER_TASK[]
-    DATADEPS_LAUNCH_NS_PER_TASK[] = old == 0.0 ? x : 0.7 * old + 0.3 * x
+    old = rate[]
+    rate[] = old == 0.0 ? x : 0.7 * old + 0.3 * x
     return
 end
 
