@@ -1068,11 +1068,28 @@ function _eft_ready_and_runtime(state::ScheduleState, cache::EFTCostCache, idx::
             ncopies += 1
         end
     end
+    t = cache.proc_space[w]
     @inbounds for a in cache.task_args[idx]
-        r, x = _eft_source(copies, cache, a.data_id, w)
+        d = a.data_id
+        r, x = _eft_source(copies, cache, d, w)
         ready = max(ready, r)
         inbound += x
         x > 0.0 && (ncopies += 1)
+        # A tile written away from its home is copied back at region end
+        # (Datadeps restores every written argument to where it started).
+        # Charged once, to the placement that first moves it: a later writer
+        # on the same space finds the copy there. Without this a writer looked
+        # half as expensive to move as it is, and under MPI on four nodes the
+        # default-mode plans moved Cholesky's and LU's updates off their tiles
+        # (2-4x RoundRobin's traffic, 1.4-1.8x its time).
+        home = cache.data_src[d]
+        if a.writes && home != 0 && home != t && isinf(copies.ready[t, d])
+            rate = cache.move_rates[w, cache.space_rep[home]]
+            if rate > 0.0
+                inbound += cache.data_bytes[d] / rate * 1e9
+                ncopies += 1
+            end
+        end
     end
     ready = max(ready, (idx - 1 + copies.launched + ncopies) * cache.release_ns)
     return ready, cache.task_times[idx, w] + inbound, ncopies

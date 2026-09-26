@@ -1231,13 +1231,14 @@ end
                                  [1, 2], [1, 2], [1e6], [1], Vector{Float64}[], 2e6)
     copies2 = Dagger._eft_copies(cache2)
     # Task 1 writes a datum that lives in space 1: on p2 that is one copy in
+    # and, at region end, one copy back home -- two launches, two transfers
     @test Dagger._eft_ready_and_runtime(state, cache2, 1, 1, copies2) == (0.0, 1e6, 0)
-    @test Dagger._eft_ready_and_runtime(state, cache2, 1, 2, copies2) == (2e6, 2e6, 1)
-    Dagger._eft_record_copies!(copies2, cache2, 1, 2, 4e6, 1)
-    @test copies2.launched == 1
+    @test Dagger._eft_ready_and_runtime(state, cache2, 1, 2, copies2) == (4e6, 3e6, 2)
+    Dagger._eft_record_copies!(copies2, cache2, 1, 2, 7e6, 2)
+    @test copies2.launched == 2
     # Task 2 reads it where task 1 left it (space 2): no copy there, and its
-    # launch slot is one interval later than its index alone would give
-    @test Dagger._eft_ready_and_runtime(state, cache2, 2, 2, copies2) == (4e6, 1e6, 0)
+    # launch slot is two intervals later than its index alone would give
+    @test Dagger._eft_ready_and_runtime(state, cache2, 2, 2, copies2) == (7e6, 1e6, 0)
     @test Dagger._eft_ready_and_runtime(state, cache2, 2, 1, copies2)[3] == 1
     # Hand-built caches default to no launch model.
     nolaunch = Dagger.EFTCostCache(fill(1e6, 3, 2), trues(3, 2), sp,
