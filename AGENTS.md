@@ -828,3 +828,20 @@ lesson.
    When a policy misbehaves only in one mode, dump the cost table it
    actually built in that mode (`_build_eft_cost_cache`) -- the "move rates
    0.00" line was the whole story.
+
+69. **A cost term that is right in principle can erase a real win if its
+   constant is wrong; the two plans bracket the number to measure.** With
+   the planners deciding placement in the default mode on four Distributed
+   nodes, Greedy ran Cholesky at 256² tiles 40% faster than master's
+   default, moving 16 MB more than RoundRobin: it moved a few update tasks
+   off the diagonal's owners onto idle processes. The same model moved LU's
+   and matmul's tiles wholesale and lost 1.6-4.6x. The missing term was
+   the copy back of a written tile at region end, which Datadeps always
+   pays; charged as one more transfer and one more launch, LU and matmul
+   went to parity -- and so did Cholesky, because the charge is too coarse
+   for the few cheap moves that won. Under MPI the same term took Cholesky
+   and LU at 512² from 1.6-1.8x to 1.0x. So the term belongs, and its size
+   does not: the model needs a measured per-copy cost (fixed overhead,
+   which every rank pays under uniform execution, plus a rate from copies of
+   the right size), not a guess. When adding a term flips cells both ways,
+   stop tuning it and instrument what it stands for.
