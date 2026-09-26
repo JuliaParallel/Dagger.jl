@@ -40,6 +40,15 @@ MultiRemainderAliasing() = MultiRemainderAliasing(RemainderAliasing[])
 
 memory_spans(mra::MultiRemainderAliasing) = vcat(memory_spans.(mra.remainders)...)
 
+# What a remainder copy moves, for its move-rate record (see `move_toplevel!`).
+function _move_bytes(dep_mod::Union{RemainderAliasing,MultiRemainderAliasing}, @nospecialize(source))
+    total = UInt64(0)
+    for (_, dst) in memory_spans(dep_mod)
+        total += UInt64(dst.len)
+    end
+    return total == 0 ? nothing : total
+end
+
 Base.hash(mra::MultiRemainderAliasing, h::UInt) = hash(mra.remainders, hash(MultiRemainderAliasing, h))
 Base.:(==)(mra1::MultiRemainderAliasing, mra2::MultiRemainderAliasing) = mra1.remainders == mra2.remainders
 

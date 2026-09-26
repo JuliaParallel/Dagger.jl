@@ -133,6 +133,12 @@ _move_source_size(source::Chunk) =
 # moves still record their spaces, just without a size to derive a rate from.
 _move_source_size(@nospecialize(source)) = nothing
 
+# The bytes a copy actually moves: the whole source, unless the copy is a
+# remainder (a halo, a partial refresh), which `datadeps/remainders.jl` sizes
+# by its spans -- the source it is cut from would give a rate hundreds of
+# times too high.
+_move_bytes(@nospecialize(dep_mod), @nospecialize(source)) = _move_source_size(source)
+
 """
     move_toplevel!(dep_mod, dest_space, source_space, dest, source)
 
@@ -154,7 +160,7 @@ function move_toplevel!(dep_mod, dest_space::MemorySpace, source_space::MemorySp
     if tls !== nothing && tls.metrics_cache !== nothing
         thunk_id = tls.sch_handle.thunk_id.id
         _record_move_metrics!(tls.metrics_cache, thunk_id, source_space, dest_space,
-                              _move_source_size(source))
+                              _move_bytes(dep_mod, source))
     end
     return result
 end

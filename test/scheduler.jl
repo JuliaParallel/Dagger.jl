@@ -735,6 +735,19 @@ end
             @test MetricsTracker.lookup_value(snap, Dagger, :execute!, Dagger.MoveSizeMetric(), test_key) == UInt64(4096)
         end
 
+        @testset "A remainder copy is sized by its spans" begin
+            # A halo copy moves a few kilobytes cut from a megabyte tile; the
+            # tile's size would give a rate hundreds of times too high.
+            space = Dagger.memory_space(1)
+            spans = [(Dagger.LocalMemorySpan(UInt(0), UInt(2048)), Dagger.LocalMemorySpan(UInt(0), UInt(2048))),
+                     (Dagger.LocalMemorySpan(UInt(0), UInt(1024)), Dagger.LocalMemorySpan(UInt(0), UInt(1024)))]
+            ra = Dagger.RemainderAliasing(space, spans, Dagger.AliasingWrapper[], Set{Dagger.ThunkSyncdep}())
+            big = Dagger.tochunk(zeros(1024, 1024))
+            @test Dagger._move_bytes(ra, big) == UInt64(3072)
+            @test Dagger._move_bytes(Dagger.MultiRemainderAliasing([ra, ra]), big) == UInt64(6144)
+            @test Dagger._move_bytes(identity, big) == Dagger._move_source_size(big)
+        end
+
         @testset "_record_move_metrics! skips MoveSizeMetric when size is nothing" begin
             cache = MetricsTracker.MetricsCache()
             src_space = Dagger.memory_space(1)

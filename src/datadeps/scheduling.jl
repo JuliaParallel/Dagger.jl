@@ -567,7 +567,15 @@ function _propagate_aot_time_util!(spec::DTaskSpec, proc::Processor, task_time_n
 end
 
 const GREEDY_DEFAULT_RUNTIME_NS = UInt64(1_000_000_000)
-const GREEDY_DEFAULT_TRANSFER_RATE = UInt64(1_000_000)
+# Bytes per second assumed for a space pair no copy has been timed between.
+# The order of any node interconnect (the four-node cluster measured 0.7-1.5
+# GB/s between ranks, loopback about the same). It was 1 MB/s, which priced
+# an unmeasured copy 1000x above a measured one: in hierarchical mode, where
+# a stencil's warm-ups move only halos (too small to time a rate from), a
+# plan then charged a task 0.5 s for each cross-rank neighbor tile even on
+# its own owner, and since every placement looked that bad the ranking was
+# noise -- 49 of 64 tasks on their owner, 540 MB moved per call.
+const GREEDY_DEFAULT_TRANSFER_RATE = UInt64(1_000_000_000)
 const GREEDY_DEFAULT_OUTPUT_SIZE = UInt64(1_048_576)
 
 # EFTCostCache caches the outputs of every `_eft_runtime_ns` and
