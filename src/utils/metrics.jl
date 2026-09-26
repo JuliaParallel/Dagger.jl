@@ -652,6 +652,10 @@ struct CostSummary
     rate_by_proc::Dict{Processor,UInt64}
     rate_by_type_worker::Dict{Tuple{DataType,Int},UInt64}
     rate_by_type::Dict{DataType,UInt64}
+    # Per (signature, worker): the processor that reported the process's
+    # first runtime sample -- the one that compiled the task -- until the
+    # process reports a second, then `nothing` (see `summarize_task_metrics!`).
+    first_runtime_proc::Dict{Tuple{UInt,Int},Union{Processor,Nothing}}
     # Keys of each table holding exactly one sample (see `_blend!`).
     once_runtime_by_proc::Set{Tuple{UInt,Processor}}
     once_runtime_by_type_worker::Set{Tuple{UInt,DataType,Int}}
@@ -673,6 +677,7 @@ CostSummary() = CostSummary(ReentrantLock(),
                             Dict{Processor,UInt64}(),
                             Dict{Tuple{DataType,Int},UInt64}(),
                             Dict{DataType,UInt64}(),
+                            Dict{Tuple{UInt,Int},Union{Processor,Nothing}}(),
                             Set{Tuple{UInt,Processor}}(),
                             Set{Tuple{UInt,DataType,Int}}(),
                             Set{Tuple{UInt,DataType}}(),
@@ -725,10 +730,49 @@ function summarize_task_metrics!(summary::CostSummary, sig_hash::UInt, proc::Pro
     T = typeof(proc)
     @lock summary.lock begin
         if kernel_ns != 0
-            _blend!(summary.runtime_any, summary.once_runtime_any, sig_hash, kernel_ns)
-            _blend!(summary.runtime_by_type, summary.once_runtime_by_type, (sig_hash, T), kernel_ns)
-            _blend!(summary.runtime_by_proc, summary.once_runtime_by_proc, (sig_hash, proc), kernel_ns)
-            _blend!(summary.runtime_by_type_worker, summary.once_runtime_by_type_worker, (sig_hash, T, worker_id), kernel_ns)
+            # A process compiles a signature once, on whichever processor ran
+            # it first, and that sample can be 1000x the real cost. Within the
+            # process the `_blend!` rule replaces it with the second sample --
+            # but only in the tiers keyed by the processor that took it, and a
+            # processor that never runs the signature again would keep the
+            # outlier for good (measured: a planner then stacked two
+            # independent tasks on one thread to avoid the other). So the
+            # process's second sample, wherever it lands, evicts a first sample
+            # still alone in its per-processor entry; and a process's first
+            # sample is used in the cross-process tiers only when they are
+            # still empty, since those have real samples from elsewhere.
+            key_pw = (sig_hash, worker_id)
+            first_proc = get(summary.first_runtime_proc, key_pw, missing)
+            if first_proc === missing
+                summary.first_runtime_proc[key_pw] = proc
+                # Used only while nothing measured elsewhere exists for the
+                # processor type: a lookup for this process then falls through
+                # to the other processes' real numbers, which beat a known
+                # compile-time outlier (a planner given 12 ms for a 5 us task
+                # on a worker that had run it once serialized two independent
+                # tasks on the driver rather than use that worker).
+                if !haskey(summary.runtime_by_type, (sig_hash, T))
+                    _blend!(summary.runtime_by_proc, summary.once_runtime_by_proc, (sig_hash, proc), kernel_ns)
+                    _blend!(summary.runtime_by_type_worker, summary.once_runtime_by_type_worker, (sig_hash, T, worker_id), kernel_ns)
+                    _blend!(summary.runtime_by_type, summary.once_runtime_by_type, (sig_hash, T), kernel_ns)
+                    haskey(summary.runtime_any, sig_hash) ||
+                        _blend!(summary.runtime_any, summary.once_runtime_any, sig_hash, kernel_ns)
+                end
+            else
+                if first_proc !== nothing
+                    # The process's second sample: settle, and evict the
+                    # first if it is alone in another processor's entry.
+                    if first_proc !== proc && (sig_hash, first_proc) in summary.once_runtime_by_proc
+                        delete!(summary.runtime_by_proc, (sig_hash, first_proc))
+                        delete!(summary.once_runtime_by_proc, (sig_hash, first_proc))
+                    end
+                    summary.first_runtime_proc[key_pw] = nothing
+                end
+                _blend!(summary.runtime_any, summary.once_runtime_any, sig_hash, kernel_ns)
+                _blend!(summary.runtime_by_type, summary.once_runtime_by_type, (sig_hash, T), kernel_ns)
+                _blend!(summary.runtime_by_proc, summary.once_runtime_by_proc, (sig_hash, proc), kernel_ns)
+                _blend!(summary.runtime_by_type_worker, summary.once_runtime_by_type_worker, (sig_hash, T, worker_id), kernel_ns)
+            end
         end
         if alloc_bytes !== nothing
             _blend!(summary.alloc_any, summary.once_alloc_any, sig_hash, alloc_bytes)
@@ -842,6 +886,7 @@ function Base.empty!(summary::CostSummary)
         empty!(summary.rate_by_proc)
         empty!(summary.rate_by_type_worker)
         empty!(summary.rate_by_type)
+        empty!(summary.first_runtime_proc)
         empty!(summary.once_runtime_by_proc)
         empty!(summary.once_runtime_by_type_worker)
         empty!(summary.once_runtime_by_type)

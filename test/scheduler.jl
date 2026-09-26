@@ -632,6 +632,34 @@ end
             @test Dagger.runtime_estimate(summary, h, p1, 1) == UInt64(400)
             @test Dagger.runtime_estimate(summary, h, Dagger.ThreadProc) == (UInt64(400) + UInt64(50_000)) ÷ 2
             @test Dagger.runtime_estimate(summary, h, Dagger.OSProc) == Dagger.runtime_estimate(summary, h)
+            # A process's first sample of a signature compiled it. Once the
+            # type has real samples from elsewhere, that first sample is not
+            # recorded at all: a lookup for the process falls through to them.
+            Dagger.summarize_task_metrics!(summary, h, p3, 2; kernel_ns=UInt64(1_000_000))
+            @test Dagger.runtime_estimate(summary, h, p3, 2) == (UInt64(400) + UInt64(50_000)) ÷ 2
+            @test Dagger.runtime_estimate(summary, h, Dagger.ThreadProc) == (UInt64(400) + UInt64(50_000)) ÷ 2
+            # The process's second sample is real, wherever it lands
+            p4 = Dagger.ThreadProc(2, 2)
+            Dagger.summarize_task_metrics!(summary, h, p4, 2; kernel_ns=UInt64(700))
+            @test Dagger.runtime_estimate(summary, h, p4, 2) == UInt64(700)
+            @test Dagger.runtime_estimate(summary, h, p3, 2) == UInt64(700)
+            # While nothing has measured a type anywhere, the first sample is
+            # the estimate, and the process's second replaces it
+            h2 = Dagger.signature_hash(Any[typeof(*), Int, Int])
+            Dagger.summarize_task_metrics!(summary, h2, p1, 1; kernel_ns=UInt64(9_000_000))
+            @test Dagger.runtime_estimate(summary, h2, p1, 1) == UInt64(9_000_000)
+            @test Dagger.runtime_estimate(summary, h2, p3, 2) == UInt64(9_000_000)
+            Dagger.summarize_task_metrics!(summary, h2, p2, 1; kernel_ns=UInt64(60))
+            @test Dagger.runtime_estimate(summary, h2, p2, 1) == UInt64(60)
+            @test Dagger.runtime_estimate(summary, h2, p1, 1) == UInt64(60)
+            @test Dagger.runtime_estimate(summary, h2, p3, 2) == UInt64(60)
+            # Later samples on other processors of a settled process are kept
+            p5 = Dagger.ThreadProc(2, 3)
+            Dagger.summarize_task_metrics!(summary, h, p5, 2; kernel_ns=UInt64(900))
+            Dagger.summarize_task_metrics!(summary, h, p3, 2; kernel_ns=UInt64(800))
+            @test Dagger.runtime_estimate(summary, h, p4, 2) == UInt64(700)
+            @test Dagger.runtime_estimate(summary, h, p5, 2) == UInt64(900)
+            @test Dagger.runtime_estimate(summary, h, p3, 2) == UInt64(800)
             # Another signature is separate
             @test Dagger.runtime_estimate(summary, Dagger.signature_hash(Any[typeof(-), Int]), p1, 1) === nothing
             # Allocation is by signature and processor; a transfer rate is by
