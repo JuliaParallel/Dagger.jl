@@ -1115,16 +1115,26 @@ single_owner_partition_count(ntasks::Int, nprocs::Int) =
     1
 
 """
-    partition_dag(dag, task_metas, all_procs) -> (vertex_to_partition, n_partitions, partition_procs)
+    partition_dag(dag, task_metas, all_procs; schedule=nothing)
+        -> (vertex_to_partition, n_partitions, partition_procs, multi_owner)
 
-Phase 3: Assigns each task vertex to a partition using data-affinity. For
-multi-owner setups (Distributed workers, or MPI ranks via
-`partition_affinity_id`), tasks are assigned to the owner holding the most
-argument data. For single-owner multi-threaded setups, tasks are balanced
-across available processors in topological order.
+Phase 3: Assigns each task vertex to a partition. For multi-owner setups
+(Distributed workers, or MPI ranks via `partition_affinity_id`), a task goes to
+the owner of the processor an AOT `schedule` placed it on, if there is one,
+and otherwise to the owner holding the most of its argument data. For
+single-owner multi-threaded setups, tasks are balanced across available
+processors in topological order.
+
+Letting the plan pick the owner is what puts a cost-model planner in charge of
+placement in this, the default, mode. Before, the plan was made after
+partitioning and any placement outside a task's partition was dropped, so
+the planners could only choose a thread within the owner that data affinity
+had already chosen, and their cross-process decisions -- the ones that beat
+RoundRobin by up to 2x in flat mode -- never took effect here.
 """
 function partition_dag(dag::SimpleDiGraph, task_metas::Vector{HierarchicalTaskMeta},
-                       all_procs::Vector{<:Processor})
+                       all_procs::Vector{<:Processor};
+                       schedule::Union{Dict{DTask,Processor},Nothing}=nothing)
     n = length(task_metas)
     # Stable order so SPMD ranks (and Distributed workers) agree on partition
     # indexing when affinity ids are collected from an unordered processor set.
@@ -1189,6 +1199,18 @@ function partition_dag(dag::SimpleDiGraph, task_metas::Vector{HierarchicalTaskMe
             if length(matching) == 1
                 vertex_to_partition[v] = only(matching)
                 continue
+            end
+
+            # A planned processor names the owner outright.
+            if schedule !== nothing
+                planned = get(schedule, meta.pair.task, nothing)
+                if planned !== nothing
+                    pidx = get(owner_to_partition, partition_affinity_id(planned), 0)
+                    if pidx > 0 && pidx in matching
+                        vertex_to_partition[v] = pidx
+                        continue
+                    end
+                end
             end
 
             # Owners are ranked by (written args, read args) rather than by one
@@ -1771,9 +1793,25 @@ function _distribute_tasks_hierarchical!(queue::DataDepsTaskQueue,
     # Phase 2: Build dependency DAG
     dag = @hier_phase dag build_dependency_dag(task_metas, arg_to_ainfo, ainfos_overlaps)
 
+    # Plan the whole region over every processor *before* partitioning, so the
+    # plan chooses each task's owner (see `partition_dag`). Only worth doing
+    # when there is more than one owner to choose between; a single owner's
+    # partitions are planned individually below. `datadeps_build_schedule!`
+    # consults and fills the plan cache, and under uniform execution makes the
+    # one exchange every rank must make at this same point.
+    region_plan = if datadeps_uses_aot(queue.scheduler) &&
+                     length(unique(partition_affinity_id.(all_procs))) > 1
+        region_scope = UnionScope(map(ExactScope, all_procs))
+        _rdag, sched = @hier_phase plan datadeps_build_schedule!(queue.scheduler, seen_tasks,
+                                                                 all_procs, region_scope)
+        sched
+    else
+        nothing
+    end
+
     # Phase 3: Partition the DAG
     vertex_to_partition, n_partitions, partition_procs, multi_owner =
-        @hier_phase partition partition_dag(dag, task_metas, all_procs)
+        @hier_phase partition partition_dag(dag, task_metas, all_procs; schedule=region_plan)
 
     # Detect backing chunks shared across partitions in different memory spaces.
     # These need runtime ownership transfer to avoid split-brain concurrent
@@ -1845,12 +1883,15 @@ function _distribute_tasks_hierarchical!(queue::DataDepsTaskQueue,
     # See PERF(hier-2)/(hier-3).
     exec_spaces = unique(Iterators.flatten(memory_spaces(proc) for proc in all_procs))
     use_shared_state = uniform_execution(accel) || length(exec_spaces) > 1
-    # Look for a cached AOT schedule for the region as a whole before doing any
-    # per-partition planning; on a hit each partition just filters it, and no
-    # partition-local AOT runs at all.
+    # Unless the region was planned above, look for a cached AOT schedule for
+    # the region as a whole before doing any per-partition planning; on a hit
+    # each partition just filters it, and no partition-local AOT runs at all.
     region_uids = Set{UInt}(pair.task.uid for pair in seen_tasks)
-    region_dag_spec, precomputed_schedule, stale_schedule =
+    region_dag_spec, precomputed_schedule, stale_schedule = if region_plan === nothing
         _hierarchical_schedule_cache_lookup(queue.scheduler, seen_tasks)
+    else
+        DAGSpec(), nothing, nothing
+    end
 
     partition_schedules = Vector{Dict{DTask,Processor}}(undef, n_partitions)
     partition_states = @hier_phase schedule try
@@ -1864,7 +1905,12 @@ function _distribute_tasks_hierarchical!(queue::DataDepsTaskQueue,
             # multi-worker run, which is exactly where placement matters most.
             # Leaving the schedule empty would silently reduce every AOT
             # scheduler to JIT round-robin there.
-            shared_schedule = if precomputed_schedule !== nothing
+            shared_schedule = if region_plan !== nothing
+                # Multi-owner: planned before partitioning, and the partitions
+                # follow the plan, so every assignment is within its
+                # partition's `local_procs`.
+                region_plan
+            elseif precomputed_schedule !== nothing
                 # The same exchange `datadeps_build_schedule!` makes on a miss,
                 # so every rank makes exactly one either way.
                 uniform_aot_schedule!(accel, precomputed_schedule, seen_tasks, all_procs)
@@ -1877,11 +1923,9 @@ function _distribute_tasks_hierarchical!(queue::DataDepsTaskQueue,
             # `datadeps_build_schedule!` already cached what it computed, keyed
             # on the region DAG, so there is nothing further to persist below.
             # N.B. `_schedule_vertex!` drops any assignment naming a processor
-            # outside its partition's `local_procs`. When the region is
-            # single-owner every partition holds all of `all_procs`, so the
-            # whole plan applies; when it is multi-owner, partitioning has
-            # already fixed each task's owner for data-locality reasons and AOT
-            # only refines placement within that choice.
+            # outside its partition's `local_procs`, which can only happen
+            # for a single-owner region whose `all_procs` changed since the
+            # plan was cached.
             for pid in 1:n_partitions
                 partition_schedules[pid] = Dict{DTask,Processor}()
             end

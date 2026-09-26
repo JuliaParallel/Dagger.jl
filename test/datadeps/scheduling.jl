@@ -156,8 +156,10 @@ function run_n_times(f, n::Int; scheduler::DataDepsScheduler = LayeredScheduler(
 end
 
 # Simple test kernels
-add!(X, Y) = (X .+= Y; X)
-scale!(X, a) = (X .*= a; X)
+# Defined everywhere: in the default (hierarchical) mode a plan may put these
+# tasks on a worker.
+@everywhere add!(X, Y) = (X .+= Y; X)
+@everywhere scale!(X, a) = (X .*= a; X)
 
 # ---------- DAGSpec construction ----------
 
@@ -391,6 +393,53 @@ end
         @test length(cache) == 1 && !cache[1].second.provisional
         region()
         @test s.plans[] == 2
+    end
+end
+
+# A planner that puts every task on one processor, to show where the default
+# (hierarchical) mode lets a plan decide.
+struct PinPlanner <: DataDepsScheduler
+    proc::Dagger.Processor
+end
+Dagger.datadeps_uses_aot(::PinPlanner) = true
+Dagger.datadeps_schedule_cache(::PinPlanner) = datadeps_schedule_cache(GreedyScheduler())
+Dagger.datadeps_schedule_task(s::PinPlanner, args...) = Dagger.datadeps_schedule_task(RoundRobinScheduler(), args...)
+Base.similar(s::PinPlanner) = s
+function Dagger.datadeps_schedule_dag_aot!(s::PinPlanner, schedule, dag_spec, all_procs, all_scope)
+    s.proc in all_procs || return
+    for k in 1:Dagger.nv(dag_spec.g)
+        schedule[dag_spec.id_to_task[k]] = s.proc
+    end
+end
+@everywhere record_worker!(x) = (x[1] = myid(); x)
+
+@testset "The plan chooses each task's process in hierarchical mode" begin
+    # Data affinity would keep a task on the worker holding its arguments;
+    # a plan that puts it elsewhere must win, or the planners never act on the
+    # default path. RoundRobin (no plan) keeps affinity.
+    if nprocs() > 1
+        w = last(workers())
+        wproc = first(filter(p -> p isa Dagger.ThreadProc && p.owner == w, collect(Dagger.all_processors())))
+        empty!(datadeps_schedule_cache(GreedyScheduler()))
+        xs = [zeros(Int, 4) for _ in 1:6]
+        Base.ScopedValues.with(DATADEPS_SCHEDULER => PinPlanner(wproc), Dagger.DATADEPS_HIERARCHICAL => true) do
+            Dagger.spawn_datadeps() do
+                for x in xs
+                    Dagger.@spawn record_worker!(InOut(x))
+                end
+            end
+        end
+        @test all(x -> x[1] == w, xs)
+        ys = [zeros(Int, 4) for _ in 1:6]
+        Base.ScopedValues.with(DATADEPS_SCHEDULER => RoundRobinScheduler(), Dagger.DATADEPS_HIERARCHICAL => true) do
+            Dagger.spawn_datadeps() do
+                for y in ys
+                    Dagger.@spawn record_worker!(InOut(y))
+                end
+            end
+        end
+        @test all(y -> y[1] == myid(), ys)
+        empty!(datadeps_schedule_cache(GreedyScheduler()))
     end
 end
 
