@@ -1202,8 +1202,8 @@ end
                                 [[1e9, 0.0] for _ in 1:4])
     copies = Dagger._eft_copies(cache)
     state = ScheduleState()
-    @test Dagger._eft_ready_and_runtime(state, cache, 1, 2, copies) == (0.0, 2e9)
-    @test Dagger._eft_ready_and_runtime(state, cache, 1, 1, copies) == (0.0, 6e9)
+    @test Dagger._eft_ready_and_runtime(state, cache, 1, 2, copies) == (0.0, 2e9, 0)
+    @test Dagger._eft_ready_and_runtime(state, cache, 1, 1, copies) == (0.0, 6e9, 4)
     # So a second such task queues behind the first where the tiles live
     # (finishing at 4 s) rather than pulling all four to the idle process (6 s).
     # Charging only the latest arrival, it would have moved (finishing at 3 s).
@@ -1220,8 +1220,25 @@ end
                                 [1, 2], [1, 2], Float64[], Int[], Vector{Float64}[], 2e6)
     copies = Dagger._eft_copies(cache)
     state = ScheduleState()
-    @test Dagger._eft_ready_and_runtime(state, cache, 1, 1, copies) == (0.0, 1e6)
-    @test Dagger._eft_ready_and_runtime(state, cache, 3, 2, copies) == (4e6, 1e6)
+    @test Dagger._eft_ready_and_runtime(state, cache, 1, 1, copies) == (0.0, 1e6, 0)
+    @test Dagger._eft_ready_and_runtime(state, cache, 3, 2, copies) == (4e6, 1e6, 0)
+    # Every copy a placement needs is launched too, before the task, and so
+    # delays it and everything after it by one launch interval each.
+    cache2 = Dagger.EFTCostCache(fill(1e6, 3, 2), trues(3, 2), sp,
+                                 Dict{Dagger.Processor,Int}(p1 => 1, p2 => 2), [0.0 1e9; 1e9 0.0],
+                                 [[Dagger.EFTArg(1, true)], [Dagger.EFTArg(1, false)], Dagger.EFTArg[]],
+                                 [Int[] for _ in 1:3], sp,
+                                 [1, 2], [1, 2], [1e6], [1], Vector{Float64}[], 2e6)
+    copies2 = Dagger._eft_copies(cache2)
+    # Task 1 writes a datum that lives in space 1: on p2 that is one copy in
+    @test Dagger._eft_ready_and_runtime(state, cache2, 1, 1, copies2) == (0.0, 1e6, 0)
+    @test Dagger._eft_ready_and_runtime(state, cache2, 1, 2, copies2) == (2e6, 2e6, 1)
+    Dagger._eft_record_copies!(copies2, cache2, 1, 2, 4e6, 1)
+    @test copies2.launched == 1
+    # Task 2 reads it where task 1 left it (space 2): no copy there, and its
+    # launch slot is one interval later than its index alone would give
+    @test Dagger._eft_ready_and_runtime(state, cache2, 2, 2, copies2) == (4e6, 1e6, 0)
+    @test Dagger._eft_ready_and_runtime(state, cache2, 2, 1, copies2)[3] == 1
     # Hand-built caches default to no launch model.
     nolaunch = Dagger.EFTCostCache(fill(1e6, 3, 2), trues(3, 2), sp,
                                    Dict{Dagger.Processor,Int}(p1 => 1, p2 => 2), [0.0 1e9; 1e9 0.0],

@@ -954,15 +954,19 @@ read by many tasks look expensive to spread: the plans piled work onto a few
 processes (on 4 nodes, 244 of 576 matmul tasks on one rank) and lost to
 round-robin placement on matmul and LU.
 """
-struct EFTCopies
-    ready::Matrix{Float64}
+mutable struct EFTCopies
+    const ready::Matrix{Float64}
     # Still only where it started, outside every space of the plan's procs.
-    external::BitVector
+    const external::BitVector
+    # Copies the plan has committed to so far. Each is a task the launcher
+    # spawns before the task that needs it, at the same rate it releases
+    # tasks (see `_eft_ready_and_runtime`).
+    launched::Int
 end
 
 function _eft_copies(cache::EFTCostCache)
     n_data = length(cache.data_bytes)
-    copies = EFTCopies(fill(Inf, length(cache.spaces), n_data), falses(n_data))
+    copies = EFTCopies(fill(Inf, length(cache.spaces), n_data), falses(n_data), 0)
     @inbounds for d in 1:n_data
         s = cache.data_src[d]
         if s == 0
@@ -1012,11 +1016,19 @@ function _eft_arrival_ns(copies::EFTCopies, cache::EFTCostCache, d::Int, w::Int)
 end
 
 """
-    _eft_ready_and_runtime(state, cache, idx, w, copies) -> (ready_ns, busy_ns)
+    _eft_ready_and_runtime(state, cache, idx, w, copies) -> (ready_ns, busy_ns, ncopies)
 
-When task `idx` could start on processor `w`, and how long it would then occupy
-`w`: its own runtime plus bringing in every input it does not already have.
-It cannot start before it is launched (see `DATADEPS_RELEASE_NS`).
+When task `idx` could start on processor `w`, how long it would then occupy
+`w` (its own runtime plus bringing in every input it does not already have),
+and how many copies that placement adds. It cannot start before it is
+launched (see `DATADEPS_RELEASE_NS`), and every copy is launched too: the
+launcher spawns a task's copies before the task, one launch interval each,
+so a placement that needs `k` copies is released `k` intervals later, and
+so is every task after it. Without that term, once the hierarchical path's
+faster launch was modeled, moving a blocked stencil's tasks off their owners
+looked cheap and the planners moved 40% of them (540 MB per call against
+RoundRobin's 24 MB on four MPI nodes); with it, a copy costs what it costs
+the launcher as well as the receiver.
 
 Datadeps moves an input with a copy task scoped to the *receiving* processor,
 so moving data is work that processor does, one copy after another, before
@@ -1035,27 +1047,35 @@ placeholder output size. Each data argument comes from its nearest valid copy
 """
 function _eft_ready_and_runtime(state::ScheduleState, cache::EFTCostCache, idx::Int,
                                 w::Int, copies::EFTCopies)
-    ready = (idx - 1) * cache.release_ns
+    ready = 0.0
     inbound = 0.0
+    ncopies = 0
     @inbounds for dep_id in cache.task_deps[idx]
         dep_proc = get(state.task_proc, dep_id, nothing)
         dep_proc === nothing && continue
         ready = max(ready, get(state.task_finish_ns, dep_id, 0.0))
         rate = cache.move_rates[cache.proc_to_idx[dep_proc], w]
-        rate > 0.0 && (inbound += Float64(GREEDY_DEFAULT_OUTPUT_SIZE) / rate * 1e9)
+        if rate > 0.0
+            inbound += Float64(GREEDY_DEFAULT_OUTPUT_SIZE) / rate * 1e9
+            ncopies += 1
+        end
     end
     @inbounds for a in cache.task_args[idx]
         r, x = _eft_source(copies, cache, a.data_id, w)
         ready = max(ready, r)
         inbound += x
+        x > 0.0 && (ncopies += 1)
     end
-    return ready, cache.task_times[idx, w] + inbound
+    ready = max(ready, (idx - 1 + copies.launched + ncopies) * cache.release_ns)
+    return ready, cache.task_times[idx, w] + inbound, ncopies
 end
 
-# Record task `idx`, placed on processor `w` and finishing at `finish`: what it
-# writes now exists only there; what it reads gains a copy there.
+# Record task `idx`, placed on processor `w` and finishing at `finish` after
+# `ncopies` copies: what it writes now exists only there; what it reads gains
+# a copy there.
 function _eft_record_copies!(copies::EFTCopies, cache::EFTCostCache, idx::Int,
-                             w::Int, finish::Float64)
+                             w::Int, finish::Float64, ncopies::Int=0)
+    copies.launched += ncopies
     t = cache.proc_space[w]
     @inbounds for a in cache.task_args[idx]
         a.writes || continue
@@ -1087,12 +1107,13 @@ function greedy_assign_task!(state::ScheduleState, snap::MT.MetricsSnapshot,
     best_proc = nothing
     best_w = 0
     best_finish = Inf
+    best_ncopies = 0
     best_data_ready = 0.0
     best_runtime = 0.0
     @inbounds for w in 1:n_procs
         cache.proc_compatible[idx, w] || continue
         proc = all_procs[w]
-        data_ready_ns, runtime_ns = _eft_ready_and_runtime(state, cache, idx, w, copies)
+        data_ready_ns, runtime_ns, ncopies = _eft_ready_and_runtime(state, cache, idx, w, copies)
         finish = _peek_slot(state, proc, data_ready_ns, runtime_ns)
         if finish < best_finish
             best_finish = finish
@@ -1100,6 +1121,7 @@ function greedy_assign_task!(state::ScheduleState, snap::MT.MetricsSnapshot,
             best_w = w
             best_data_ready = data_ready_ns
             best_runtime = runtime_ns
+            best_ncopies = ncopies
         end
     end
 
@@ -1112,7 +1134,7 @@ function greedy_assign_task!(state::ScheduleState, snap::MT.MetricsSnapshot,
     # Commit to the slot that produced `best_finish`; `_claim_slot!` recomputes
     # the same value from the same earliest-free slot.
     state.task_finish_ns[idx] = _claim_slot!(state, best_proc, best_data_ready, best_runtime)
-    _eft_record_copies!(copies, cache, idx, best_w, state.task_finish_ns[idx])
+    _eft_record_copies!(copies, cache, idx, best_w, state.task_finish_ns[idx], best_ncopies)
     return best_proc
 end
 
@@ -1149,14 +1171,14 @@ function greedy_assign_task_randomized!(state::ScheduleState, snap::MT.MetricsSn
     # will need (data_ready, runtime), and track the best finish. Peeking does
     # not mutate slot state, so all candidates are evaluated against the same
     # partial schedule — exactly as the deterministic variant does.
-    cand = Tuple{Processor,Float64,Float64,Float64}[]
+    cand = Tuple{Processor,Float64,Float64,Float64,Int}[]
     best_finish = Inf
     @inbounds for w in 1:n_procs
         cache.proc_compatible[idx, w] || continue
         proc = all_procs[w]
-        data_ready_ns, runtime_ns = _eft_ready_and_runtime(state, cache, idx, w, copies)
+        data_ready_ns, runtime_ns, ncopies = _eft_ready_and_runtime(state, cache, idx, w, copies)
         finish = _peek_slot(state, proc, data_ready_ns, runtime_ns)
-        push!(cand, (proc, data_ready_ns, runtime_ns, finish))
+        push!(cand, (proc, data_ready_ns, runtime_ns, finish, ncopies))
         finish < best_finish && (best_finish = finish)
     end
 
@@ -1180,10 +1202,10 @@ function greedy_assign_task_randomized!(state::ScheduleState, snap::MT.MetricsSn
         end
     end
 
-    proc, dr, rt, _ = chosen
+    proc, dr, rt, _, nc = chosen
     state.task_proc[idx] = proc
     state.task_finish_ns[idx] = _claim_slot!(state, proc, dr, rt)
-    _eft_record_copies!(copies, cache, idx, cache.proc_to_idx[proc], state.task_finish_ns[idx])
+    _eft_record_copies!(copies, cache, idx, cache.proc_to_idx[proc], state.task_finish_ns[idx], nc)
     return proc
 end
 
@@ -1521,15 +1543,16 @@ function _replay_schedule!(state::ScheduleState, snap::MT.MetricsSnapshot,
             proc = state.task_proc[idx]
             w = get(cache.proc_to_idx, proc, 0)
             spec = dag_spec.id_to_spec[idx]
+            ncopies = 0
             if w == 0
                 target_space = only(memory_spaces(proc))
                 data_ready_ns = _greedy_earliest_data_ready_ns(snap, dag_spec, spec, target_space, state)
                 runtime_ns = _eft_runtime_ns(spec, proc)
             else
-                data_ready_ns, runtime_ns = _eft_ready_and_runtime(state, cache, idx, w, copies)
+                data_ready_ns, runtime_ns, ncopies = _eft_ready_and_runtime(state, cache, idx, w, copies)
             end
             state.task_finish_ns[idx] = _claim_slot!(state, proc, data_ready_ns, runtime_ns)
-            w == 0 || _eft_record_copies!(copies, cache, idx, w, state.task_finish_ns[idx])
+            w == 0 || _eft_record_copies!(copies, cache, idx, w, state.task_finish_ns[idx], ncopies)
         end
     end
     return state
