@@ -782,3 +782,31 @@ lesson.
    workload (`src/precompile.jl` now crosses a bound of 8 with every storage
    present), and when a workload is slow only on calls two to four, suspect
    something that runs once per process at a size threshold.
+
+66. **A signature's first sample on a process is its compile time, and
+   "first" is per process, not per key.** The cost summary replaced a key's
+   first sample with its second, which handles the thread that compiled a
+   task -- if that thread ever runs the task again. A thread that ran it once
+   kept the outlier for good, and once the region was planned over every
+   processor the MILP planner, told 12 ms for a 5 us `add!` on such a thread,
+   stacked two independent tasks on the other one. And another process's
+   first sample (its own compilation) blended into the cross-process tiers
+   that already held real numbers. Track the first sample per (signature,
+   worker): use it only while nothing has measured the type anywhere, and
+   drop it from the first processor's entry when the process's second sample
+   arrives on another. Whenever an estimate is "per X", ask what event
+   (compilation, warm-up, a cold cache) happens once per *process* rather
+   than once per X, and make sure a single occurrence cannot pin an X.
+
+67. **In hierarchical Datadeps, placement is decided by the partitioner;
+   a plan made afterwards can only pick threads.** The planners beat flat
+   RoundRobin by up to 3.7x and never beat the default path, because the
+   default (hierarchical) mode assigned each task's *process* by data
+   affinity in `partition_dag`, planned the region after that, and dropped
+   every planned processor outside the task's partition -- the plan chose a
+   thread within an owner it had no say in. The sweeps never showed this
+   because the planners were only ever timed in flat mode, where they do
+   choose processes and pay a serial launch loop for it. Plan the whole
+   region before partitioning and let the plan name each task's owner. When
+   a policy "has no effect" in one mode, find the line that discards its
+   decision before tuning the policy.
