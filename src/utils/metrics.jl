@@ -998,9 +998,14 @@ metrics_lookup_move_time_min(snap, from_space, to_space) =
 metrics_lookup_move_time_max(snap, from_space, to_space) =
     metrics_lookup_move_time(snap, from_space, to_space; reducer=maximum)
 
-# Transfers below this are dominated by fixed per-task overhead rather than
-# bandwidth, so their implied rate is numeric noise. Excluded from the sample.
-const MOVE_RATE_MIN_SIZE_BYTES = UInt64(4096)
+# Transfers below this are dominated by fixed per-copy overhead (a task
+# launch, an MPI round trip) rather than bandwidth, so their implied rate is
+# not a bandwidth. Excluded from the sample. It was 4 KB, which a 512²
+# stencil's halo (512 doubles) exactly reaches: those copies then set the
+# rate between every pair of ranks at 2 MB/s, a planner priced each 2 MB
+# neighbor tile at 0.9 s, and 18 of 64 tasks left their owners. A quarter
+# megabyte is above any halo and below any tile these workloads move.
+const MOVE_RATE_MIN_SIZE_BYTES = UInt64(262_144)
 
 """
     metrics_lookup_move_rate(snap, from_space, to_space; reducer=Statistics.median)

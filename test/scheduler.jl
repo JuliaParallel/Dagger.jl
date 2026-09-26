@@ -841,6 +841,31 @@ end
             end
         end
 
+        @testset "Move rate ignores copies too small to measure bandwidth" begin
+            # A halo copy of a few kilobytes is all launch and round-trip
+            # latency; its size over its time is not a rate.
+            cache = MetricsTracker.MetricsCache()
+            a = Dagger.CPURAMMemorySpace(41); b = Dagger.CPURAMMemorySpace(42)
+            MetricsTracker.bulk_update!(cache) do c
+                ctx = MetricsTracker.pending_context!(c, Dagger, :execute!, Int)
+                from = MetricsTracker.get_or_create_storage!(ctx, Dagger.FromSpaceMetric())
+                to = MetricsTracker.get_or_create_storage!(ctx, Dagger.ToSpaceMetric())
+                size = MetricsTracker.get_or_create_storage!(ctx, Dagger.MoveSizeMetric())
+                time = MetricsTracker.get_or_create_storage!(ctx, MetricsTracker.TimeMetric())
+                MetricsTracker.set_metric_value!(from, 1, a); MetricsTracker.set_metric_value!(to, 1, b)
+                MetricsTracker.set_metric_value!(size, 1, UInt64(4096)); MetricsTracker.set_metric_value!(time, 1, UInt64(2_000_000))
+            end
+            snap = MetricsTracker.snapshot(cache)
+            @test Dagger.metrics_lookup_move_rate(snap, a, b) === nothing
+            MetricsTracker.bulk_update!(cache) do c
+                ctx = MetricsTracker.pending_context!(c, Dagger, :execute!, Int)
+                size = MetricsTracker.get_or_create_storage!(ctx, Dagger.MoveSizeMetric())
+                MetricsTracker.set_metric_value!(size, 1, Dagger.MOVE_RATE_MIN_SIZE_BYTES)
+            end
+            snap = MetricsTracker.snapshot(cache)
+            @test Dagger.metrics_lookup_move_rate(snap, a, b) == round(UInt64, Dagger.MOVE_RATE_MIN_SIZE_BYTES / 2e-3)
+        end
+
         @testset "Move rate looks past exact samples without a size" begin
             # Under MPI only a copy's source rank knows its size, so a rank
             # holds unsized samples for every copy into it. Those must not
