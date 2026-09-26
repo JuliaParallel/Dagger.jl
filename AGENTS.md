@@ -810,3 +810,21 @@ lesson.
    region before partitioning and let the plan name each task's owner. When
    a policy "has no effect" in one mode, find the line that discards its
    decision before tuning the policy.
+
+68. **A model's default for an unmeasured quantity must be the right order
+   of magnitude, or one missing sample decides the plan.** The planners
+   priced a copy between two spaces that no copy had been timed between at
+   1 MB/s. In flat mode every pair had been timed, because RoundRobin's
+   warm-ups moved whole tiles. In hierarchical mode a stencil's warm-ups
+   move only halos, a few kilobytes each and below the size floor a rate can
+   be taken from, so no pair was ever timed, and the plan charged a task on
+   its own owner 0.5 s per cross-rank neighbor tile: every placement looked
+   equally hopeless and the ranking was noise (49 of 64 on their owner, 540
+   MB moved per call). At 1 GB/s, the order of any interconnect, the same
+   plan puts 64 of 64 on their owner. Two related traps found on the way: a
+   remainder copy sized by the tile it was cut from reports a rate hundreds
+   of times too high, and a copy is itself a task the launcher must spawn,
+   so a plan that adds copies must release everything after them later.
+   When a policy misbehaves only in one mode, dump the cost table it
+   actually built in that mode (`_build_eft_cost_cache`) -- the "move rates
+   0.00" line was the whole story.
