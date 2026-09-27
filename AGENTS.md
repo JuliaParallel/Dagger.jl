@@ -525,3 +525,13 @@ lesson.
    allocated inside the GPU scope, including transpose, complex adjoint,
    and nonzero beta across several tiles; CPU-only multiplication tests
    cannot catch this dispatch error.
+
+49. **A distributed view needs both broadcast style and bulk staging.**
+   `SubArray` does not inherit `DArray`'s broadcast style. Adding that style
+   alone still leaves `Distribute` slicing the wrapper through scalar
+   parent indexing. Materialize the selected region with bulk DArray
+   indexing before broadcast partitioning. Keep integer-indexed dimensions
+   during that copy and drop them on individual tiles: redistributing a
+   generic `ReshapedArray` of a DArray also falls back to scalar indexing.
+   Use nonuniform values and offset views crossing tile boundaries, with
+   scalar indexing disabled, to check placement as well as dispatch.
