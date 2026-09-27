@@ -513,14 +513,22 @@ end
 
 Tile-level matrix-vector multiply computing `C = alpha*op(A)*B + beta*C` in
 place on the (dense) output vector `C`, where `op` is determined by `transA`
-(`'N'`, `'T'`, `'C'`). Dispatches on the tile types: dense tiles use BLAS, while
+(`'N'`, `'T'`, `'C'`). Dispatches on the tile types: dense CPU tiles use host
+BLAS, other dense tiles use their backend's matrix-vector multiply, while
 sparse tiles (e.g. `DSparseArray`) provide their own method (in a package
 extension) using a sparse matrix-vector product. This is the matvec analogue of
 [`matmatmul!`](@ref).
 """
-function matvecmul!(C, transA::Char, A, B, alpha, beta)
+# Restrict host BLAS to CPU arrays. GPU arrays can satisfy BLAS.gemv!'s
+# AbstractArray signature without having host-accessible pointers.
+function matvecmul!(C::Vector{T}, transA::Char, A::Matrix{T}, B::Vector{T},
+                    alpha, beta) where T
     BLAS.gemv!(transA, alpha, A, B, beta, C)
     return C
+end
+function matvecmul!(C, transA::Char, A, B, alpha, beta)
+    return LinearAlgebra.generic_matvecmul!(
+        C, transA, A, B, LinearAlgebra.MulAddMul(alpha, beta))
 end
 
 function gemv_dagger!(

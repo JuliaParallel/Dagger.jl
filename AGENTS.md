@@ -515,3 +515,13 @@ lesson.
    evictions fell from 10,000 allocations / 320,000 bytes to zero; cache-hit
    behavior is unchanged. Together with lesson 46, cold default population
    is 25 allocations / 1,024 bytes rather than 217 / 9,088.
+
+48. **A BLAS method accepting GPU arrays does not make it GPU BLAS.**
+   `LinearAlgebra.BLAS.gemv!` accepts `AbstractArray` inputs on Julia 1.12,
+   so a direct call with `ROCArray` tiles reaches host BLAS with device
+   pointers and raises `ReadOnlyMemoryError`. Restrict direct host BLAS
+   calls to CPU `Array` types, as `matmatmul!` does, and dispatch other
+   tile types through the backend's `generic_matvecmul!`. Test with tiles
+   allocated inside the GPU scope, including transpose, complex adjoint,
+   and nonzero beta across several tiles; CPU-only multiplication tests
+   cannot catch this dispatch error.
