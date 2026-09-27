@@ -22,6 +22,45 @@ Dagger.allowscalar!(false)
         @test collect(E) == fill(2.0, 10, 10)
     end
 
+    @testset "Distributed view operands" begin
+        # Nonuniform values expose misplaced slices; offset ranges cross tile
+        # boundaries in the second layout. Keep scalar indexing disabled.
+        ref = reshape(Float32.(1:64), 8, 8)
+        for part in (Blocks(8, 8), Blocks(3, 3))
+            A = distribute(ref, part)
+            wait(A)
+            V = @view A[2:7, 2:7]
+            W = @view A[1:6, 2:7]
+            expected = ref[2:7, 2:7] .+ ref[1:6, 2:7]
+
+            @views C = A[2:7, 2:7] .+ A[1:6, 2:7]
+            @test C isa DArray
+            @test collect(C) == expected
+            @test collect(2 .* V .+ W .- 1) == 2 .* ref[2:7, 2:7] .+ ref[1:6, 2:7] .- 1
+            @test collect(V .+ 1) == ref[2:7, 2:7] .+ 1
+            @test collect(V .+ ones(Float32, 6, 6)) == ref[2:7, 2:7] .+ 1
+
+            B = distribute(ref[1:6, 2:7], Blocks(2, 2))
+            @test collect(B .+ V) == expected
+            dest = distribute(zeros(Float32, 6, 6), Blocks(2, 2))
+            dest .= V .+ W
+            @test collect(dest) == expected
+
+            nested = @view V[2:5, 2:5]
+            @test collect(nested .+ 1) == ref[3:6, 3:6] .+ 1
+            column = @view A[2:7, 2]
+            @test collect(column .+ 1) == ref[2:7, 2] .+ 1
+            @test collect(V .+ column) == ref[2:7, 2:7] .+ ref[2:7, 2]
+            row = @view A[2, 2:7]
+            @test collect(row .+ 1) == ref[2, 2:7] .+ 1
+            scalar_view = @view A[2, 3]
+            @test collect(V .+ scalar_view) == ref[2:7, 2:7] .+ ref[2, 3]
+            @test Dagger.allowscalar(() -> scalar_view .+ 1) == ref[2, 3] + 1
+            @test_throws ArgumentError scalar_view .+ 1
+            @test collect(A) == ref
+        end
+    end
+
     @testset "In-place" begin
         A = distribute(ones(10, 10), Blocks(5, 5))
         B = distribute(ones(10, 10), Blocks(5, 5))

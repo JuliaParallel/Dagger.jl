@@ -41,6 +41,10 @@ end
 struct DaggerBroadcastStyle <: BroadcastStyle end
 
 BroadcastStyle(::Type{<:ArrayOp}) = DaggerBroadcastStyle()
+BroadcastStyle(::Type{<:SubArray{T,N,<:DArray}}) where {T,N} = DaggerBroadcastStyle()
+# Broadcasting only zero-dimensional inputs returns a scalar in Base. Keep
+# that behavior; mixed broadcasts still stage these views as bulk operands.
+BroadcastStyle(::Type{<:SubArray{T,0,<:DArray}}) where T = Broadcast.DefaultArrayStyle{0}()
 BroadcastStyle(::DaggerBroadcastStyle, ::BroadcastStyle) = DaggerBroadcastStyle()
 BroadcastStyle(::BroadcastStyle, ::DaggerBroadcastStyle) = DaggerBroadcastStyle()
 
@@ -53,11 +57,32 @@ function Base.copyto!(dest::DArray, b::Broadcast.Broadcasted{<:DaggerBroadcastSt
     return dest
 end
 
+stage_broadcast_arg(ctx::Context, x) = x
+stage_broadcast_arg(ctx::Context, x::ArrayOp) = stage(ctx, x)
+function stage_broadcast_arg(::Context, x::SubArray{T,N,<:DArray}) where {T,N}
+    # Read the selected region through DArray's bulk indexing path. Passing a
+    # SubArray to Distribute would slice it using scalar DArray indexing.
+    inds = parentindices(x)
+    # Keep singleton dimensions during the copy: generic reshape of a DArray
+    # would fall back to scalar indexing when redistributing its result.
+    region = getindex(parent(x), map(i -> i isa Integer ? (i:i) : i, inds)...)
+    N == ndims(region) && return region
+
+    kept = Tuple(i for i in eachindex(inds) if !(inds[i] isa Integer))
+    dropped = Tuple(i for i in eachindex(inds) if inds[i] isa Integer)
+    part = Blocks(map(i -> region.partitioning.blocksize[i], kept))
+    dc = DomainBlocks(ntuple(_ -> 1, N), map(i -> domainchunks(region).cumlength[i], kept))
+    cs = map(region.chunks) do chunk
+        Dagger.@spawn dropdims(chunk; dims=dropped)
+    end
+    return DArray(T, domain(x), dc, reshape(cs, map(i -> size(cs, i), kept)), part)
+end
+
 function stage(ctx::Context, node::BCast{B,T,N,D}) where {B,T,N,D}
     bc = Broadcast.flatten(node.bcasted)
     args = bc.args
     args1 = map(args) do x
-        x isa ArrayOp ? stage(ctx, x) : x
+        stage_broadcast_arg(ctx, x)
     end
     ds = map(x->x isa DArray ? domainchunks(x) : nothing, args1)
     sz = size(node)
