@@ -13,6 +13,13 @@ end
 # header for the acceleration/backend matrix they cover.
 include(joinpath(@__DIR__, "array", "sparse_defs.jl"))
 include(joinpath(@__DIR__, "gpu_distributed.jl"))
+include(joinpath(@__DIR__, "array", "linalg", "matvec_defs.jl"))
+
+@testset "Dense matvec ($name)" for (name, scope) in GPU_SCOPES
+    Dagger.with_options(; scope) do
+        test_dense_matvec(; gpu=true)
+    end
+end
 
 @everywhere begin
     function isongpu(X)

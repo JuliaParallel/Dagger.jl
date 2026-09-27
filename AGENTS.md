@@ -211,7 +211,7 @@ lesson.
    block AMG; check the un-preconditioned residual. CG will also reject AMG
    as non-SPD — use GMRES.
 
-21. **Reassigning a local to a value of a different type deoptimizes the
+20. **Reassigning a local to a value of a different type deoptimizes the
    *whole* body, not the assignment.** `arg = adopt_sparse_arg!(state, arg,
    deps)` in `_populate_one_arg!` looks like a cheap normalization, but
    inference must pick one type for `arg` over the entire method, so it
@@ -227,7 +227,7 @@ lesson.
    already exists for exactly this reason — extend the pattern rather than
    reintroducing the reassignment next to it.
 
-22. **A re-tiling fallback needs the tile *backend*, and needs to outlive the
+21. **A re-tiling fallback needs the tile *backend*, and needs to outlive the
    call.** Making non-square-tiled operands work instead of erroring is two
    traps in one. First, allocate the destination through a tile-type-dispatched
    allocator (`allocate_tiled`): `DArray{T}(undef, part, dims)` gives dense
@@ -245,7 +245,7 @@ lesson.
    through `move`, which is the one hook every GPU sparse extension already
    defines.
 
-23. **A memory space must be keyed on the device, never on a handle that
+22. **A memory space must be keyed on the device, never on a handle that
    records current *ownership*.** `OpenCLExt.memory_space(::CLArray)` looked the
    buffer's `Managed.queue` up in Dagger's registered `QUEUES`. That field is
    OpenCL.jl's ownership tracking, not provenance: `convert(::CLPtr, ::Managed)`
@@ -262,7 +262,7 @@ lesson.
    valid space for: the chunk recorded the space once, the value is being asked
    to re-derive it, and only the second one goes through the mutable field.
 
-24. **`similar(::DArray)` must not fetch the source tiles.** Spawning
+23. **`similar(::DArray)` must not fetch the source tiles.** Spawning
    `similar(chunk, T, sz)` per result tile looks like the way to preserve
    sparse/GPU backends, but it is a false data-dependency: `A * A` then moves
    every tile of `A` into the allocation tasks (and those tasks have no
@@ -272,7 +272,7 @@ lesson.
    stays sparse zeros. `similar(chunk)` is only right when you actually need
    the source value.
 
-25. **Vendor GPU sparse tiles do not speak SparseArrays' names, and CSC×CSC is
+24. **Vendor GPU sparse tiles do not speak SparseArrays' names, and CSC×CSC is
    not a given.** `CuSparseMatrixCSC` / `ROCSparseMatrixCSC` store values in
    `nzVal` (and `colPtr`/`rowVal`); a kernel that reaches `.nzval` works on
    host CSC and `DeviceSparseMatrixCSC` and then dies on CUDA. Use `hasfield`
@@ -286,7 +286,7 @@ lesson.
    the backend extension must not redefine `show` — precompilation forbids the
    overwrite.
 
-26. **A VRAM-stamped host `Array` is not a device buffer.** Collect's MPI cat
+25. **A VRAM-stamped host `Array` is not a device buffer.** Collect's MPI cat
    tree densifies every tile to `Array` (device `cat` is scalar indexing),
    and those gather tasks run on the GPU compute scope. `execute!` used to
    label the result with the *processor's* space, so a host `Matrix` sat in
@@ -295,7 +295,7 @@ lesson.
    `value_memory_space`, and do not select IPC unless the chunktype is a
    GPU array (`ipc_type_eligible`). Space-only `ipc_eligible` is not enough.
 
-27. **Log emitters in tests must be count-bounded, and chunk lists must be
+26. **Log emitters in tests must be count-bounded, and chunk lists must be
    memory-bounded.** A `while !stop[]` logger on every default thread will
    starve the task that flips `stop` (lesson 12) and allocate slabs until
    the machine OOMs — measured at 250GB+ virtual across leftover
@@ -306,7 +306,7 @@ lesson.
    wrapper. `Pkg.test` spawns a child that keeps running if you only
    SIGTERM the wrapper.
 
-28. **`nworkers() == 1` means "this process", not "there are workers".**
+27. **`nworkers() == 1` means "this process", not "there are workers".**
    Without `addprocs`, `workers() == [1]`. `remotecall_wait` /
    `remotecall_fetch` to `myid()` deadlocks — the Distributed waiter
    never runs on the calling task. Gate broadcasts with
@@ -315,7 +315,7 @@ lesson.
    locally when `p == myid()`; do not reintroduce a self-remotecall
    around `enable_logging!` / `get_logs!`.
 
-29. **Do not mutate TimespanLogging globals at another package's toplevel.**
+28. **Do not mutate TimespanLogging globals at another package's toplevel.**
    `@logcategory` used to call `register_category!` while Dagger was
    precompiling. Those writes land in TimespanLogging's arrays in the
    *precompile process* and are discarded when TimespanLogging loads from
@@ -325,14 +325,14 @@ lesson.
    that way — a `const ID = register_category!(...)` at Dagger toplevel
    is not safe.
 
-30. **Benchmark fixtures must be fully awaited.** DArray construction is
+29. **Benchmark fixtures must be fully awaited.** DArray construction is
    asynchronous: if setup launches `A` and `B` but waits only for `A`, the
    timed body inherits an arbitrary fraction of `B`'s allocation and scheduling
    work. That contamination is placement- and timing-dependent, so a scheduler
    improvement can look like a multi-fold regression. Wait every fixture that
    the measured operation consumes.
 
-31. **SPMD benchmarks need a rank-uniform sample loop.** BenchmarkTools applies
+30. **SPMD benchmarks need a rank-uniform sample loop.** BenchmarkTools applies
    its `seconds` cutoff independently on each process; small timing differences
    can make one MPI rank stop while a peer enters another collective sample,
    deadlocking the next benchmark. Run one sample per rank at a time, use a
@@ -343,7 +343,7 @@ lesson.
    peer's preceding GC, creating large but fake timing regressions in short
    collective operations.
 
-32. **An empty benchmark suite is a benchmark failure, not a successful no-op.**
+31. **An empty benchmark suite is a benchmark failure, not a successful no-op.**
    AirspeedVelocity adds its own `time_to_load` result, so an orchestrator that
    swallows every leaf error still emits a plausible-looking green report with
    one row. Require a nonempty manifest, and abort an SPMD run on a leaf error:
@@ -352,7 +352,7 @@ lesson.
    internal API: 1.8 changed it from a two-argument function returning a tuple
    to a four-argument function writing measurements through a `Ref`.
 
-33. **Synchronous and asynchronous submission need different batch sizes.** A
+32. **Synchronous and asynchronous submission need different batch sizes.** A
    large asynchronous batch amortizes channel and scheduler overhead while its
    submitter overlaps with continued planning. The same batch size on a
    one-thread `BatchedEnqueueQueue` withholds every task in a short region until
@@ -360,7 +360,7 @@ lesson.
    execution. This is especially costly for iterative solvers, which execute
    many small datadeps regions. Tune the two queue types independently.
 
-34. **A benchmark script shared across revisions must probe backend capability.**
+33. **A benchmark script shared across revisions must probe backend capability.**
    Airspeed runs today's script against old Dagger code, and a generic suite can
    also contain a leaf unsupported by the selected backend. MPI SVD, for
    example, uses a Distributed-only processor grid and divides by zero before
@@ -372,7 +372,7 @@ lesson.
    output may disappear from the parent runner's log, and a generic "worker
    exited" message discards the only actionable diagnosis.
 
-35. **A whole-region copy owner must represent the whole copy batch.** A
+34. **A whole-region copy owner must represent the whole copy batch.** A
    remainder can be assembled by several copy tasks from disjoint source
    spaces. Registering each task as the owner of the whole destination makes
    the last registration replace the earlier ones; a whole-region consumer
@@ -385,7 +385,7 @@ lesson.
    hundreds of megabytes of interval-tree/overlap bookkeeping and regressed
    by 7–8x.
 
-36. **Distributed benchmark kernels must exist on every worker before
+35. **Distributed benchmark kernels must exist on every worker before
    sampling.** Defining an `@stencil` wrapper only on the driver serializes its
    generated closure to whichever worker happens to receive a tile. Globals
    used by the closure (`Clamp`, `Reflect`, etc.) can then be missing or too new
@@ -395,7 +395,7 @@ lesson.
    `@everywhere` statement (the import must be evaluated before remote macro
    expansion). A one-block capability probe is not a distributed warmup.
 
-37. **BenchmarkTools sees only the driver process's allocations.** In a
+36. **BenchmarkTools sees only the driver process's allocations.** In a
    Distributed benchmark, arbitrary tile placement makes the reported bytes
    include however many payload tiles happened to execute on the driver. A
    1024² `Float64` allocation consequently varied from 2–8 MiB with no global
@@ -409,7 +409,7 @@ lesson.
    there so the MPI-aware scheduler places tiles. The reported number is still
    process-local; deterministic placement only makes the comparison meaningful.
 
-38. **A logical copy batch must keep every physical producer in every
+37. **A logical copy batch must keep every physical producer in every
    dependency view.** When a `MultiRemainderAliasing` restores one whole-region
    replica from disjoint pieces, launch each copy with its own source readers
    and syncdeps, but do not let each copy rewrite the destination's whole
@@ -421,14 +421,14 @@ lesson.
    Keep the singleton-copy path direct so ordinary per-argument moves do not
    allocate a batch vector.
 
-39. **Gate diagnostic work at the call site, not only inside the logger.**
+38. **Gate diagnostic work at the call site, not only inside the logger.**
    `hier_log!` checks `HIER_TIMING[]`, but Julia evaluates its arguments before
    that check. Unconditional `time_ns()` calls around per-argument aliasing and
    slot creation therefore survived with timing disabled. Gate both the start
    timestamp and the finish/event argument evaluation; a disabled diagnostic
    should not pay for the measurement it discards.
 
-40. **Reusable scratch macros must return their declared container types.**
+39. **Reusable scratch macros must return their declared container types.**
    `@reusable_vector` and `@reusable_dict` expand through non-const global
    `TaskLocalValue`s. Without a type assertion, their expressions infer as
    `Any` even though the runtime containers are typed: iteration, element
@@ -439,7 +439,7 @@ lesson.
    type expressions to resolve caller-defined types correctly, and check the
    return types with `@inferred` as well as the containers' runtime types.
 
-41. **Remote aliasing batches must seed the driver's region memo.** Phase 1
+40. **Remote aliasing batches must seed the driver's region memo.** Phase 1
    groups arguments by owner and computes aliasing remotely, but Distributed
    RPCs do not inherit the caller's `CHUNK_AINFO_MEMO` scoped value. Keeping
    those answers only in `arg_to_ainfo` makes Phase 4 ask the owners again.
@@ -449,7 +449,7 @@ lesson.
    A typed merge barrier also prevents `remotecall_fetch`'s `Any` result from
    erasing the result container's type in the per-argument loop.
 
-42. **Fix the SPD fixture's destination placement, not just its input's.**
+41. **Fix the SPD fixture's destination placement, not just its input's.**
    Giving `G` a cyclic assignment does not give `G * G'` that assignment:
    `similar(G)` allocates an arbitrarily placed result. A Cholesky benchmark
    must explicitly allocate its SPD destination with the same assignment and
@@ -459,7 +459,7 @@ lesson.
    out-of-place multiplication and Cholesky still allocate/place their own
    outputs normally, and neither scheduling heuristics nor thresholds change.
 
-43. **Broadcast delivery must wake only its own consumers.** One shared
+42. **Broadcast delivery must wake only its own consumers.** One shared
    condition for all `(root, tag)` slots makes a delivery wake every unrelated
    waiter: draining 1024 tags one at a time took 395 ms, versus 3 ms with
    per-slot conditions sharing the registry lock. Create conditions only when
@@ -470,7 +470,7 @@ lesson.
    `running`: a consumer already woken by a heartbeat is outside the shutdown
    notification queues and otherwise goes back to sleep after the relay stops.
 
-44. **An uncontended MPI receive needs a lease, not an event.** Uniformity
+43. **An uncontended MPI receive needs a lease, not an event.** Uniformity
    checks made the old receive guard create hundreds of thousands of
    `Base.Event`s per sparse product, although its `(comm, source, tag)` stream
    had only one receiver. Register `nothing` for an owned stream and create
@@ -481,7 +481,7 @@ lesson.
    release the lease in `finally` on both serialized and in-place paths so a
    failed receive cannot strand every subsequent receiver of that stream.
 
-45. **Task-pool capacity is not a reason to create every slot upfront.**
+44. **Task-pool capacity is not a reason to create every slot upfront.**
    Completion and placement tasks can be short-lived, but each owns a
    task-local fire cache with capacity 32. Creating all 32 tasks, channels,
    and monitors on its first dispatch pays for 31 idle slots when that caller
@@ -491,7 +491,7 @@ lesson.
    creation, run its setup before scheduling, and register each dispatch
    before publishing the payload. Finalization must skip unassigned slots.
 
-46. **Repeated calls do not necessarily warm the option-default cache.**
+45. **Repeated calls do not necessarily warm the option-default cache.**
    `BasicLFUCache` can immediately evict a newly inserted frequency-1 key
    when every resident key is more frequent, so a new signature keeps taking
    the default fallback after arbitrarily many warmups. Test that path with
@@ -504,7 +504,7 @@ lesson.
    cache hits stayed at 1 / 256. Keep keyword views instead of adding a copy
    to every signature, especially signatures whose defaults are already cached.
 
-47. **Even a typed `findmin(::Dict)` can box its result in an eviction loop.**
+46. **Even a typed `findmin(::Dict)` can box its result in an eviction loop.**
    The defaults LFU allocated one `(frequency, key)` tuple per eviction
    despite its concrete key/frequency types. A direct minimum-frequency scan
    removes that allocation without changing capacity, admission or eviction
@@ -516,7 +516,7 @@ lesson.
    behavior is unchanged. Together with lesson 46, cold default population
    is 25 allocations / 1,024 bytes rather than 217 / 9,088.
 
-48. **Hierarchical Datadeps has two dispatch branches, and `-p 0` only
+47. **Hierarchical Datadeps has two dispatch branches, and `-p 0` only
    exercises one.** `distribute_tasks_hierarchical!` takes the shared-state
    (sequential) branch whenever `all_procs` spans more than one memory space,
    and the parallel per-partition branch otherwise. With no workers there is
@@ -527,7 +527,7 @@ lesson.
    round-robin, and the scheduling suite went from 516 pass / 0 error to 38
    errors the moment `-p 1` was used. Test hierarchical changes with `-p >= 1`.
 
-49. **A snapshot-per-operation metrics read is a deep copy per operation.**
+48. **A snapshot-per-operation metrics read is a deep copy per operation.**
    `MetricsTracker.snapshot` rebuilds whenever the cache's generation has
    moved, and the rebuild copies every context and every per-metric storage
    (measured: 273 allocations / 67 KB against 488 stored values). The
@@ -537,7 +537,7 @@ lesson.
    use `snapshot_stale` and bound rebuilds by time rather than by the rate at
    which values arrive.
 
-50. **Memoize metrics lookup *misses*, not just hits.** `MT.find_keys` scans
+49. **Memoize metrics lookup *misses*, not just hits.** `MT.find_keys` scans
    every storage and every key of a snapshot, building `Set{Any}`s, and it
    costs the same whether or not it matches anything. `metrics_lookup_alloc`
    and `metrics_lookup_transfer_rate` run once per candidate processor per
@@ -548,14 +548,14 @@ lesson.
    wholesale, and keep them task-local so the concurrent per-partition
    scheduling tasks neither share nor lock them.
 
-51. **A micro-benchmark of a metrics lookup lies if the cache is empty.**
+50. **A micro-benchmark of a metrics lookup lies if the cache is empty.**
    `metrics_lookup_transfer_rate` measures 0 allocations when no transfer-rate
    values exist, because it returns before using the scan's result — but the
    scan already ran. Benchmark these against a *populated* cache, or profile
    the real path with `--track-allocation`; several rounds of plausible
    hypotheses here were all wrong, and the profiler answered it immediately.
 
-52. **`Meta.parseall` does not throw on a syntax error.** It returns a
+51. **`Meta.parseall` does not throw on a syntax error.** It returns a
    `:toplevel` expression containing an `Expr(:error, ...)` node, so
    `Meta.parseall(read(f, String))` completing without an exception says
    nothing about whether the file is valid. A `test/scheduler.jl` with an
@@ -576,7 +576,7 @@ lesson.
    behind it (lesson 51). When a check passes, ask what it would have done had
    the thing been broken.
 
-53. **Wrapping a function that other code recognizes by identity silently
+52. **Wrapping a function that other code recognizes by identity silently
    drops the special case.** Datadeps copy tasks used to be spawned as
    `move!`; the metrics work wrapped them in `move_toplevel!` (then named
    `instrumented_move!`). Two backends decide how to run a task with
@@ -591,7 +591,7 @@ lesson.
    `src/` *and* `ext/`, and route every hit through one predicate
    (`is_move_task`) instead of adding a second identity check next to it.
 
-54. **Under uniform execution, a planner that reads rank-local inputs must plan
+53. **Under uniform execution, a planner that reads rank-local inputs must plan
    on one rank.** Every MPI rank plans every region and must place every task
    identically, but metrics caches are rank-local (a rank records only the
    tasks it ran) and a search with a wall-clock budget stops at a different
@@ -605,7 +605,7 @@ lesson.
    ever disagrees across ranks still cannot desync the exchange. Run
    `check_uniformity!(true)` on any new scheduler under MPI before timing it.
 
-55. **A task-local singleton is shared by everything its task does -- including
+54. **A task-local singleton is shared by everything its task does -- including
    work the design deliberately split into per-partition shards.** Hierarchical
    Datadeps gives each partition its own scheduler via `similar` because a
    round-robin index advanced over one partition's processor list can overrun
@@ -619,7 +619,7 @@ lesson.
    differ. When touching per-partition state, also run a mismatched
    configuration (driver `-t 4`, workers `-t 2`).
 
-56. **Task-local is the lifetime of a task, not of a program.** The AOT schedule
+55. **Task-local is the lifetime of a task, not of a program.** The AOT schedule
    cache was a `TaskLocalValue`, so "plan once per DAG shape" held only within
    one task: every region submitted from `Threads.@spawn`, `@async` or a Dagger
    task planned again from scratch, while a benchmark calling from its main
@@ -628,7 +628,7 @@ lesson.
    process-wide, behind a lock. Check a caching claim from a *second* task, not
    by repeating calls in the first.
 
-57. **A cost model's catch-all method is where the arguments it cannot see go
+56. **A cost model's catch-all method is where the arguments it cannot see go
    to be priced at zero.** The EFT planners charged for moving an input only
    when it was a `Chunk`; `DTask`s from outside the region and everything else
    fell to methods returning 0. But a DArray's `chunks` are the finished
@@ -640,7 +640,7 @@ lesson.
    log what kinds of values a real workload actually delivers (a DArray
    region, not a hand-built one) and check the catch-all is not where they go.
 
-58. **A plan is only as good as the measurements it was made with, and the
+57. **A plan is only as good as the measurements it was made with, and the
    first call has none.** Three things conspired to make every AOT plan a
    blind one. The metrics cache kept the last 100 tasks, fewer than one
    region's kernels plus its copies, so by planning time most runtime samples
@@ -652,7 +652,7 @@ lesson.
    (`datadeps_plan_informed`), and a wrapper scheduler must forward that hook
    just as it forwards `datadeps_uses_aot`, or its plans silently stay blind.
 
-59. **Iterating a container held behind an abstract type dispatches on every
+58. **Iterating a container held behind an abstract type dispatches on every
    element.** A metrics context stores its storages as
    `AbstractMetricStorage`, and `find_keys` & co. looped over a storage's
    `data` inline: ~1 us per stored value, so one runtime lookup took 1.9 ms
@@ -663,7 +663,7 @@ lesson.
    same trap made trimming the cache O(bound) per recorded task until it was
    batched (322 us per task at a 5000 bound, 11 us after).
 
-60. **Under uniform execution, a rank's metrics must describe only the work it
+59. **Under uniform execution, a rank's metrics must describe only the work it
    did -- and rank 0 plans for everyone from its own.** Three independent
    paths broke this, and together they had the EFT planners piling a region
    onto whichever rank looked cheapest. Every rank runs every task's
@@ -683,7 +683,7 @@ lesson.
    heuristic, and make any fallback chain fall through on unusable values,
    not only on missing keys.
 
-61. **When a smart policy loses to a dumb one, check whether the dumb one is
+60. **When a smart policy loses to a dumb one, check whether the dumb one is
    dodging a cost the model does not know about.** With correct inputs, the
    Greedy planner still lost to RoundRobin on matmul. Its plan predicted 382
    copies; execution ran ~720. For RoundRobin's placement the same model
@@ -699,7 +699,7 @@ lesson.
    what the model predicts, per policy; a model that is exact for one policy
    and wrong for another points at the runtime.
 
-62. **Check a textbook scheduling model's assumptions against how the runtime
+61. **Check a textbook scheduling model's assumptions against how the runtime
    executes, one at a time.** The EFT planners used HEFT's model, and two of
    its assumptions are false for Datadeps. HEFT prices a task's inputs as the
    *latest* arrival, because transfers overlap on dedicated links; Datadeps
@@ -724,7 +724,7 @@ lesson.
    timeline of `:add_thunk` launch events against `:compute` events, and in
    counting where each planned task ran relative to its data.
 
-63. **A bounded sample cache is the wrong place to keep an estimate, because
+62. **A bounded sample cache is the wrong place to keep an estimate, because
    the estimate vanishes exactly when the workload is large.** The scheduler
    priced every task from the per-task metrics cache, which keeps the most
    recent 1000 tasks. A Cholesky region at 256² tiles is ~2000 tasks, so by
@@ -744,7 +744,7 @@ lesson.
    number per key, O(1) to update and read); a test that floods the cache
    past its bound and then asks for the estimate is what guards it.
 
-64. **Do not ship what the receiver already knows, and measure per-task
+63. **Do not ship what the receiver already knows, and measure per-task
    overhead against the same workload with the feature switched off.** Each
    task result carried its signature (a vector of types) and processor so
    the driver could tag its metrics -- but `handle_result!` holds the
@@ -762,7 +762,7 @@ lesson.
    said where to look, and run timing comparisons on a quiet machine: on a
    shared one the same build varied 2x between back-to-back runs.
 
-65. **A first-use compilation inside a lock is a stall for everyone waiting
+64. **A first-use compilation inside a lock is a stall for everyone waiting
    on that lock -- and under uniform execution, once per rank.** The metrics
    cache trims itself the first time a process has recorded more tasks than
    its bound, and that first trim compiled one specialization of the
@@ -783,7 +783,7 @@ lesson.
    present), and when a workload is slow only on calls two to four, suspect
    something that runs once per process at a size threshold.
 
-66. **A signature's first sample on a process is its compile time, and
+65. **A signature's first sample on a process is its compile time, and
    "first" is per process, not per key.** The cost summary replaced a key's
    first sample with its second, which handles the thread that compiled a
    task -- if that thread ever runs the task again. A thread that ran it once
@@ -798,7 +798,7 @@ lesson.
    (compilation, warm-up, a cold cache) happens once per *process* rather
    than once per X, and make sure a single occurrence cannot pin an X.
 
-67. **In hierarchical Datadeps, placement is decided by the partitioner;
+66. **In hierarchical Datadeps, placement is decided by the partitioner;
    a plan made afterwards can only pick threads.** The planners beat flat
    RoundRobin by up to 3.7x and never beat the default path, because the
    default (hierarchical) mode assigned each task's *process* by data
@@ -811,7 +811,7 @@ lesson.
    a policy "has no effect" in one mode, find the line that discards its
    decision before tuning the policy.
 
-68. **A model's default for an unmeasured quantity must be the right order
+67. **A model's default for an unmeasured quantity must be the right order
    of magnitude, or one missing sample decides the plan.** The planners
    priced a copy between two spaces that no copy had been timed between at
    1 MB/s. In flat mode every pair had been timed, because RoundRobin's
@@ -829,7 +829,7 @@ lesson.
    actually built in that mode (`_build_eft_cost_cache`) -- the "move rates
    0.00" line was the whole story.
 
-69. **A cost term that is right in principle can erase a real win if its
+68. **A cost term that is right in principle can erase a real win if its
    constant is wrong; the two plans bracket the number to measure.** With
    the planners deciding placement in the default mode on four Distributed
    nodes, Greedy ran Cholesky at 256² tiles 40% faster than master's
@@ -846,7 +846,7 @@ lesson.
    the right size), not a guess. When adding a term flips cells both ways,
    stop tuning it and instrument what it stands for.
 
-70. **A Distributed GPU transfer must preserve the source's ownership.**
+69. **A Distributed GPU transfer must preserve the source's ownership.**
    Sending a raw device array in a slot-creation RPC deserializes it on the
    receiver while `from_proc` still names the sender. The subsequent GPU
    `move` then activates a remote worker's context locally and asserts; some
@@ -856,7 +856,7 @@ lesson.
    inputs and consumers to different workers selecting device 1: a GPU scope
    alone does not guarantee that a transfer actually happens.
 
-71. **CUDA IPC must export staging memory and return an owned copy.**
+70. **CUDA IPC must export staging memory and return an owned copy.**
    CUDA's pooled allocations cannot be exported with `cuIpcGetMemHandle`, and
    returning an imported mapping makes the receiver alias the sender's data
    and depend on its lifetime. Use the shared `ipc_export`/`ipc_materialize`
@@ -865,7 +865,7 @@ lesson.
    moved the driver API into CUDACore. Test repeated transfers in both
    directions and mutate the destination to verify source independence.
 
-72. **Two GPUs of one process are not one device, and may not even be
+71. **Two GPUs of one process are not one device, and may not even be
    peers.** Several paths assumed "same worker" meant "one kernel may touch
    both buffers": the same-worker device remainder copy, `collect`'s
    in-process `cat`, and CUDA `pointer()` (which takes ownership for the
@@ -875,7 +875,7 @@ lesson.
    ownership side effects, and test with tiles on two devices of one
    process: the one-GPU-per-worker suites cannot see any of this.
 
-73. **Reading a GPU task's result needs Dagger's stream, not the caller's.**
+72. **Reading a GPU task's result needs Dagger's stream, not the caller's.**
    GPU `execute!` returns without synchronizing: the kernels are still queued
    on Dagger's per-device stream. A plain `fetch` + `Array(x)` from the
    caller copies on the caller's own task-local stream, and is correct only
@@ -888,7 +888,7 @@ lesson.
    IntelExt's hooks sync only the calling task's stream, and each oneAPI
    `execute!` runs on a fresh task, so oneAPI's own hook is not sufficient yet.
 
-74. **Never unregister host memory from a finalizer that can block.**
+73. **Never unregister host memory from a finalizer that can block.**
    `CUDA.pin` unregisters in a GC finalizer that takes a `ReentrantLock`
    (as does `AMDGPU.Mem.unpin`, which ROCExt's finalizer used to call). When
    that lock is contended the finalizer throws "task switch not allowed from
@@ -905,7 +905,7 @@ lesson.
    later GC can unregister it). Anything that must run before
    memory is freed has to be finalizer-safe: no blocking locks, no yields.
 
-75. **Two GPUs without peer access: never let CUDA.jl stage the copy.**
+74. **Two GPUs without peer access: never let CUDA.jl stage the copy.**
    Without P2P, `copyto!` between devices goes through a fresh *pageable*
    `Vector` with a synchronous DtoH: 1.4 GB/s on PCIe-attached L40S, where
    `cuMemcpyPeerAsync` (which works without peer access; the driver pipelines
@@ -917,7 +917,7 @@ lesson.
    `hipMemcpyPeerAsync` both reached ~5.5 GB/s, vs 1.4 GB/s through a
    pageable host buffer, and `copyto!` blocks until the copy is done.)
 
-76. **One stream per device serializes every transfer with that device's
+75. **One stream per device serializes every transfer with that device's
    compute.** Copies enqueued on the device stream wait behind its kernels,
    and an event recorded on the *source's* stream waits for kernels that
    merely read the data being sent (a GEMM's panel owner is busy reading the
@@ -936,7 +936,7 @@ lesson.
    copy looks like an opaque argument and falls back to whole-stream waits);
    and `unsafe_free!` tasks hand you a freed array (check `data.freed`).
 
-77. **A policy that "works" may be working by coincidence of task order.**
+76. **A policy that "works" may be working by coincidence of task order.**
    RoundRobin placed a row-major GEMM's tasks exactly on their C tiles'
    owners, because the inner loop ran over columns in owner order. Visiting
    tiles diagonally (so each GPU starts with its local panel and copies
@@ -949,7 +949,7 @@ lesson.
    chunk off and back on 4 (170 ms), which made a CG solve 30x slower at 4
    GPUs than at 2. Test placement-sensitive code at more than two processors.
 
-78. **A process-lifetime cache must not hold what it was computed from.** The
+77. **A process-lifetime cache must not hold what it was computed from.** The
    AOT schedule cache stored each region's full `DAGSpec` as its key: the
    tasks, their `DTaskSpec`s, and through those every argument. A cached plan
    lives as long as the process, so the first region of every shape kept its
@@ -962,3 +962,12 @@ lesson.
    pool caches freed blocks), and give MemPool's work queue time to drain
    first: dropping a DArray only *queues* its release, so "the last array is
    still alive right after `GC.gc()`" is expected, not a leak.
+78. **A BLAS method accepting GPU arrays does not make it GPU BLAS.**
+   `LinearAlgebra.BLAS.gemv!` accepts `AbstractArray` inputs on Julia 1.12,
+   so a direct call with `ROCArray` tiles reaches host BLAS with device
+   pointers and raises `ReadOnlyMemoryError`. Restrict direct host BLAS
+   calls to CPU `Array` types, as `matmatmul!` does, and dispatch other
+   tile types through the backend's `generic_matvecmul!`. Test with tiles
+   allocated inside the GPU scope, including transpose, complex adjoint,
+   and nonzero beta across several tiles; CPU-only multiplication tests
+   cannot catch this dispatch error.

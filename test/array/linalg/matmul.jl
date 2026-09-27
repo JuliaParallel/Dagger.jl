@@ -1,3 +1,8 @@
+include("matvec_defs.jl")
+@testset "Dense matvec backend dispatch" begin
+    test_dense_matvec()
+end
+
 @testset "With/Without Transpose" begin
     X = rand(40, 40)
     tol = 1e-12

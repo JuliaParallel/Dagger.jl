@@ -39,6 +39,7 @@ const MPIExt = Base.get_extension(Dagger, :MPIExt)
 include(joinpath(@__DIR__, "util.jl"))
 include(joinpath(@__DIR__, "array", "stencil_defs.jl"))
 include(joinpath(@__DIR__, "array", "sparse_defs.jl"))
+include(joinpath(@__DIR__, "array", "linalg", "matvec_defs.jl"))
 
 # Broadcast-only mutation helpers (scalar indexing is illegal on GPU arrays)
 add1!(X) = (X .+= 1; nothing)
@@ -256,6 +257,11 @@ if get(cfg, :subarray_depmod, false)
 end
 
 if get(cfg, :matmul, false)
+    @testset "GPU matvec (DArray)" begin
+        Dagger.with_options(; scope=all_gpu_scope()) do
+            test_dense_matvec(; gpu=true)
+        end
+    end
     @testset "GPU matmul (DArray)" begin
         Random.seed!(22)
         A = rand(elt, 8, 8)
