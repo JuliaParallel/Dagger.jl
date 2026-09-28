@@ -180,11 +180,18 @@ function move!(dep_mod, to_space::MemorySpace, from_space::MemorySpace, to::Chun
         to_raw = unwrap(to)
         from_w = root_worker_id(from_space)
         # TODO: Use dep_mod to fetch with less memory usage
-        from_raw = to_w == from_w ? unwrap(from) : remotecall_fetch(unwrap, from_w, from)
+        from_raw = to_w == from_w ? unwrap(from) : fetch_copy_source(from, to)
         move!(dep_mod, to_space, from_space, to_raw, from_raw)
     end
     return
 end
+
+fetch_copy_source(from::Chunk, to::Chunk) =
+    remotecall_fetch(unwrap, root_worker_id(from), from)
+# GPU allocations must travel through the backend's transport, which stages
+# or imports them on the receiving worker without serializing device handles.
+fetch_copy_source(from::Chunk{<:GPUArraysCore.AbstractGPUArray}, to::Chunk) =
+    move(to.processor, from)
 function move!(dep_mod, to_space::MemorySpace, from_space::MemorySpace, to::Base.RefValue{T}, from::Base.RefValue{T}) where {T}
     to[] = from[]
     return
