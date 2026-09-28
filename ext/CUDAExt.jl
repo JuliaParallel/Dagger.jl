@@ -252,36 +252,28 @@ function Dagger.move(from_proc::CuArrayDeviceProc, to_proc::CuArrayDeviceProc, x
             CUDA.synchronize()
             return to_arr
         end
-    elseif Dagger.same_node(Dagger.current_acceleration(), from_proc.owner, to_proc.owner) && from_proc.device == to_proc.device
-        # Same node, we can use IPC
-        ipc_handle, eT, shape = remotecall_fetch(from_proc.owner, x) do x
-            arr = unwrap(x)
-            ipc_handle_ref = Ref{CUDA.CUipcMemHandle}()
-            GC.@preserve arr begin
-                CUDA.cuIpcGetMemHandle(ipc_handle_ref, pointer(arr))
+    elseif ipc_enabled() && Dagger.datasize(x) >= Dagger.IPC_MIN_BYTES[] &&
+           from_proc.device == to_proc.device &&
+           Dagger.same_node(Dagger.current_acceleration(), from_proc.owner, to_proc.owner)
+        # Pool allocations cannot be exported directly. Keep the exportable
+        # staging buffer alive on the sender until the receiver has copied it
+        # into its own allocation; no shared mapping may escape this call.
+        ref = remotecall_fetch(from_proc.owner, to_proc, x) do to_proc, x
+            info, token = Dagger.ipc_export(unwrap(x))
+            try
+                return remotecall_fetch(to_proc.owner, to_proc, info) do to_proc, info
+                    with_context(to_proc) do
+                        received = Dagger.ipc_materialize(info)
+                        MemPool.poolset(received; device=MemPool.CPURAMDevice())
+                    end
+                end
+            finally
+                Dagger.ipc_release!(token)
             end
-            (ipc_handle_ref[], eltype(arr), size(arr))
         end
-        r_ptr = Ref{CUDA.CUdeviceptr}()
-        CUDA.device!(from_proc.device) do
-            CUDA.cuIpcOpenMemHandle(r_ptr, ipc_handle, CUDA.CU_IPC_MEM_LAZY_ENABLE_PEER_ACCESS)
-        end
-        ptr = Base.unsafe_convert(CUDA.CuPtr{eT}, r_ptr[])
-        arr = unsafe_wrap(CuArray, ptr, shape; own=false)
-        finalizer(arr) do arr
-            CUDA.cuIpcCloseMemHandle(pointer(arr))
-        end
-        if from_proc.device != to_proc.device
-            return CUDA.device!(to_proc.device) do
-                to_arr = similar(arr)
-                copyto!(to_arr, arr)
-                to_arr
-            end
-        else
-            return arr
-        end
+        return poolget(ref)
     else
-        # Different node, use DtoH, serialization, HtoD (pinned host staging)
+        # Small transfers, disabled IPC, or different nodes: stage through host.
         host_copy = remotecall_fetch(from_proc.owner, from_proc, x) do from_proc, x
             return with_context(from_proc) do
                 Dagger.pinned_host_array(unwrap(x))
