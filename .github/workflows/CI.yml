@@ -349,27 +349,16 @@ jobs:
       contents: read
       pull-requests: write
     steps:
-      - name: Download default benchmark results
+      - uses: actions/checkout@v7
+      - name: Test benchmark report rendering
+        run: node --test .github/scripts/benchmark-report.test.cjs
+      - name: Download benchmark results
         if: always()
         continue-on-error: true
         uses: actions/download-artifact@v7
         with:
-          pattern: benchmark-results-default-*
-          path: results-default
-      - name: Download Distributed benchmark results
-        if: always()
-        continue-on-error: true
-        uses: actions/download-artifact@v7
-        with:
-          pattern: benchmark-results-distributed-*
-          path: results-distributed
-      - name: Download MPI benchmark results
-        if: always()
-        continue-on-error: true
-        uses: actions/download-artifact@v7
-        with:
-          pattern: benchmark-results-mpi-*
-          path: results-mpi
+          pattern: benchmark-results-*
+          path: results
       - name: Comment combined results on PR
         # Best-effort: fork PRs get a read-only token, so the comment will 403;
         # don't fail the job over it.
@@ -378,49 +367,9 @@ jobs:
         uses: actions/github-script@v9
         with:
           script: |
-            const fs = require('fs');
-
-            function section(dir, backend) {
-              // Keep missing shards visible instead of presenting a partial
-              // download as a complete backend report.
-              return ['array', 'linalg', 'sparse', 'stencil'].map(suite => {
-                const reportPath = `${dir}/benchmark-results-${backend}-${suite}/report.md`;
-                const content = fs.existsSync(reportPath)
-                  ? fs.readFileSync(reportPath, 'utf8')
-                      // Keep full tables in job summaries and artifacts so
-                      // the combined PR comment stays within its size limit.
-                      .split('\n#### Median time')[0]
-                      .split('\n')
-                      .filter(line => !line.includes('artifact://'))
-                      .join('\n')
-                  : null;
-                return collapsible(suite, content);
-              }).join('\n\n');
-            }
-
-            function collapsible(summary, content) {
-              const body = content === null
-                ? '_Results unavailable (job did not produce a report)._'
-                : content;
-              return `<details>\n<summary>${summary}</summary>\n\n${body}\n\n</details>`;
-            }
-
-            const marker = '<!-- dagger-benchmarks -->';
+            const { buildReport, marker } = require('./.github/scripts/benchmark-report.cjs');
             const runUrl = `${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID}`;
-
-            const parts = [
-              marker,
-              '## Dagger benchmarks: `dirty` vs `master`',
-              '',
-              collapsible('Multi-threaded benchmarks (4 threads)', section('results-default', 'default')),
-              '',
-              collapsible('Distributed benchmarks (4 processes)', section('results-distributed', 'distributed')),
-              '',
-              collapsible('MPI benchmarks (4 ranks)', section('results-mpi', 'mpi')),
-              '',
-              `[Full results and plots](${runUrl}) (download the \`benchmark-results-*\` artifacts).`,
-            ];
-            const body = parts.join('\n');
+            const body = buildReport('results', runUrl);
 
             const { owner, repo } = context.repo;
             const issue_number = context.issue.number;
