@@ -566,3 +566,14 @@ lesson.
    for repeated samples. Keep the classification in one place and export its
    structured results for aggregation; do not infer significance by parsing
    rendered Markdown.
+
+53. **Performance workers must not silently enable correctness diagnostics.**
+    The MPI benchmark worker copied `check_uniformity!(true)` from the test
+    bootstrap. That hashes and compares planning values across ranks for every
+    task and argument, so short kernels mostly measured diagnostic traffic.
+    A warmed 2-rank × 2-thread matrix-vector benchmark on the same baseline
+    took a median 249 ms with checks and 13 ms without; minimum allocations
+    fell from 166,088 to 78,470. Use the documented production default for
+    benchmarks, log the selected mode, and make checks an explicit diagnostic
+    option. Keep uniformity checking enabled in functional MPI tests. Repeat
+    comparisons before attributing a few noisy samples to a scheduling change.

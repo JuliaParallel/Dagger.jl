@@ -47,9 +47,10 @@ end
 
 using Dagger
 Dagger.accelerate!(:mpi)
-Dagger.check_uniformity!(true)
+Dagger.check_uniformity!(bench_check_uniformity)
 const comm = MPI.COMM_WORLD
 const rank = MPI.Comm_rank(comm)
+rank == 0 && @info "[worker_mpi] Configuration" ranks=MPI.Comm_size(comm) threads=Threads.nthreads() blas_threads=BLAS.get_num_threads() uniformity_checks=bench_check_uniformity
 
 # --- Load acceleration backends (only if requested) -------------------------
 # No Distributed workers exist under MPI (each rank is its own OS process),

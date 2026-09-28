@@ -129,6 +129,11 @@ end
 const bench_seconds = parse(Float64, get(ENV, "BENCHMARK_SECONDS", "30"))
 const bench_samples = parse(Int, get(ENV, "BENCHMARK_SAMPLES", "7"))
 
+# Uniformity checks hash and compare planning values across MPI ranks. Keep the
+# production default for performance measurements; functional MPI tests enable
+# these diagnostics separately. Opt in when investigating divergent plans.
+const bench_check_uniformity = parse(Bool, get(ENV, "BENCHMARK_CHECK_UNIFORMITY", "false"))
+
 # Rendering/logging are not used under AirspeedVelocity; these globals are kept
 # defined because the suite files reference them.
 const render = ""
