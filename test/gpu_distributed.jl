@@ -113,3 +113,49 @@ end
         test_distributed_gpu(kind, key)
     end
 end
+
+# Two GPUs of one process need not be peer-accessible, so aliasing, halo
+# copies, and `collect` must never touch one device's memory from the other's
+# context. Needs a second device; single-GPU agents skip it.
+@everywhere import Dagger: @stencil, Wrap
+
+function test_multi_gpu_process(kind)
+    ps = filter(p -> p isa Dagger.gpu_processor(kind),
+                collect(Dagger.get_processors(Dagger.OSProc(myid()))))
+    length(ps) >= 2 || return
+    p1, p2 = sort!(ps; by=string)[1:2]
+    procs = reshape(Dagger.Processor[p1, p2], 1, 2)
+    scope = Dagger.UnionScope(Dagger.ExactScope(p1), Dagger.ExactScope(p2))
+
+    @testset "Multiple GPUs in one process ($kind)" begin
+        A = reshape(Float32.(1:64), 8, 8)
+        ref = copy(A)
+        Dagger.with_options(; scope) do
+            Dagger.spawn_datadeps() do
+                Dagger.@spawn scope=Dagger.ExactScope(p1) distributed_gpu_add!(Dagger.InOut(A))
+                Dagger.@spawn scope=Dagger.ExactScope(p2) distributed_gpu_scale!(Dagger.InOut(A))
+                Dagger.@spawn scope=Dagger.ExactScope(p1) distributed_gpu_add!(Dagger.InOut(A))
+            end
+        end
+        @test A == (ref .+ 1f0) .* 2f0 .+ 1f0
+
+        # Column tiles on different devices: the halo exchange copies spans
+        # between devices, and `collect` gathers tiles from both.
+        n = size(A, 1)
+        box(i, j) = sum(A[mod1(i + di, n), mod1(j + dj, n)] for di in -1:1, dj in -1:1)
+        expected = [box(i, j) for i in 1:n, j in 1:n]
+        B = Dagger.with_options(; scope) do
+            DA = Dagger.distribute(A, Dagger.Blocks(8, 4), procs)
+            DB = Dagger.distribute(zeros(Float32, 8, 8), Dagger.Blocks(8, 4), procs)
+            @stencil DB[idx] = sum(@neighbors(DA[idx], 1, Wrap()))
+            collect(DB)
+        end
+        @test B ≈ expected
+    end
+end
+
+for kind in (:CUDA, :ROC, :oneAPI, :Metal, :OpenCL)
+    if Dagger.gpu_can_compute(kind)
+        test_multi_gpu_process(kind)
+    end
+end
