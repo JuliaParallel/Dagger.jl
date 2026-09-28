@@ -179,7 +179,8 @@ jobs:
       # transfer, and a data-movement change can be a large win at one tile size
       # and a regression at the other. Measure both regimes.
       BENCHMARK_BLOCKSIZE: '[128, 512]'
-      BENCHMARK_SECONDS: '3'
+      # Setup and GC count against this budget; 3 s often yielded one sample.
+      BENCHMARK_SECONDS: '30'
       BENCHMARK_SAMPLES: '5'
     steps:
       - uses: actions/checkout@v7
@@ -194,6 +195,8 @@ jobs:
           version: '1'
           arch: x64
       - uses: julia-actions/cache@v3
+      - name: Test benchmark comparison
+        run: julia --startup-file=no benchmark/compare_tests.jl
       - name: Run benchmarks (current vs master)
         run: julia --color=yes benchmark/ci.jl
       - name: Write job summary
@@ -246,7 +249,8 @@ jobs:
       # See the `benchmarks` job: both tiles, so neither the many-small-chunks
       # nor the few-large-chunks regime goes unmeasured.
       BENCHMARK_BLOCKSIZE: '[128, 512]'
-      BENCHMARK_SECONDS: '3'
+      # Setup and GC count against this budget; 3 s often yielded one sample.
+      BENCHMARK_SECONDS: '30'
       BENCHMARK_SAMPLES: '5'
     steps:
       - uses: actions/checkout@v7
@@ -303,7 +307,8 @@ jobs:
       # See the `benchmarks` job: both tiles, so neither the many-small-chunks
       # nor the few-large-chunks regime goes unmeasured.
       BENCHMARK_BLOCKSIZE: '[128, 512]'
-      BENCHMARK_SECONDS: '3'
+      # Setup and GC count against this budget; 3 s often yielded one sample.
+      BENCHMARK_SECONDS: '30'
       BENCHMARK_SAMPLES: '5'
     steps:
       - uses: actions/checkout@v7
