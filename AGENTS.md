@@ -554,3 +554,15 @@ lesson.
    at "Loading benchmark script" for 85 minutes. Launch both plain and MPI
    workers through `pipeline(...; stdout=stdout, stderr=stderr)` so the last
    active benchmark and any failure are visible in the job log.
+
+52. **A missing benchmark spread is not evidence of a repeatable change.**
+   AirspeedVelocity omits quartiles when a trial has one timed sample. The
+   three-second CI budget included setup, teardown and GC, so even sub-ms
+   kernels often produced only one sample. Treating either missing spread as
+   automatically significant bypassed the other revision's measured noise:
+   a broadcast trial with 0.25 ms and 2.91 ms samples became a +327% regression
+   against a single 0.37 ms sample. Report such timing changes as inconclusive
+   in both directions, preserve allocation gates, and budget enough wall time
+   for repeated samples. Keep the classification in one place and export its
+   structured results for aggregation; do not infer significance by parsing
+   rendered Markdown.
