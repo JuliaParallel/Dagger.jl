@@ -6,7 +6,9 @@ const suites = ['array', 'linalg', 'sparse', 'stencil'];
 const backends = [
   { id: 'default', label: 'Threads', topology: '1 process × 4 threads' },
   { id: 'distributed', label: 'Distributed', topology: '4 processes × 1 thread' },
+  { id: 'distributed-threads', label: 'Distributed+Threads', topology: '2 processes × 2 threads' },
   { id: 'mpi', label: 'MPI', topology: '4 ranks × 1 thread' },
+  { id: 'mpi-threads', label: 'MPI+Threads', topology: '2 ranks × 2 threads' },
 ];
 const categories = ['regressions', 'improvements', 'within_noise', 'insufficient'];
 const escape = value => String(value).replaceAll('&', '&amp;').replaceAll('<', '&lt;')
