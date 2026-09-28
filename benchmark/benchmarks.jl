@@ -165,6 +165,7 @@ end
 
 # Spawn a fresh worker, clearing the stale control files first. Inherits the
 # orchestrator's stdout/stderr (so worker logs are visible) and environment.
+# `run(...; wait=false)` defaults to devnull, so connect both streams explicitly.
 function spawn_worker()
     rm(joinpath(WORKDIR, "ready"); force=true)
     rm(joinpath(WORKDIR, "request.json"); force=true)
@@ -184,11 +185,12 @@ function spawn_worker()
         # environment and the spawned process dies immediately.
         local proc
         MPI.mpiexec() do mpiexec
-            proc = run(`$mpiexec -n $MPI_RANKS $(worker_cmd())`; wait=false)
+            proc = run(pipeline(`$mpiexec -n $MPI_RANKS $(worker_cmd())`;
+                                stdout=stdout, stderr=stderr); wait=false)
         end
         return proc
     else
-        return run(worker_cmd(); wait=false)
+        return run(pipeline(worker_cmd(); stdout=stdout, stderr=stderr); wait=false)
     end
 end
 
