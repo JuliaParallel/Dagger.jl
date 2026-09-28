@@ -300,11 +300,15 @@ function Base.collect(d::DArray{T,N}; tree=true, copyto=false) where {T,N}
     #
     # Sparse tiles (`DSparseArray`) are unwrapped to host storage before `cat`:
     # GPU sparse types (CuSparse/ROCSparse/DeviceSparseMatrixCSC) disallow the
-    # scalar indexing that generic `cat` would use.
+    # scalar indexing that generic `cat` would use. Dense GPU tiles are brought
+    # to host too: tiles may live on different devices (with no peer access),
+    # which a device-side `cat` cannot combine, and the result is a host
+    # `Array` regardless.
     dimcatfuncs = [(x...) -> concat(x..., dims=i) for i in 1:N]
     tiles = asyncmap(a.chunks) do c
         x = fetch(c)
-        x isa DSparseArray ? _sparse_collect(x.mat) : x
+        x isa DSparseArray ? _sparse_collect(x.mat) :
+            x isa GPUArraysCore.AbstractGPUArray ? Array(x) : x
     end
     return _collect_dense(T, Val(N), treereduce_nd(dimcatfuncs, tiles))
 end
