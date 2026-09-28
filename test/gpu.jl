@@ -12,6 +12,7 @@ end
 # Sparse test bodies are shared with the CPU and MPI suites; see the file
 # header for the acceleration/backend matrix they cover.
 include(joinpath(@__DIR__, "array", "sparse_defs.jl"))
+include(joinpath(@__DIR__, "gpu_distributed.jl"))
 
 @everywhere begin
     function isongpu(X)
