@@ -37,7 +37,11 @@ end
 function Dagger.aliasing(x::CuArray{T}) where T
     space = Dagger.memory_space(x)
     S = typeof(space)
-    cuptr = pointer(x)
+    # N.B. Not `pointer(x)`: that takes stream ownership of the buffer for the
+    # calling task's active device, which throws when that device cannot reach
+    # `x` (e.g. aliasing RPCs on a multi-GPU worker) and re-stamps ownership as
+    # a side effect. Aliasing only needs the address.
+    cuptr = convert(CUDA.CuPtr{T}, x.data[].mem) + x.offset
     rptr = Dagger.RemotePtr{Cvoid}(UInt64(cuptr), space)
     return Dagger.ContiguousAliasing(Dagger.MemorySpan{S}(rptr, sizeof(T)*length(x)))
 end
@@ -460,7 +464,18 @@ Dagger.mpi_device_sync(::CUDAVRAMMemorySpace) = CUDA.device_synchronize()
 # registers a GC finalizer that unregisters the memory
 Dagger.gpu_memory_kind(::CuArray) = :CUDA
 Dagger.gpu_memory_kind(::CUDAVRAMMemorySpace) = :CUDA
-Dagger.pin_buffer!(::Val{:CUDA}, buf::DenseArray) = (CUDA.pin(buf); nothing)
+# N.B. CUDA.pin only dedupes per context, but host registration is
+# process-wide: pinning a buffer already registered through another device's
+# context (one host array moved to two GPUs) throws
+# HOST_MEMORY_ALREADY_REGISTERED. The range is page-locked either way, so skip it.
+const PIN_LOCK = ReentrantLock()
+function Dagger.pin_buffer!(::Val{:CUDA}, buf::DenseArray)
+    isempty(buf) && return
+    @lock PIN_LOCK begin
+        CUDADRV.is_pinned(pointer(buf)) || CUDA.pin(buf)
+    end
+    return
+end
 
 # Same-node device IPC: pool-backed CuArrays are not cuIpc-exportable, so the
 # sender stages into a direct (cuMemAlloc) allocation and ships its 64-byte
