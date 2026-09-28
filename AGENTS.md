@@ -864,3 +864,13 @@ lesson.
    and release it in `finally`. Use `CUDADRV` for closing handles too: CUDA 6
    moved the driver API into CUDACore. Test repeated transfers in both
    directions and mutate the destination to verify source independence.
+
+72. **Two GPUs of one process are not one device, and may not even be
+   peers.** Several paths assumed "same worker" meant "one kernel may touch
+   both buffers": the same-worker device remainder copy, `collect`'s
+   in-process `cat`, and CUDA `pointer()` (which takes ownership for the
+   *active* device and throws without P2P). `CUDA.pin` is also only deduped
+   per context while host registration is process-wide. Key direct device
+   paths on equal memory spaces, not equal workers, read addresses without
+   ownership side effects, and test with tiles on two devices of one
+   process: the one-GPU-per-worker suites cannot see any of this.
