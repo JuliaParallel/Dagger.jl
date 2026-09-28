@@ -544,9 +544,12 @@ end
 
 # Main copy function for RemainderAliasing
 function move!(dep_mod::RemainderAliasing{S}, to_space::MemorySpace, from_space::MemorySpace, to::Chunk, from::Chunk) where S
-    # Same-worker device-to-device: copy spans directly with one KA launch
-    if root_worker_id(from_space) == myid() && root_worker_id(to_space) == myid() &&
-       is_device_space(from_space) && is_device_space(to_space)
+    # Same-device: copy spans directly with one KA launch. Not merely
+    # same-worker: one kernel reading `from` and writing `to` needs both on
+    # one device (two GPUs of a worker need not be peer-accessible), so other
+    # device pairs stage through the host below.
+    if from_space == to_space && root_worker_id(to_space) == myid() &&
+       is_device_space(to_space)
         from_s = storage_array(unwrap(from))
         to_s = storage_array(unwrap(to))
         with_context!(from_space)
