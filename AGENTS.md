@@ -633,3 +633,22 @@ lesson.
     YAML but passes `{{array}}` to the benchmark worker, which rejects the suite
     before sampling. Check the expanded command arguments and artifact paths
     for every pipeline; parser and dependency checks do not catch this error.
+
+61. **A Distributed GPU transfer must preserve the source's ownership.**
+   Sending a raw device array in a slot-creation RPC deserializes it on the
+   receiver while `from_proc` still names the sender. The subsequent GPU
+   `move` then activates a remote worker's context locally and asserts; some
+   backends cannot serialize the array in the first place. Send an owner-side
+   `Chunk` and use the backend's Chunk transport instead. The same rule
+   applies when fetching a remote source for in-place copies. Pin regression
+   inputs and consumers to different workers selecting device 1: a GPU scope
+   alone does not guarantee that a transfer actually happens.
+
+62. **CUDA IPC must export staging memory and return an owned copy.**
+   CUDA's pooled allocations cannot be exported with `cuIpcGetMemHandle`, and
+   returning an imported mapping makes the receiver alias the sender's data
+   and depend on its lifetime. Use the shared `ipc_export`/`ipc_materialize`
+   hooks, keep the staging token on the sender until the receiver finishes,
+   and release it in `finally`. Use `CUDADRV` for closing handles too: CUDA 6
+   moved the driver API into CUDACore. Test repeated transfers in both
+   directions and mutate the destination to verify source independence.
