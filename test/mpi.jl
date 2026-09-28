@@ -6,6 +6,7 @@
 # NOT re-tested here. This suite covers only MPI-exclusive machinery:
 #
 #   - SPMD-uniform chunk creation (deterministic placement, MPIRef handles)
+#   - deterministic Datadeps placement across the threads within each rank
 #   - check_uniform / compare_all agreement
 #   - acceleration-aware wrapping of non-Chunk arguments (rank-0 ownership)
 #   - the SPMD-symmetric endpoint (MPIWireValue move_rewrap, aliased-object
@@ -145,6 +146,8 @@ end
 end
 
 @testset "Datadeps" begin
+
+include("mpi-threads.jl")
 
 @testset "Uniform chunk creation" begin
     Random.seed!(1)

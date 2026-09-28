@@ -266,10 +266,22 @@ function distribute_task!(queue::DataDepsTaskQueue, state::DataDepsState, all_pr
     @check_uniform(our_proc)
     @check_uniform(our_space)
 
+    # Query once per task: this is also used for tags and occupancy below.
+    uniform = uniform_execution()
+
     # Find the scope for this task (and its copies)
     # N.B. `task_scope` was already computed above for scheduling; the scope a
     # task is scheduled under and the scope its copies run under are the same.
-    if task_scope === DefaultScope()
+    if uniform
+        # Preserve the planner's deterministic thread choice. Widening to the
+        # memory space loses it: the uniform scheduler ignores local capacity
+        # and always picks the first usable processor, and MPI cannot steal.
+        proc_scope = get!(proc_to_scope_lfu, our_proc) do
+            ExactScope(our_proc)
+        end
+        our_scope = proc_in_scope(our_proc, task_scope) ? proc_scope :
+                    InvalidScope(proc_scope, task_scope)
+    elseif task_scope === DefaultScope()
         # Optimize for the common case (no user-specified scope), and cache the
         # proc=>scope mapping. `DefaultScope()` is a shared singleton, so `===`
         # identifies it exactly; the cached value is the same
@@ -378,10 +390,6 @@ function distribute_task!(queue::DataDepsTaskQueue, state::DataDepsState, all_pr
     if spec.options.syncdeps === nothing
         spec.options.syncdeps = take_syncdeps_set!()
     end
-    # N.B. Queried once per task and reused below: each call is a task-local
-    # acceleration lookup plus a dynamic dispatch, and it cannot change while
-    # planning a single task.
-    uniform = uniform_execution()
     if spec.options.tag === nothing && uniform
        spec.options.tag = to_tag()
     end

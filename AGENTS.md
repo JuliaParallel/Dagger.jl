@@ -535,3 +535,14 @@ lesson.
    generic `ReshapedArray` of a DArray also falls back to scalar indexing.
    Use nonuniform values and offset views crossing tile boundaries, with
    scalar indexing disabled, to check placement as well as dispatch.
+
+50. **Uniform scheduling must preserve Datadeps' chosen thread.** The
+   planner already chooses a rank-uniform processor, but widening its scope
+   to every processor in that memory space discards the thread choice. MPI
+   ignores rank-local capacity and uses a deterministic processor order, so
+   every task then lands on the first thread of its rank. MPI also disables
+   work stealing; it cannot repair that placement later. Retain an exact
+   processor scope under uniform execution, while leaving Distributed's
+   memory-space scope available for load balancing. Test both flat and
+   hierarchical planners with several rounds of tasks, checking actual thread
+   IDs as well as uniform processor metadata and restricted user scopes.
