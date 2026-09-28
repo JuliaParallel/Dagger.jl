@@ -546,3 +546,11 @@ lesson.
    memory-space scope available for load balancing. Test both flat and
    hierarchical planners with several rounds of tasks, checking actual thread
    IDs as well as uniform processor metadata and restricted user scopes.
+
+51. **Asynchronous benchmark workers need explicit output streams.** Julia's
+   `run(cmd; wait=false)` redirects stdout and stderr to `devnull`; it does
+   not inherit them as synchronous `run` does. The benchmark orchestrator
+   consequently hid all worker progress and errors while CI appeared stuck
+   at "Loading benchmark script" for 85 minutes. Launch both plain and MPI
+   workers through `pipeline(...; stdout=stdout, stderr=stderr)` so the last
+   active benchmark and any failure are visible in the job log.
