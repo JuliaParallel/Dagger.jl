@@ -149,11 +149,18 @@ jobs:
         run: julia -e 'using Pkg; Pkg.develop([PackageSpec(path=pwd()), PackageSpec(path="lib/TimespanLogging"), PackageSpec(path="lib/DaggerWebDash")]); include("lib/DaggerWebDash/test/runtests.jl")'
 
   benchmarks:
-    name: Benchmarks (vs master)
+    name: Benchmarks (vs master, ${{ matrix.suite }})
     runs-on: ubuntu-latest
     timeout-minutes: 120
+    # Each suite compares both revisions on the same free 4-vCPU runner.
+    # Split compilation/setup across jobs without reducing coverage.
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [array, linalg, sparse, stencil]
     if: ${{ !contains(github.event.head_commit.message, '[skip tests]') && !contains(github.event.head_commit.message, '[skip benchmarks]') }}
     env:
+      BENCHMARK: '${{ matrix.suite }}:dagger'
       # `benchmark/ci.jl` compares the working tree ("dirty") against this base
       # revision and fails the job if any benchmark regresses past the threshold.
       BENCHMARK_BASE_REV: master
@@ -203,20 +210,27 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: benchmark-results-default
+          name: benchmark-results-default-${{ matrix.suite }}
           path: ${{ env.BENCHMARK_OUTPUT_DIR }}/
           if-no-files-found: ignore
       # PR comment posting is handled by the `benchmarks-report` job below,
       # once this job and its Distributed/MPI siblings have all finished --
-      # a single writer avoids three jobs racing to read-modify-write the
+      # a single writer avoids the suite jobs racing to read-modify-write the
       # same PR comment.
 
   benchmarks-distributed:
-    name: Benchmarks (Distributed, vs master)
+    name: Benchmarks (Distributed, vs master, ${{ matrix.suite }})
     runs-on: ubuntu-latest
     timeout-minutes: 120
+    # Each suite compares both revisions on the same free 4-vCPU runner.
+    # Split compilation/setup across jobs without reducing coverage.
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [array, linalg, sparse, stencil]
     if: ${{ !contains(github.event.head_commit.message, '[skip tests]') && !contains(github.event.head_commit.message, '[skip benchmarks]') }}
     env:
+      BENCHMARK: '${{ matrix.suite }}:dagger'
       BENCHMARK_BASE_REV: master
       # Multiple OS processes on a shared runner are noisier than the
       # single-process default job, so allow more slack before flagging a
@@ -259,16 +273,23 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: benchmark-results-distributed
+          name: benchmark-results-distributed-${{ matrix.suite }}
           path: ${{ env.BENCHMARK_OUTPUT_DIR }}/
           if-no-files-found: ignore
 
   benchmarks-mpi:
-    name: Benchmarks (MPI, vs master)
+    name: Benchmarks (MPI, vs master, ${{ matrix.suite }})
     runs-on: ubuntu-latest
     timeout-minutes: 120
+    # Each suite compares both revisions on the same free 4-vCPU runner.
+    # Split compilation/setup across jobs without reducing coverage.
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [array, linalg, sparse, stencil]
     if: ${{ !contains(github.event.head_commit.message, '[skip tests]') && !contains(github.event.head_commit.message, '[skip benchmarks]') }}
     env:
+      BENCHMARK: '${{ matrix.suite }}:dagger'
       BENCHMARK_BASE_REV: master
       # See benchmarks-distributed: shared-runner multi-process noise.
       BENCHMARK_REGRESSION_THRESHOLD: '0.35'
@@ -309,7 +330,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: benchmark-results-mpi
+          name: benchmark-results-mpi-${{ matrix.suite }}
           path: ${{ env.BENCHMARK_OUTPUT_DIR }}/
           if-no-files-found: ignore
 
@@ -328,21 +349,21 @@ jobs:
         continue-on-error: true
         uses: actions/download-artifact@v7
         with:
-          name: benchmark-results-default
+          pattern: benchmark-results-default-*
           path: results-default
       - name: Download Distributed benchmark results
         if: always()
         continue-on-error: true
         uses: actions/download-artifact@v7
         with:
-          name: benchmark-results-distributed
+          pattern: benchmark-results-distributed-*
           path: results-distributed
       - name: Download MPI benchmark results
         if: always()
         continue-on-error: true
         uses: actions/download-artifact@v7
         with:
-          name: benchmark-results-mpi
+          pattern: benchmark-results-mpi-*
           path: results-mpi
       - name: Comment combined results on PR
         # Best-effort: fork PRs get a read-only token, so the comment will 403;
@@ -354,15 +375,22 @@ jobs:
           script: |
             const fs = require('fs');
 
-            function section(dir) {
-              const reportPath = `${dir}/report.md`;
-              if (!fs.existsSync(reportPath)) {
-                return null;
-              }
-              return fs.readFileSync(reportPath, 'utf8')
-                .split('\n')
-                .filter(line => !line.includes('artifact://'))
-                .join('\n');
+            function section(dir, backend) {
+              // Keep missing shards visible instead of presenting a partial
+              // download as a complete backend report.
+              return ['array', 'linalg', 'sparse', 'stencil'].map(suite => {
+                const reportPath = `${dir}/benchmark-results-${backend}-${suite}/report.md`;
+                const content = fs.existsSync(reportPath)
+                  ? fs.readFileSync(reportPath, 'utf8')
+                      // Keep full tables in job summaries and artifacts so
+                      // the combined PR comment stays within its size limit.
+                      .split('\n#### Median time')[0]
+                      .split('\n')
+                      .filter(line => !line.includes('artifact://'))
+                      .join('\n')
+                  : null;
+                return collapsible(suite, content);
+              }).join('\n\n');
             }
 
             function collapsible(summary, content) {
@@ -379,11 +407,11 @@ jobs:
               marker,
               '## Dagger benchmarks: `dirty` vs `master`',
               '',
-              collapsible('Multi-threaded benchmarks (4 threads)', section('results-default')),
+              collapsible('Multi-threaded benchmarks (4 threads)', section('results-default', 'default')),
               '',
-              collapsible('Distributed benchmarks (4 processes)', section('results-distributed')),
+              collapsible('Distributed benchmarks (4 processes)', section('results-distributed', 'distributed')),
               '',
-              collapsible('MPI benchmarks (4 ranks)', section('results-mpi')),
+              collapsible('MPI benchmarks (4 ranks)', section('results-mpi', 'mpi')),
               '',
               `[Full results and plots](${runUrl}) (download the \`benchmark-results-*\` artifacts).`,
             ];
