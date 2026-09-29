@@ -585,3 +585,17 @@ lesson.
     does not measure variation between revisions' runs: require five samples
     per revision and confirm timing regressions in fresh processes with the
     revision order reversed before counting them.
+
+55. **CPU-only scope checks must account for MPI processor wrappers.**
+    `compatible_processors` under MPI includes `MPIProcessor{ThreadProc}`, so
+    `all(proc isa ThreadProc for proc in ...)` rejects an all-CPU scope.
+    LU's former `use_lapack_panel` check selected the per-row task
+    fallback under MPI. Test backend capability through a wrapper-aware hook
+    or forwarding predicate rather than the outer processor type. Increasing
+    matrix size also increases that fallback's scheduling work.
+
+56. **MPI callers must read mutable scalar status through the dependency graph.**
+    A plain `Ref` used as a Datadeps argument is updated on its owning rank;
+    reading the caller's original `Ref` on other ranks can return stale status.
+    Submit a final scalar read with `In(ref)` inside the region, then fetch its
+    uniform task result for error checks and returned factorization status.

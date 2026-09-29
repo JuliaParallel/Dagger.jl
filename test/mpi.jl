@@ -826,21 +826,7 @@ end # @testset "Datadeps"
     @test recon < 1e-12
 end
 
-@testset "LU" begin
-    Random.seed!(1234)
-    A = randn(100, 100)
-    orig_A = copy(A)
-    DA = DArray(A, Blocks(25, 25))
-
-    F = lu!(DA, RowMaximum(); check=false)
-    lu!(A, RowMaximum())
-
-    @test norm(collect(A) - collect(DA)) / norm(collect(A)) < 1e-12
-    DAc = collect(DA)
-    p = LinearAlgebra.ipiv2perm(collect(F.ipiv), size(DAc, 1))
-    LtU = UnitLowerTriangular(DAc) * UpperTriangular(DAc)
-    @test norm(LtU - orig_A[p, :]) / norm(orig_A) < 1e-12
-end
+include("mpi-lu.jl")
 
 @testset "Stencils" begin
     # Chunks are placed round-robin across ranks (see "Uniform chunk
