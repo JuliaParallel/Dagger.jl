@@ -20,7 +20,7 @@
 # - BENCHMARK_NOISE_TOLERANCE: multiple of the reported timing spread that a
 #   change must clear before it is called a regression or an improvement
 #   (default "1.0"). See "Regression check" below; set to "0" to disable the
-#   significance gate and report purely on the thresholds.
+#   spread gate; the five-sample and confirmation requirements still apply.
 # - BENCHMARK_CI_THREADS: Julia threads for each benchmark run (default "4").
 # - BENCHMARK_OUTPUT_DIR: where JSON/plots/report are written
 #   (default "benchmark_results").
@@ -78,7 +78,16 @@ benchmark(
     tune = false,
 )
 
-combined = load_results("Dagger", [BASE_REV, CUR_REV]; input_dir = OUTPUT_DIR)
+include(joinpath(@__DIR__, "compare.jl"))
+function load_sampled_results(dir)
+    combined = load_results("Dagger", [BASE_REV, CUR_REV]; input_dir=dir)
+    for rev in (BASE_REV, CUR_REV)
+        raw = JSON3.read(read(joinpath(dir, "results_Dagger@$(replace(rev, '/' => '_')).json"), String), Dict{String,Any})
+        attach_sample_counts!(combined[rev], raw)
+    end
+    return combined
+end
+combined = load_sampled_results(OUTPUT_DIR)
 
 # --- Results table ---------------------------------------------------------
 
@@ -116,12 +125,23 @@ end
 base = combined[BASE_REV]
 cur = combined[CUR_REV]
 
-# Use the same median ± IQR bands as the results table. Single-sample
-# timings are inconclusive; allocation metrics still use their own threshold.
-include(joinpath(@__DIR__, "compare.jl"))
-comparison = compare_benchmarks(base, cur; threshold=THRESHOLD,
-                               alloc_threshold=ALLOC_THRESHOLD,
-                               noise_tolerance=NOISE_TOLERANCE)
+# Require five actual samples in both revisions, then confirm timing flags in
+# fresh processes with revision order reversed to expose run-order effects.
+comparison_options = (; threshold=THRESHOLD, alloc_threshold=ALLOC_THRESHOLD,
+                        noise_tolerance=NOISE_TOLERANCE)
+comparison = compare_benchmarks(base, cur; comparison_options...)
+confirmation = nothing
+if any(entry -> entry[2] == "time", comparison.regressions)
+    confirmation_dir = joinpath(OUTPUT_DIR, "confirmation")
+    mkpath(confirmation_dir)
+    @info "Confirming timing regressions with a fresh comparison in reversed revision order"
+    benchmark("Dagger", [CUR_REV, BASE_REV]; output_dir=confirmation_dir,
+              script=SCRIPT, path=PROJECT_DIR, extra_pkgs=EXTRA_PKGS,
+              exeflags=`-t $CI_THREADS`, tune=false)
+    confirmation = load_sampled_results(confirmation_dir)
+    repeated = compare_benchmarks(confirmation[BASE_REV], confirmation[CUR_REV]; comparison_options...)
+    comparison = confirm_timing_regressions(comparison, repeated)
+end
 (; regressions, improvements, within_noise, insufficient) = comparison
 
 pct(r) = string(round((r - 1) * 100; digits = 1), "%")
@@ -173,7 +193,8 @@ end
 entries_json(entries) = [(; name, metric, ratio) for (name, metric, ratio) in entries]
 summary = (;
     schema_version=1, base_revision=BASE_REV, current_revision=CUR_REV,
-    thresholds=(; time=THRESHOLD, allocations=ALLOC_THRESHOLD, noise=NOISE_TOLERANCE),
+    thresholds=(; time=THRESHOLD, allocations=ALLOC_THRESHOLD, noise=NOISE_TOLERANCE, min_samples=5),
+    timing_confirmation_run=confirmation !== nothing,
     jobs=[(; name, regressions=nreg, improvements=nimp, within_noise=nnoise,
              insufficient=ninsufficient) for (name, nreg, nimp, nnoise, ninsufficient) in job_summary_rows],
     regressions=entries_json(regressions), improvements=entries_json(improvements),
@@ -230,11 +251,19 @@ open(joinpath(OUTPUT_DIR, "report.md"), "w") do io
     if !isempty(insufficient)
         println(io, "#### Inconclusive timing changes")
         println(io)
-        println(io, "At least one revision recorded only one timed sample; these changes are not counted as improvements or regressions.")
+        println(io, "These changes had fewer than five timed samples in at least one revision, lacked a measured spread, or were not confirmed by the independent run; they are not counted as improvements or regressions.")
         println(io)
         for (name, metric, r) in insufficient
             println(io, "- `", name, "` (", metric, "): ", pct(r))
         end
+        println(io)
+    end
+    if confirmation !== nothing
+        println(io, "#### Independent confirmation (reversed revision order)")
+        println(io)
+        println(io, "Timing regressions are counted only when both comparisons agree, with at least five samples per revision.")
+        println(io)
+        println(io, create_table(confirmation; key="median", add_ratio_col=true))
         println(io)
     end
     println(io, "#### Median time")
@@ -269,11 +298,11 @@ if !isempty(within_noise)
 end
 
 if !isempty(insufficient)
-    println("\n$(length(insufficient)) timing change(s) are inconclusive: at least one revision recorded only one timed sample.")
+    println("\n$(length(insufficient)) timing change(s) are inconclusive: fewer than five samples, missing spread, or no independent confirmation.")
 end
 
 if isempty(regressions)
-    println("\nNo benchmarks regressed (time > $(round(THRESHOLD * 100))%, allocs/memory > $(round(ALLOC_THRESHOLD * 100))%).")
+    println("\nNo confirmed benchmark regressions (time > $(round(THRESHOLD * 100))%, allocs/memory > $(round(ALLOC_THRESHOLD * 100))%).")
     exit(0)
 else
     println("\n$(length(regressions)) benchmark metric(s) regressed:")
