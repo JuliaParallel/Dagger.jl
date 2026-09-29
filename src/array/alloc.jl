@@ -169,7 +169,7 @@ end
 function Base.fill!(A::DArray, x)
     spawn_datadeps() do
         for chunk in A.chunks
-            Dagger.@spawn fill!(chunk, x)
+            Dagger.@spawn fill!(Out(chunk), x)
         end
     end
     return A
