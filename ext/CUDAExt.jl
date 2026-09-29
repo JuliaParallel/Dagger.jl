@@ -81,8 +81,11 @@ end
 # with no GPU API calls, so its scheduler move may run inline (like a local
 # CPU move). Everything else — host values, CPU or other-device Chunks —
 # stays async so uploads/transfers can overlap.
+# Plain bits values (region codes, halo widths, boundary singletons) move as
+# themselves (see the host-to-device `move`), so they too are inlined rather
+# than costing a spawned task each.
 Dagger.argument_move_may_inline(to_proc::CuArrayDeviceProc, @nospecialize(value)) =
-    value isa Chunk && Dagger.processor(value) == to_proc
+    value isa Chunk ? Dagger.processor(value) == to_proc : isbits(value)
 
 function to_device(proc::CuArrayDeviceProc)
     @assert Dagger.root_worker_id(proc) == myid()
@@ -110,16 +113,24 @@ end
 Dagger.with_context!(proc::CuArrayDeviceProc) = with_context!(proc)
 Dagger.with_context!(space::CUDAVRAMMemorySpace) = with_context!(space)
 Dagger.with_context(f, x::Union{CuArrayDeviceProc,CUDAVRAMMemorySpace}) = with_context(f, x)
+# N.B. Saves the raw task-local stream slot rather than calling `stream()`: in a
+# task that has not used this device yet, `stream()` creates a fresh `CuStream`
+# just so it can be restored afterwards. Datadeps and the scheduler run moves
+# and copies in fresh tasks, so that was one `cuStreamCreate` per argument.
+# CUDA.jl 6 moved the driver state into the CUDACore subpackage.
+const CUDAState = isdefined(CUDA, :CUDACore) ? CUDA.CUDACore : CUDA
 function with_context(f, x)
-    old_ctx = context()
-    old_stream = stream()
+    state = CUDAState.task_local_state!()
+    old_ctx = state.context
+    old_stream = state.streams[CUDAState.deviceid(state.device)+1]
 
     with_context!(x)
     try
         f()
     finally
         context!(old_ctx)
-        stream!(old_stream)
+        state = CUDAState.task_local_state!()
+        state.streams[CUDAState.deviceid(state.device)+1] = old_stream
     end
 end
 
@@ -145,6 +156,17 @@ Dagger.allocate_array_func(::CuArrayDeviceProc, ::typeof(zeros)) = CUDA.zeros
 struct AllocateUndef{S} end
 (::AllocateUndef{S})(T, dims::Dims{N}) where {S,N} = CuArray{S,N}(undef, dims)
 Dagger.allocate_array_func(::CuArrayDeviceProc, ::Dagger.AllocateUndef{S}) where S = AllocateUndef{S}()
+
+# Uninitialized Datadeps slots: without these, a slot in another GPU's memory
+# was created by copying the whole array there (staged through the host when
+# the devices have no peer access), only for Datadeps' copy-to phase to
+# overwrite it with a second copy. See `Dagger.slot_may_be_uninit`.
+Dagger.can_alloc_uninit(::CUDAVRAMMemorySpace, ::Type{<:CuArray{T}}) where {T} = isbitstype(T)
+function Dagger.alloc_uninit(space::CUDAVRAMMemorySpace, ::Type{A}, dims::Dims{N}) where {T,N,A<:CuArray{T,N}}
+    return with_context(space) do
+        A(undef, dims)
+    end
+end
 
 # In-place
 # N.B. These methods assume that later operations will implicitly or
@@ -176,6 +198,9 @@ end
 
 # Out-of-place HtoD
 function Dagger.move(from_proc::CPUProc, to_proc::CuArrayDeviceProc, x)
+    # Bits values hold no host memory for `adapt` to replace, so they are used
+    # as-is, without a context switch and a device-wide synchronize per value.
+    isbits(x) && return x
     with_context(to_proc) do
         if x isa DenseArray && isbitstype(eltype(x))
             Dagger.pin_buffer!(:CUDA, x)

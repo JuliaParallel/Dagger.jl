@@ -798,9 +798,11 @@ function select_neighborhood_chunks(chunks, idx, neigh_dist, boundary)
 end
 
 # Returns (region_metadata, neighbor_chunk_dtasks) without spawning intermediate load tasks.
-# region_metadata: Vector of (region_code, is_boundary, boundary_dims, is_prematerialized).
-# `is_prematerialized` is set by `stencil_region_info`; it is always `false` here,
+# region_metadata: Vector of (region_code, is_boundary, boundary_dims, src, is_packed).
+# `src` indexes the neighbor list the sweeping task receives; here it is simply the
+# region's own index into `neighbor_chunks`, and `is_packed` is always `false`,
 # meaning the region is still to be taken from the neighboring chunk itself.
+# `stencil_region_info` may redirect a region into a packed halo buffer instead.
 # neighbor_chunk_dtasks: Vector of raw chunk DTasks (resolved to arrays when build_halo_new runs).
 function select_neighborhood_info(chunks, idx, neigh_dist, boundary)
     validate_neigh_dist(neigh_dist)
@@ -810,7 +812,7 @@ function select_neighborhood_info(chunks, idx, neigh_dist, boundary)
     # `Tuple[]` would box each one on `push!` and box each field again on the
     # destructure in `stencil_region_info`, which reads all 3^N-1 of them per
     # chunk.
-    region_metadata = Tuple{NTuple{N,Int},Bool,NTuple{N,Bool},Bool}[]
+    region_metadata = Tuple{NTuple{N,Int},Bool,NTuple{N,Bool},Int,Bool}[]
     neighbor_chunks = Any[]
 
     for i in 0:(3^N - 1)
@@ -833,9 +835,9 @@ function select_neighborhood_info(chunks, idx, neigh_dist, boundary)
             else
                 new_idx = idx
             end
-            push!(region_metadata, (region_code, true, boundary_dims, false))
+            push!(region_metadata, (region_code, true, boundary_dims, length(region_metadata) + 1, false))
         else
-            push!(region_metadata, (region_code, false, ntuple(_ -> false, N), false))
+            push!(region_metadata, (region_code, false, ntuple(_ -> false, N), length(region_metadata) + 1, false))
         end
         push!(neighbor_chunks, chunks[new_idx])
     end
@@ -898,17 +900,64 @@ end
 @inline halo_region_materialized(style::CopyHalos, neigh_dist, boundary, region_code, is_boundary, boundary_dims, chunk) =
     halo_region(style, neigh_dist, boundary, region_code, is_boundary, boundary_dims, chunk)
 
-@inline function _build_fused_halos(style, neigh_dist, boundary, region_metadata,
-                                    neighbor_chunks::NTuple{NH,Any}) where NH
-    return ntuple(Val(NH)) do i
-        region_code, is_boundary, boundary_dims, is_prematerialized = region_metadata[i]
-        if is_prematerialized
-            # `stencil_region_info` already built this region in its owner's memory
-            # space; `neighbor_chunks[i]` is the region itself, not a chunk to slice.
-            neighbor_chunks[i]
+# The shape of halo region `region_code` around `center`. A region spans the
+# neighbor's full extent along every dimension where its code is 0, and chunks at
+# the same index along a dimension share that dimension's extent (a DArray's
+# chunks form a tensor grid), so the center's extent stands in for the
+# neighbor's. That lets the sweeping task locate regions in a packed buffer
+# without seeing the neighbors they were cut from.
+@inline halo_region_size(center, region_code::NTuple{N,Int}, neigh_dist) where N =
+    ntuple(d -> region_code[d] == 0 ? size(center, d) : get_neigh_dist(neigh_dist, d), Val(N))
+
+"""
+    pack_halo_regions(style, neigh_dist, boundary, region_metadata, neighbors...) -> buffer
+
+Extracts several halo regions, each from its own neighboring chunk, into one flat
+buffer, in order. Runs in the neighbors' memory space: every region a chunk needs
+from another space then crosses the boundary as a single transfer, rather than one
+task and one transfer per region -- up to `3^N - 1` of them, most of which (the
+corners) hold a single element.
+"""
+function pack_halo_regions(style, neigh_dist, boundary, region_metadata, neighbors...)
+    regions = map(region_metadata, neighbors) do (region_code, is_boundary, boundary_dims), chunk
+        halo_region(style, neigh_dist, boundary, region_code, is_boundary, boundary_dims, chunk)
+    end
+    buffer = similar(first(neighbors), eltype(first(neighbors)), sum(length, regions))
+    offset = 0
+    for region in regions
+        len = length(region)
+        reshape(view(buffer, (offset + 1):(offset + len)), size(region)) .= region
+        offset += len
+    end
+    return buffer
+end
+
+# Region `i`, cut out of the packed buffer it was shipped in (see `pack_halo_regions`).
+# Its offset is the total size of the regions packed into the same buffer before it.
+function unpack_halo_region(buffer, center, region_metadata, neigh_dist, i)
+    region_code, _, _, src, _ = region_metadata[i]
+    offset = 0
+    for j in 1:(i - 1)
+        other_code, _, _, other_src, other_packed = region_metadata[j]
+        if other_packed && other_src == src
+            offset += prod(halo_region_size(center, other_code, neigh_dist))
+        end
+    end
+    sz = halo_region_size(center, region_code, neigh_dist)
+    return reshape(view(buffer, (offset + 1):(offset + prod(sz))), sz)
+end
+
+@inline function _build_fused_halos(style, neigh_dist, boundary, region_metadata::NTuple{NR,Any},
+                                    center, neighbor_chunks) where NR
+    return ntuple(Val(NR)) do i
+        region_code, is_boundary, boundary_dims, src, is_packed = region_metadata[i]
+        if is_packed
+            # `stencil_region_info` already extracted this region in its owner's
+            # memory space, into a buffer shared with that space's other regions.
+            unpack_halo_region(neighbor_chunks[src], center, region_metadata, neigh_dist, i)
         else
             halo_region(style, neigh_dist, boundary, region_code, is_boundary,
-                        boundary_dims, neighbor_chunks[i])
+                        boundary_dims, neighbor_chunks[src])
         end
     end
 end
@@ -918,17 +967,17 @@ end
 
 Wraps `center` (used in place, not copied) plus halo regions taken from
 `neighbor_chunks` into a `HaloArray`. `region_metadata` is the per-region
-`(region_code, is_boundary, boundary_dims, is_prematerialized)` tuple precomputed
-on the submitting task by `stencil_region_info`. Where `is_prematerialized` is
-set, the corresponding entry of `neighbor_chunks` is the halo region itself
-rather than the chunk to slice it out of.
+`(region_code, is_boundary, boundary_dims, src, is_packed)` tuple precomputed on
+the submitting task by `stencil_region_info`: region `i` is sliced out of the
+neighboring chunk `neighbor_chunks[src]`, or, where `is_packed` is set,
+`neighbor_chunks[src]` is a buffer of regions packed by `pack_halo_regions`.
 """
 function build_fused_halo(neigh_dist, boundary, region_metadata,
                           center::AbstractArray{T,N}, neighbor_chunks::Vararg{Any,NH}) where {T,N,NH}
     validate_neigh_dist(neigh_dist, size(center))
     halo_width = ntuple(i -> get_neigh_dist(neigh_dist, i), Val(N))
     halos = _build_fused_halos(halo_build_style(boundary), neigh_dist, boundary,
-                               region_metadata, neighbor_chunks)
+                               region_metadata, center, neighbor_chunks)
     return HaloArray(center, halos, halo_width; own_center=false)
 end
 
@@ -955,20 +1004,22 @@ end
     stencil_region_info(src_chunks, write_chunks, neigh_dist, boundary) -> table
 
 Per-chunk `(region_metadata, neighbor_values)` for a neighborhood read, laid out
-like `src_chunks`. `neighbor_values[i]` is what the sweeping task needs in order
-to obtain halo region `i`, and the region's `is_prematerialized` flag says which
-of the two forms it takes:
+like `src_chunks`. `neighbor_values` is what the sweeping task receives in order
+to obtain its halo regions, and each region's metadata says where to find it:
 
-- a neighboring chunk, sliced by the sweeping task itself (`false`), or
-- the halo region itself, already extracted (`true`).
+- a neighboring chunk, sliced by the sweeping task itself (`is_packed == false`), or
+- a buffer of regions already extracted and packed together (`is_packed == true`).
 
 The first form is what we want when the neighbor is in the same memory space as
 the chunk being written, because slicing it there is free. When the neighbor lives
 elsewhere it is emphatically not: passing the neighbor as a task argument makes
 Datadeps copy the *entire* chunk across the space boundary to serve a halo of a
 few elements, which for one MPI rank per chunk means shipping the whole
-neighborhood every sweep. So in that case the region is extracted by a task
-scoped to the neighbor's own space and only the region crosses the boundary.
+neighborhood every sweep. So in that case the regions are extracted by a task
+scoped to the neighbors' own space and only they cross the boundary -- all of a
+chunk's regions from one space packed into one buffer, since each crossing costs
+a task and a transfer (staged through the host between GPUs without peer
+access) regardless of its size.
 """
 # `memory_space` of a chunk `DTask` is not free -- it `fetch`es the task's result
 # reference, boxing it -- and this loop asks the same question about the same
@@ -985,28 +1036,77 @@ end
 function stencil_region_info(src_chunks, write_chunks, neigh_dist, boundary)
     style = halo_build_style(boundary)
     table = Array{Any}(undef, size(src_chunks))
-    # (index, region) => extraction task, resolved after all of them are spawned so
-    # that the extractions run concurrently rather than one chunk at a time.
+    # (index, neighbor slot) => packing task, resolved after all of them are spawned
+    # so that the extractions run concurrently rather than one chunk at a time.
     extractions = Pair{Tuple{CartesianIndex{ndims(src_chunks)},Int},Any}[]
     space_memo = IdDict{Any,Any}()
     for idx in CartesianIndices(src_chunks)
         region_metadata, neighbor_chunks = select_neighborhood_info(src_chunks, idx, neigh_dist, boundary)
         target_space = _memoized_memory_space!(space_memo, write_chunks[idx])
+        # Same-space neighbors are passed through as-is; the regions of each
+        # foreign space are grouped, in region order, to be packed together.
+        neighbor_values = Any[]
+        foreign = Pair{MemorySpace,Vector{Int}}[]
         for i in eachindex(region_metadata)
-            region_code, is_boundary, boundary_dims, _ = region_metadata[i]
             neighbor = neighbor_chunks[i]
             neighbor_space = _memoized_memory_space!(space_memo, neighbor)
-            neighbor_space == target_space && continue
-            region_metadata[i] = (region_code, is_boundary, boundary_dims, true)
-            task = Dagger.@spawn name="stencil_halo" scope=memory_space_scope(neighbor_space) halo_region_materialized(style, neigh_dist, boundary, region_code, is_boundary, boundary_dims, neighbor)
-            push!(extractions, (idx, i) => task)
+            if neighbor_space == target_space
+                region_code, is_boundary, boundary_dims, _, _ = region_metadata[i]
+                push!(neighbor_values, neighbor)
+                region_metadata[i] = (region_code, is_boundary, boundary_dims, length(neighbor_values), false)
+            else
+                g = findfirst(p -> p.first == neighbor_space, foreign)
+                if g === nothing
+                    push!(foreign, neighbor_space => [i])
+                else
+                    push!(foreign[g].second, i)
+                end
+            end
         end
-        table[idx] = (Tuple(region_metadata), neighbor_chunks)
+        for (neighbor_space, regions) in foreign
+            push!(neighbor_values, nothing)
+            src = length(neighbor_values)
+            for i in regions
+                region_code, is_boundary, boundary_dims, _, _ = region_metadata[i]
+                region_metadata[i] = (region_code, is_boundary, boundary_dims, src, true)
+            end
+            packed_metadata = Tuple(map(i -> region_metadata[i][1:3], regions))
+            task = Dagger.@spawn name="stencil_halo" scope=memory_space_scope(neighbor_space) pack_halo_regions(style, neigh_dist, boundary, packed_metadata, neighbor_chunks[regions]...)
+            push!(extractions, (idx, src) => task)
+        end
+        table[idx] = (Tuple(region_metadata), neighbor_values)
     end
-    for ((idx, i), task) in extractions
-        table[idx][2][i] = fetch(task; raw=true)
+    for ((idx, src), task) in extractions
+        table[idx][2][src] = fetch(task; raw=true)
     end
     return table
+end
+
+"""
+    stencil_owner_scope(memo, write_chunk) -> Union{AbstractScope,Nothing}
+
+The scope a chunk's sweep task should run in: the processor that owns the chunk
+it writes. Datadeps' schedulers place a task by count or by cost estimate, and
+either may put a chunk's sweep on another device; that task then pulls its whole
+write chunk (and center chunk) across and Datadeps writes the result back,
+moving the full chunk twice per expression just to save moving a few halo
+elements. `stencil_region_info` already extracts cross-space halos on the
+neighbor's side, so with the sweep on the owner only those halos cross.
+
+Only spaces served by a single processor (a GPU) are pinned: pinning a CPU
+space would serialize every chunk on that worker onto one thread. The pin is
+also dropped when it falls outside the caller's scope, in which case the task
+inherits that scope as before.
+"""
+function stencil_owner_scope(memo::IdDict{Any,Any}, @nospecialize(write_chunk))
+    space = _memoized_memory_space!(memo, write_chunk)
+    length(processors(space)) == 1 || return nothing
+    owner = memory_space_scope(space)
+    user = get_options(:scope, nothing)
+    if user !== nothing && constrain(owner, user) isa InvalidScope
+        return nothing
+    end
+    return owner
 end
 
 @inline load_neighborhood(arr::HaloArray{T,N}, idx) where {T,N} =
@@ -1424,13 +1524,16 @@ macro stencil(orig_ex)
             $shadow_fn($(shadow_args...))
         end
         inner_fn = Expr(:->, Expr(:tuple, inner_write_var, Expr(:..., task_args)), inner_fn_body)
+        # Each chunk's task runs on the owner of the chunk it writes (see `stencil_owner_scope`).
+        @gensym owner_memo
         inner_spawn_ex = Expr(:block, prologue_exs...,
-                              :(Dagger.@spawn name="stencil_inner_fn" $inner_fn($write_dep_ex, $(arg_exs...))))
+                              :(Dagger.@spawn name="stencil_inner_fn" scope=$stencil_owner_scope($owner_memo, $chunks($write_var)[$chunk_idx]) $inner_fn($write_dep_ex, $(arg_exs...))))
 
         # 2c. One spawn_datadeps region per expression, one task per chunk. Because the
         # region blocks until all of its tasks finish, the next expression's tasks are
         # only submitted once this expression has been applied everywhere, which is what
         # gives `@stencil` its "all at once" semantics.
+        push!(final_ex.args, :($owner_memo = IdDict{Any,Any}()))
         push!(final_ex.args, :(Dagger.spawn_datadeps() do
             for $chunk_idx in $CartesianIndices($chunks($write_var))
                 $inner_spawn_ex
