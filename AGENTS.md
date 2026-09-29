@@ -577,3 +577,11 @@ lesson.
     benchmarks, log the selected mode, and make checks an explicit diagnostic
     option. Keep uniformity checking enabled in functional MPI tests. Repeat
     comparisons before attributing a few noisy samples to a scheduling change.
+
+54. **Timing verdicts need actual sample counts and independent confirmation.**
+    AirspeedVelocity's flattened statistics omit the sample count, and
+    BenchmarkTools' `params.samples` is a limit rather than a measurement.
+    Recover counts from raw `times` arrays. A tight spread within one process
+    does not measure variation between revisions' runs: require five samples
+    per revision and confirm timing regressions in fresh processes with the
+    revision order reversed before counting them.
