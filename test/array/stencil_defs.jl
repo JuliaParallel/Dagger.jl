@@ -1,6 +1,6 @@
 # Shared `@stencil` correctness suite. Defines `test_stencil` so it can be
 # reused both for the single-process CPU/GPU testsets below and for the
-# MPI(+GPU) suites in test/mpi.jl / test/mpi_gpu_suite.jl.
+# MPI(+GPU) suites in test/mpi/cpu.jl / test/mpi/gpu_suite.jl.
 
 @everywhere import Dagger: @stencil, Wrap, Pad, Reflect, AntiReflect, Clamp, LinearExtrapolate
 

@@ -176,7 +176,7 @@ lesson.
    device* — and generic `cat` fills its output element by element, which is
    scalar indexing. Keep shared test bodies in a `test/array/*_defs.jl` file
    (as `stencil_defs.jl` and `sparse_defs.jl` do) and call them from all four
-   entry points; `test/mpi_opencl.jl` makes the fourth cell cheap to run
+   entry points; `test/mpi/opencl.jl` makes the fourth cell cheap to run
    locally.
 
 17. **Extensions of the same package must not reach into each other.** Load

@@ -72,12 +72,12 @@ mpiexec -n 4 julia --project --threads=4 my_program.jl
 ```
 
 If you do not have a system `mpiexec` handy, Dagger's test helper
-`test/run_mpi.jl` launches a script through the `mpiexec` that MPI.jl itself
+`test/mpi/run.jl` launches a script through the `mpiexec` that MPI.jl itself
 provides:
 
 ```sh
-# julia --project=<env> test/run_mpi.jl <nranks> <threads> <script> [args...]
-julia --project test/run_mpi.jl 4 4 my_program.jl
+# julia --project=<env> test/mpi/run.jl <nranks> <threads> <script> [args...]
+julia --project test/mpi/run.jl 4 4 my_program.jl
 ```
 
 ## The SPMD execution model
@@ -361,21 +361,21 @@ rank-specific output (printing, file writes) with `if MPI.Comm_rank(comm) == 0`.
 Dagger ships a set of MPI test environments and suites (used by CI) that are a
 good template for your own tests:
 
-- CPU MPI environment: `test/mpienv` (deps: `Dagger`, `MPI`, ...).
+- CPU MPI environment: `test/mpi/env` (deps: `Dagger`, `MPI`, ...).
 - GPU MPI environments: `test/cudaenv`, `test/rocmenv`, `test/openclenv`,
   `test/metalenv`, `test/oneapienv` (each adds its backend).
-- CPU suite: `test/mpi.jl`. Shared GPU suite: `test/mpi_gpu_suite.jl`, driven by
-  per-backend entry points `test/mpi_cuda.jl`, `test/mpi_rocm.jl`,
-  `test/mpi_opencl.jl`, `test/mpi_metal.jl`, `test/mpi_oneapi.jl`.
+- CPU suite: `test/mpi/cpu.jl`. Shared GPU suite: `test/mpi/gpu_suite.jl`, driven by
+  per-backend entry points `test/mpi/cuda.jl`, `test/mpi/rocm.jl`,
+  `test/mpi/opencl.jl`, `test/mpi/metal.jl`, `test/mpi/oneapi.jl`.
 
 Run a suite directly through MPI.jl's bundled `mpiexec` (no system MPI needed):
 
 ```sh
 # CPU suite, 4 ranks, 2 threads each
-julia --project=test/mpienv test/run_mpi.jl 4 2 test/mpi.jl
+julia --project=test/mpi/env test/mpi/run.jl 4 2 test/mpi/cpu.jl
 
 # CUDA GPU suite, 2 ranks
-julia --project=test/cudaenv test/run_mpi.jl 2 2 test/mpi_cuda.jl
+julia --project=test/cudaenv test/mpi/run.jl 2 2 test/mpi/cuda.jl
 ```
 
 ## Limitations and tips

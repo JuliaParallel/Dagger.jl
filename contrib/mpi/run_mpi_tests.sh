@@ -5,9 +5,9 @@
 # relative to its own path, so it can be run from anywhere:
 #   contrib/mpi/run_mpi_tests.sh
 #   N=4 THREADS=2 contrib/mpi/run_mpi_tests.sh
-#   SKIP_GPU=1 contrib/mpi/run_mpi_tests.sh      # skip mpi_cuda.jl and mpi_rocm.jl
-#   SKIP_CUDA=1 contrib/mpi/run_mpi_tests.sh     # skip mpi_cuda.jl only (e.g. AMD/ROCm systems)
-#   SKIP_ROCM=1 contrib/mpi/run_mpi_tests.sh     # skip mpi_rocm.jl only (e.g. NVIDIA/CUDA systems)
+#   SKIP_GPU=1 contrib/mpi/run_mpi_tests.sh      # skip test/mpi/cuda.jl and test/mpi/rocm.jl
+#   SKIP_CUDA=1 contrib/mpi/run_mpi_tests.sh     # skip test/mpi/cuda.jl only (e.g. AMD/ROCm systems)
+#   SKIP_ROCM=1 contrib/mpi/run_mpi_tests.sh     # skip test/mpi/rocm.jl only (e.g. NVIDIA/CUDA systems)
 #   CUDA_GPU_PROJECT=test/cudaenv contrib/mpi/run_mpi_tests.sh
 #   ROCM_GPU_PROJECT=test/rocmenv contrib/mpi/run_mpi_tests.sh
 #
@@ -65,7 +65,7 @@ echo "  N:       ${N}"
 echo "  threads: ${THREADS}"
 
 # --- Dagger CPU MPI suite (mpiexec) ---
-if run_mpi "mpi" "${N}" "${DAGGER_DIR}" "${DAGGER_DIR}/test/mpi.jl"; then
+if run_mpi "mpi" "${N}" "${DAGGER_DIR}" "${DAGGER_DIR}/test/mpi/cpu.jl"; then
     pass "mpi"
 else
     fail "mpi"
@@ -79,7 +79,7 @@ elif [[ ! -f "${CUDA_GPU_PROJECT}/Project.toml" ]]; then
     echo ""
     echo "SKIP: mpi_cuda (no Project.toml at CUDA_GPU_PROJECT=${CUDA_GPU_PROJECT})"
 else
-    if run_mpi "mpi_cuda" "${N_GPU}" "${CUDA_GPU_PROJECT}" "${DAGGER_DIR}/test/mpi_cuda.jl"; then
+    if run_mpi "mpi_cuda" "${N_GPU}" "${CUDA_GPU_PROJECT}" "${DAGGER_DIR}/test/mpi/cuda.jl"; then
         pass "mpi_cuda"
     else
         fail "mpi_cuda"
@@ -94,7 +94,7 @@ elif [[ ! -f "${ROCM_GPU_PROJECT}/Project.toml" ]]; then
     echo ""
     echo "SKIP: mpi_rocm (no Project.toml at ROCM_GPU_PROJECT=${ROCM_GPU_PROJECT})"
 else
-    if run_mpi "mpi_rocm" "${N_GPU}" "${ROCM_GPU_PROJECT}" "${DAGGER_DIR}/test/mpi_rocm.jl"; then
+    if run_mpi "mpi_rocm" "${N_GPU}" "${ROCM_GPU_PROJECT}" "${DAGGER_DIR}/test/mpi/rocm.jl"; then
         pass "mpi_rocm"
     else
         fail "mpi_rocm"

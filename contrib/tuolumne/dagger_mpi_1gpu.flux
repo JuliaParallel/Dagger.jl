@@ -20,6 +20,6 @@ cd "${DAGGER_DIR}"
 
 # One Flux task on an exclusive node; mpiexec inside run_mpi_tests.sh.
 # N=4     -> CPU MPI suites (mpi_datadeps, cholesky, lu_smoke)
-# N_GPU=1 -> mpi_rocm.jl with 1 rank (single MI300A APU)
+# N_GPU=1 -> test/mpi/rocm.jl with 1 rank (single MI300A APU)
 flux run -N1 -x -n 1 -- \
   env SKIP_CUDA=1 N=4 N_GPU=1 THREADS=4 contrib/mpi/run_mpi_tests.sh

@@ -400,7 +400,7 @@ jobs:
   mpi-cpu:
     name: MPI CPU - Julia ${{ matrix.version }} / ${{ matrix.ranks }} ranks
     runs-on: ubuntu-latest
-    # 4 ranks has less headroom than 2: a clean local run of test/mpi.jl at 4
+    # 4 ranks has less headroom than 2: a clean local run of test/mpi/cpu.jl at 4
     # ranks takes ~12-13 minutes on an idle 12-core workstation (matching the
     # ~12m historical benchmark in c13465a8's commit message, with all 398
     # tests passing and no hang), but shared/oversubscribed `ubuntu-latest`
@@ -427,19 +427,19 @@ jobs:
           version: ${{ matrix.version }}
           arch: x64
       - uses: julia-actions/cache@v3
-      # test/mpienv pulls MPI (MPICH_jll by default) plus the checked-out Dagger;
+      # test/mpi/env pulls MPI (MPICH_jll by default) plus the checked-out Dagger;
       # no system MPI installation is required. We `develop` the checkout rather
       # than relying on the `[sources]` entry because `[sources]` is a Julia 1.11+
       # feature and is silently ignored on 1.10 (LTS), which would otherwise
       # resolve a stale registered Dagger lacking the MPI API (`accelerate!`).
       - name: Instantiate CPU MPI environment
-        run: julia --project=test/mpienv -e 'using Pkg; Pkg.develop([PackageSpec(path=pwd()), PackageSpec(path="lib/TimespanLogging")]); Pkg.instantiate()'
+        run: julia --project=test/mpi/env -e 'using Pkg; Pkg.develop([PackageSpec(path=pwd()), PackageSpec(path="lib/TimespanLogging")]); Pkg.instantiate()'
       - name: Run CPU MPI tests
-        run: julia --project=test/mpienv test/run_mpi.jl ${{ matrix.ranks }} 2 test/mpi.jl
+        run: julia --project=test/mpi/env test/mpi/run.jl ${{ matrix.ranks }} 2 test/mpi/cpu.jl
 
   mpi-opencl:
     # OpenCL runs against a CPU-backed ICD (no physical GPU required), unlike
-    # the other MPI x GPU backends (test/mpi_{cuda,rocm,oneapi,metal}.jl),
+    # the other MPI x GPU backends (test/mpi/{cuda,rocm,oneapi,metal}.jl),
     # which need real hardware and only run on the Buildkite GPU queues (see
     # .buildkite/pipeline.yml). This mirrors those Buildkite jobs' structure
     # (Julia 1.11, 2 ranks, 2 threads) but runs here since GitHub-hosted
@@ -460,4 +460,4 @@ jobs:
       - name: Instantiate OpenCL MPI environment
         run: julia --project=test/openclenv -e 'using Pkg; Pkg.develop([PackageSpec(path=pwd()), PackageSpec(path="lib/TimespanLogging")]); Pkg.instantiate()'
       - name: Run OpenCL MPI tests
-        run: julia --project=test/openclenv test/run_mpi.jl 2 2 test/mpi_opencl.jl
+        run: julia --project=test/openclenv test/mpi/run.jl 2 2 test/mpi/opencl.jl
