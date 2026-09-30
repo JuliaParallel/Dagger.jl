@@ -15,6 +15,7 @@
 
 steps:
   - label: Julia 1.11 (CUDA)
+    key: test-cuda
     <<: *gputest
     plugins:
       - JuliaCI/julia#v1:
@@ -28,6 +29,7 @@ steps:
       CI_USE_CUDA: "1"
 
   - label: Julia 1.11 (ROCm)
+    key: test-rocm
     <<: *gputest
     plugins:
       - JuliaCI/julia#v1:
@@ -41,6 +43,7 @@ steps:
       CI_USE_ROCM: "1"
 
   - label: Julia 1.11 (oneAPI)
+    key: test-oneapi
     <<: *gputest
     plugins:
       - JuliaCI/julia#v1:
@@ -54,6 +57,7 @@ steps:
       CI_USE_ONEAPI: "1"
 
   - label: Julia 1.11 (Metal)
+    key: test-metal
     timeout_in_minutes: 20
     <<: *gputest
     plugins:
@@ -68,6 +72,7 @@ steps:
       CI_USE_METAL: "1"
 
   - label: Julia 1.11 (CUDA, MPI)
+    key: test-cuda-mpi
     <<: *mpigputest
     plugins:
       - JuliaCI/julia#v1:
@@ -79,6 +84,7 @@ steps:
       julia --project=test/cudaenv test/run_mpi.jl 2 2 test/mpi_cuda.jl
 
   - label: Julia 1.11 (ROCm, MPI)
+    key: test-rocm-mpi
     <<: *mpigputest
     plugins:
       - JuliaCI/julia#v1:
@@ -90,6 +96,7 @@ steps:
       julia --project=test/rocmenv test/run_mpi.jl 2 2 test/mpi_rocm.jl
 
   - label: Julia 1.11 (oneAPI, MPI)
+    key: test-oneapi-mpi
     <<: *mpigputest
     plugins:
       - JuliaCI/julia#v1:
@@ -101,6 +108,7 @@ steps:
       julia --project=test/oneapienv test/run_mpi.jl 2 2 test/mpi_oneapi.jl
 
   - label: Julia 1.11 (Metal, MPI)
+    key: test-metal-mpi
     <<: *mpigputest
     timeout_in_minutes: 20
     plugins:
@@ -126,3 +134,351 @@ steps:
 
 # env:
 #   SECRET_CODECOV_TOKEN: ""
+
+  - label: "Benchmarks (CUDA, gpu, {{matrix}})"
+    key: "bench-cuda-gpu"
+    if: build.message !~ /\[skip tests\]/ && build.message !~ /\[skip benchmarks\]/ && (build.pull_request.id != null || build.message =~ /\[run benchmarks\]/)
+    depends_on: [test-cuda]
+    timeout_in_minutes: 120
+    matrix: [array, linalg, sparse, stencil]
+    plugins:
+      - JuliaCI/julia#v1:
+          version: "1.11"
+    agents:
+      queue: "cuda"
+    command: "bash .buildkite/run_gpu_benchmarks.sh {{{{matrix}}}}"
+    env:
+      BENCHMARK_GPU: "cuda"
+      BENCHMARK_VARIANT: "gpu"
+      BENCHMARK_TEST_STEPS: "test-cuda"
+      BENCHMARK_CI_THREADS: "2"
+      OPENBLAS_NUM_THREADS: "1"
+      BENCHMARK_SCALE: "[256, 1024]"
+      BENCHMARK_BLOCKSIZE: "[128, 512]"
+      BENCHMARK_SECONDS: "30"
+      BENCHMARK_SAMPLES: "5"
+      BENCHMARK_REGRESSION_THRESHOLD: "0.35"
+      BENCHMARK_OUTPUT_DIR: "benchmark-results-cuda-gpu-{{matrix}}"
+    artifacts:
+      - "benchmark-results-*/**/*"
+
+  - label: "Benchmarks (CUDA, gpu-distributed, {{matrix}})"
+    key: "bench-cuda-gpu-distributed"
+    if: build.message !~ /\[skip tests\]/ && build.message !~ /\[skip benchmarks\]/ && (build.pull_request.id != null || build.message =~ /\[run benchmarks\]/)
+    depends_on: [test-cuda]
+    timeout_in_minutes: 120
+    matrix: [array, linalg, sparse, stencil]
+    plugins:
+      - JuliaCI/julia#v1:
+          version: "1.11"
+    agents:
+      queue: "cuda"
+    command: "bash .buildkite/run_gpu_benchmarks.sh {{{{matrix}}}}"
+    env:
+      BENCHMARK_GPU: "cuda"
+      BENCHMARK_VARIANT: "gpu-distributed"
+      BENCHMARK_TEST_STEPS: "test-cuda"
+      BENCHMARK_CI_THREADS: "2"
+      OPENBLAS_NUM_THREADS: "1"
+      BENCHMARK_SCALE: "[256, 1024]"
+      BENCHMARK_BLOCKSIZE: "[128, 512]"
+      BENCHMARK_SECONDS: "30"
+      BENCHMARK_SAMPLES: "5"
+      BENCHMARK_REGRESSION_THRESHOLD: "0.35"
+      BENCHMARK_OUTPUT_DIR: "benchmark-results-cuda-gpu-distributed-{{matrix}}"
+      BENCHMARK_PROCS: "1:2"
+    artifacts:
+      - "benchmark-results-*/**/*"
+
+  - label: "Benchmarks (CUDA, gpu-mpi, {{matrix}})"
+    key: "bench-cuda-gpu-mpi"
+    if: build.message !~ /\[skip tests\]/ && build.message !~ /\[skip benchmarks\]/ && (build.pull_request.id != null || build.message =~ /\[run benchmarks\]/)
+    depends_on: [test-cuda, test-cuda-mpi]
+    timeout_in_minutes: 120
+    matrix: [array, linalg, sparse, stencil]
+    plugins:
+      - JuliaCI/julia#v1:
+          version: "1.11"
+    agents:
+      queue: "cuda"
+    command: "bash .buildkite/run_gpu_benchmarks.sh {{{{matrix}}}}"
+    env:
+      BENCHMARK_GPU: "cuda"
+      BENCHMARK_VARIANT: "gpu-mpi"
+      BENCHMARK_TEST_STEPS: "test-cuda,test-cuda-mpi"
+      BENCHMARK_CI_THREADS: "2"
+      OPENBLAS_NUM_THREADS: "1"
+      BENCHMARK_SCALE: "[256, 1024]"
+      BENCHMARK_BLOCKSIZE: "[128, 512]"
+      BENCHMARK_SECONDS: "30"
+      BENCHMARK_SAMPLES: "5"
+      BENCHMARK_REGRESSION_THRESHOLD: "0.35"
+      BENCHMARK_OUTPUT_DIR: "benchmark-results-cuda-gpu-mpi-{{matrix}}"
+      BENCHMARK_MPI_RANKS: "2"
+    artifacts:
+      - "benchmark-results-*/**/*"
+
+  - label: "Benchmarks (ROCm, gpu, {{matrix}})"
+    key: "bench-rocm-gpu"
+    if: build.message !~ /\[skip tests\]/ && build.message !~ /\[skip benchmarks\]/ && (build.pull_request.id != null || build.message =~ /\[run benchmarks\]/)
+    depends_on: [test-rocm]
+    timeout_in_minutes: 120
+    matrix: [array, linalg, sparse, stencil]
+    plugins:
+      - JuliaCI/julia#v1:
+          version: "1.11"
+    agents:
+      queue: "rocm"
+    command: "bash .buildkite/run_gpu_benchmarks.sh {{{{matrix}}}}"
+    env:
+      BENCHMARK_GPU: "amdgpu"
+      BENCHMARK_VARIANT: "gpu"
+      BENCHMARK_TEST_STEPS: "test-rocm"
+      BENCHMARK_CI_THREADS: "2"
+      OPENBLAS_NUM_THREADS: "1"
+      BENCHMARK_SCALE: "[256, 1024]"
+      BENCHMARK_BLOCKSIZE: "[128, 512]"
+      BENCHMARK_SECONDS: "30"
+      BENCHMARK_SAMPLES: "5"
+      BENCHMARK_REGRESSION_THRESHOLD: "0.35"
+      BENCHMARK_OUTPUT_DIR: "benchmark-results-rocm-gpu-{{matrix}}"
+    artifacts:
+      - "benchmark-results-*/**/*"
+
+  - label: "Benchmarks (ROCm, gpu-distributed, {{matrix}})"
+    key: "bench-rocm-gpu-distributed"
+    if: build.message !~ /\[skip tests\]/ && build.message !~ /\[skip benchmarks\]/ && (build.pull_request.id != null || build.message =~ /\[run benchmarks\]/)
+    depends_on: [test-rocm]
+    timeout_in_minutes: 120
+    matrix: [array, linalg, sparse, stencil]
+    plugins:
+      - JuliaCI/julia#v1:
+          version: "1.11"
+    agents:
+      queue: "rocm"
+    command: "bash .buildkite/run_gpu_benchmarks.sh {{{{matrix}}}}"
+    env:
+      BENCHMARK_GPU: "amdgpu"
+      BENCHMARK_VARIANT: "gpu-distributed"
+      BENCHMARK_TEST_STEPS: "test-rocm"
+      BENCHMARK_CI_THREADS: "2"
+      OPENBLAS_NUM_THREADS: "1"
+      BENCHMARK_SCALE: "[256, 1024]"
+      BENCHMARK_BLOCKSIZE: "[128, 512]"
+      BENCHMARK_SECONDS: "30"
+      BENCHMARK_SAMPLES: "5"
+      BENCHMARK_REGRESSION_THRESHOLD: "0.35"
+      BENCHMARK_OUTPUT_DIR: "benchmark-results-rocm-gpu-distributed-{{matrix}}"
+      BENCHMARK_PROCS: "1:2"
+    artifacts:
+      - "benchmark-results-*/**/*"
+
+  - label: "Benchmarks (ROCm, gpu-mpi, {{matrix}})"
+    key: "bench-rocm-gpu-mpi"
+    if: build.message !~ /\[skip tests\]/ && build.message !~ /\[skip benchmarks\]/ && (build.pull_request.id != null || build.message =~ /\[run benchmarks\]/)
+    depends_on: [test-rocm, test-rocm-mpi]
+    timeout_in_minutes: 120
+    matrix: [array, linalg, sparse, stencil]
+    plugins:
+      - JuliaCI/julia#v1:
+          version: "1.11"
+    agents:
+      queue: "rocm"
+    command: "bash .buildkite/run_gpu_benchmarks.sh {{{{matrix}}}}"
+    env:
+      BENCHMARK_GPU: "amdgpu"
+      BENCHMARK_VARIANT: "gpu-mpi"
+      BENCHMARK_TEST_STEPS: "test-rocm,test-rocm-mpi"
+      BENCHMARK_CI_THREADS: "2"
+      OPENBLAS_NUM_THREADS: "1"
+      BENCHMARK_SCALE: "[256, 1024]"
+      BENCHMARK_BLOCKSIZE: "[128, 512]"
+      BENCHMARK_SECONDS: "30"
+      BENCHMARK_SAMPLES: "5"
+      BENCHMARK_REGRESSION_THRESHOLD: "0.35"
+      BENCHMARK_OUTPUT_DIR: "benchmark-results-rocm-gpu-mpi-{{matrix}}"
+      BENCHMARK_MPI_RANKS: "2"
+    artifacts:
+      - "benchmark-results-*/**/*"
+
+  - label: "Benchmarks (oneAPI, gpu, {{matrix}})"
+    key: "bench-oneapi-gpu"
+    if: build.message !~ /\[skip tests\]/ && build.message !~ /\[skip benchmarks\]/ && (build.pull_request.id != null || build.message =~ /\[run benchmarks\]/)
+    depends_on: [test-oneapi]
+    timeout_in_minutes: 120
+    matrix: [array, linalg, sparse]
+    plugins:
+      - JuliaCI/julia#v1:
+          version: "1.11"
+    agents:
+      queue: "oneapi"
+    command: "bash .buildkite/run_gpu_benchmarks.sh {{{{matrix}}}}"
+    env:
+      BENCHMARK_GPU: "oneapi"
+      BENCHMARK_VARIANT: "gpu"
+      BENCHMARK_TEST_STEPS: "test-oneapi"
+      BENCHMARK_CI_THREADS: "2"
+      OPENBLAS_NUM_THREADS: "1"
+      BENCHMARK_SCALE: "[256, 1024]"
+      BENCHMARK_BLOCKSIZE: "[128, 512]"
+      BENCHMARK_SECONDS: "30"
+      BENCHMARK_SAMPLES: "5"
+      BENCHMARK_REGRESSION_THRESHOLD: "0.35"
+      BENCHMARK_OUTPUT_DIR: "benchmark-results-oneapi-gpu-{{matrix}}"
+    artifacts:
+      - "benchmark-results-*/**/*"
+
+  - label: "Benchmarks (oneAPI, gpu-distributed, {{matrix}})"
+    key: "bench-oneapi-gpu-distributed"
+    if: build.message !~ /\[skip tests\]/ && build.message !~ /\[skip benchmarks\]/ && (build.pull_request.id != null || build.message =~ /\[run benchmarks\]/)
+    depends_on: [test-oneapi]
+    timeout_in_minutes: 120
+    matrix: [array, linalg, sparse]
+    plugins:
+      - JuliaCI/julia#v1:
+          version: "1.11"
+    agents:
+      queue: "oneapi"
+    command: "bash .buildkite/run_gpu_benchmarks.sh {{{{matrix}}}}"
+    env:
+      BENCHMARK_GPU: "oneapi"
+      BENCHMARK_VARIANT: "gpu-distributed"
+      BENCHMARK_TEST_STEPS: "test-oneapi"
+      BENCHMARK_CI_THREADS: "2"
+      OPENBLAS_NUM_THREADS: "1"
+      BENCHMARK_SCALE: "[256, 1024]"
+      BENCHMARK_BLOCKSIZE: "[128, 512]"
+      BENCHMARK_SECONDS: "30"
+      BENCHMARK_SAMPLES: "5"
+      BENCHMARK_REGRESSION_THRESHOLD: "0.35"
+      BENCHMARK_OUTPUT_DIR: "benchmark-results-oneapi-gpu-distributed-{{matrix}}"
+      BENCHMARK_PROCS: "1:2"
+    artifacts:
+      - "benchmark-results-*/**/*"
+
+  - label: "Benchmarks (oneAPI, gpu-mpi, {{matrix}})"
+    key: "bench-oneapi-gpu-mpi"
+    if: build.message !~ /\[skip tests\]/ && build.message !~ /\[skip benchmarks\]/ && (build.pull_request.id != null || build.message =~ /\[run benchmarks\]/)
+    depends_on: [test-oneapi, test-oneapi-mpi]
+    timeout_in_minutes: 120
+    matrix: [array, linalg, sparse]
+    plugins:
+      - JuliaCI/julia#v1:
+          version: "1.11"
+    agents:
+      queue: "oneapi"
+    command: "bash .buildkite/run_gpu_benchmarks.sh {{{{matrix}}}}"
+    env:
+      BENCHMARK_GPU: "oneapi"
+      BENCHMARK_VARIANT: "gpu-mpi"
+      BENCHMARK_TEST_STEPS: "test-oneapi,test-oneapi-mpi"
+      BENCHMARK_CI_THREADS: "2"
+      OPENBLAS_NUM_THREADS: "1"
+      BENCHMARK_SCALE: "[256, 1024]"
+      BENCHMARK_BLOCKSIZE: "[128, 512]"
+      BENCHMARK_SECONDS: "30"
+      BENCHMARK_SAMPLES: "5"
+      BENCHMARK_REGRESSION_THRESHOLD: "0.35"
+      BENCHMARK_OUTPUT_DIR: "benchmark-results-oneapi-gpu-mpi-{{matrix}}"
+      BENCHMARK_MPI_RANKS: "2"
+    artifacts:
+      - "benchmark-results-*/**/*"
+
+  - label: "Benchmarks (Metal, gpu, {{matrix}})"
+    key: "bench-metal-gpu"
+    if: build.message !~ /\[skip tests\]/ && build.message !~ /\[skip benchmarks\]/ && (build.pull_request.id != null || build.message =~ /\[run benchmarks\]/)
+    depends_on: [test-metal]
+    timeout_in_minutes: 120
+    matrix: [array, linalg, sparse, stencil]
+    plugins:
+      - JuliaCI/julia#v1:
+          version: "1.11"
+    agents:
+      queue: "metal"
+    command: "bash .buildkite/run_gpu_benchmarks.sh {{{{matrix}}}}"
+    env:
+      BENCHMARK_GPU: "metal"
+      BENCHMARK_VARIANT: "gpu"
+      BENCHMARK_TEST_STEPS: "test-metal"
+      BENCHMARK_CI_THREADS: "2"
+      OPENBLAS_NUM_THREADS: "1"
+      BENCHMARK_SCALE: "[256, 1024]"
+      BENCHMARK_BLOCKSIZE: "[128, 512]"
+      BENCHMARK_SECONDS: "30"
+      BENCHMARK_SAMPLES: "5"
+      BENCHMARK_REGRESSION_THRESHOLD: "0.35"
+      BENCHMARK_OUTPUT_DIR: "benchmark-results-metal-gpu-{{matrix}}"
+    artifacts:
+      - "benchmark-results-*/**/*"
+
+  - label: "Benchmarks (Metal, gpu-distributed, {{matrix}})"
+    key: "bench-metal-gpu-distributed"
+    if: build.message !~ /\[skip tests\]/ && build.message !~ /\[skip benchmarks\]/ && (build.pull_request.id != null || build.message =~ /\[run benchmarks\]/)
+    depends_on: [test-metal]
+    timeout_in_minutes: 120
+    matrix: [array, linalg, sparse, stencil]
+    plugins:
+      - JuliaCI/julia#v1:
+          version: "1.11"
+    agents:
+      queue: "metal"
+    command: "bash .buildkite/run_gpu_benchmarks.sh {{{{matrix}}}}"
+    env:
+      BENCHMARK_GPU: "metal"
+      BENCHMARK_VARIANT: "gpu-distributed"
+      BENCHMARK_TEST_STEPS: "test-metal"
+      BENCHMARK_CI_THREADS: "2"
+      OPENBLAS_NUM_THREADS: "1"
+      BENCHMARK_SCALE: "[256, 1024]"
+      BENCHMARK_BLOCKSIZE: "[128, 512]"
+      BENCHMARK_SECONDS: "30"
+      BENCHMARK_SAMPLES: "5"
+      BENCHMARK_REGRESSION_THRESHOLD: "0.35"
+      BENCHMARK_OUTPUT_DIR: "benchmark-results-metal-gpu-distributed-{{matrix}}"
+      BENCHMARK_PROCS: "1:2"
+    artifacts:
+      - "benchmark-results-*/**/*"
+
+  - label: "Benchmarks (Metal, gpu-mpi, {{matrix}})"
+    key: "bench-metal-gpu-mpi"
+    if: build.message !~ /\[skip tests\]/ && build.message !~ /\[skip benchmarks\]/ && (build.pull_request.id != null || build.message =~ /\[run benchmarks\]/)
+    depends_on: [test-metal, test-metal-mpi]
+    timeout_in_minutes: 120
+    matrix: [array, linalg, sparse, stencil]
+    plugins:
+      - JuliaCI/julia#v1:
+          version: "1.11"
+    agents:
+      queue: "metal"
+    command: "bash .buildkite/run_gpu_benchmarks.sh {{{{matrix}}}}"
+    env:
+      BENCHMARK_GPU: "metal"
+      BENCHMARK_VARIANT: "gpu-mpi"
+      BENCHMARK_TEST_STEPS: "test-metal,test-metal-mpi"
+      BENCHMARK_CI_THREADS: "2"
+      OPENBLAS_NUM_THREADS: "1"
+      BENCHMARK_SCALE: "[256, 1024]"
+      BENCHMARK_BLOCKSIZE: "[128, 512]"
+      BENCHMARK_SECONDS: "30"
+      BENCHMARK_SAMPLES: "5"
+      BENCHMARK_REGRESSION_THRESHOLD: "0.35"
+      BENCHMARK_OUTPUT_DIR: "benchmark-results-metal-gpu-mpi-{{matrix}}"
+      BENCHMARK_MPI_RANKS: "2"
+    artifacts:
+      - "benchmark-results-*/**/*"
+
+  - label: "GPU benchmark summary"
+    key: gpu-benchmark-report
+    if: build.message !~ /\[skip tests\]/ && build.message !~ /\[skip benchmarks\]/ && (build.pull_request.id != null || build.message =~ /\[run benchmarks\]/)
+    depends_on: [bench-cuda-gpu, bench-cuda-gpu-distributed, bench-cuda-gpu-mpi, bench-rocm-gpu, bench-rocm-gpu-distributed, bench-rocm-gpu-mpi, bench-oneapi-gpu, bench-oneapi-gpu-distributed, bench-oneapi-gpu-mpi, bench-metal-gpu, bench-metal-gpu-distributed, bench-metal-gpu-mpi]
+    allow_dependency_failure: true
+    timeout_in_minutes: 10
+    agents:
+      queue: "upload"
+      os: linux
+      arch: x86_64
+    env:
+      BENCHMARK_GPU_VENDORS: "cuda,rocm,oneapi,metal"
+    concurrency: 1
+    concurrency_group: "dagger-gpu-benchmark-comments"
+    command: "python3 -m unittest discover -s .buildkite -p 'test_*.py' && bash .buildkite/report_gpu_benchmarks.sh"

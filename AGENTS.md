@@ -617,3 +617,11 @@ lesson.
     immediately, including an error that kills a healthy new worker. Clear
     protocol outputs when starting a worker; already-loaded trials remain in
     the orchestrator's result dictionary.
+
+59. **Buildkite dependencies do not require an actual passing test.** A test
+    skipped by its condition satisfies `depends_on`, so benchmark jobs that
+    require successful tests need both matching skip conditions and an outcome
+    check (`buildkite-agent step get outcome`). Keep GPU+MPI dependent on the
+    ordinary GPU test as well as the GPU+MPI test. Aggregate reports with one
+    writer, retain only sections for the same PR head, and preserve GPU sections
+    when the CPU reporter finishes later.

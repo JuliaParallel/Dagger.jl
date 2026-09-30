@@ -62,7 +62,7 @@ function sortChanges(entries, improvement = false) {
 
 function renderReport(results, runUrl, limit) {
   const parts = [marker, '## Dagger benchmarks: `dirty` vs `master`', '',
-    'Counts are benchmark metrics (time, allocations, bytes). Timing changes require non-overlapping median ± IQR bands; single-sample timing changes are inconclusive.', '',
+    'Counts are benchmark metrics (time, allocations, bytes). Timing changes require non-overlapping median ± IQR bands; both revisions need at least five timed samples, and timing regressions need an independent confirmation run.', '',
     '| Backend | Regressions | Improvements | Within noise | Inconclusive time | Suites |',
     '|:---|---:|---:|---:|---:|:---|'];
   for (const backend of results) {
