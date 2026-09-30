@@ -6,7 +6,7 @@
 # request/response protocol), MPI ranks are SPMD: every rank must call the
 # same collective Dagger operations at the same time, so there is no
 # orchestrator-in-the-loop per benchmark here. Instead every rank builds the
-# identical benchmark suite (mirroring test/mpi.jl's bootstrap) and runs a
+# identical benchmark suite (mirroring test/mpi/cpu.jl's bootstrap) and runs a
 # single flat pass over every benchmark in lockstep; rank 0 alone talks to
 # the filesystem, recording each Trial and finishing with a manifest plus a
 # `done` sentinel that the orchestrator polls for.
@@ -64,7 +64,7 @@ include(joinpath(@__DIR__, "backend.jl"))
 # branching), so BenchmarkTools.leaves(SUITE) enumerates the same benchmarks
 # everywhere. `ctx` is accepted-but-unused by every suite (verified: array,
 # linalg, sparse, stencil), so it's passed as `nothing` here rather than a
-# Distributed-flavored `Context()` -- test/mpi.jl doesn't set
+# Distributed-flavored `Context()` -- test/mpi/cpu.jl doesn't set
 # `Dagger.Sch.EAGER_CONTEXT[]` either, and doing so here would risk pinning
 # the scheduler to a single-process view instead of the MPI-aware processor
 # set that `Dagger.accelerate!(:mpi)` establishes.

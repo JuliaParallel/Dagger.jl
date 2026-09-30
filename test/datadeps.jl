@@ -1144,7 +1144,7 @@ include(joinpath(@__DIR__, "array", "sparse_defs.jl"))
     # The task sees the adopted wrapper, exactly as it would for a tile of a
     # sparse `DArray`. Run across one and two workers so the cross-worker move
     # of the adopted container is exercised too. (The same body runs under MPI
-    # in `test/mpi.jl`.)
+    # in `test/mpi/cpu.jl`.)
     @testset "adoption, $nw worker(s)" for nw in (1, 2)
         nprocs() >= nw || continue
         test_sparse_bare_args(; scope=Dagger.scope(workers=1:nw))

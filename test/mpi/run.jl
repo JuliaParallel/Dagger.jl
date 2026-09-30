@@ -3,10 +3,10 @@
 # MPICH_jll by default). The child processes inherit the active project.
 #
 # Usage:
-#   julia --project=<env> test/run_mpi.jl <nranks> <threads> <script> [args...]
+#   julia --project=<env> test/mpi/run.jl <nranks> <threads> <script> [args...]
 #
 # Example:
-#   julia --project=test/mpienv test/run_mpi.jl 4 2 test/mpi.jl
+#   julia --project=test/mpi/env test/mpi/run.jl 4 2 test/mpi/cpu.jl
 
 using MPI
 

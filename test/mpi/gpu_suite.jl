@@ -3,7 +3,7 @@
 # Every backend (CUDA, ROCm, OpenCL, Metal, oneAPI) drives the exact same SPMD
 # datadeps logic; only the array/device/memory-space names and the set of
 # supported features differ. Rather than copy this suite per backend, each
-# `test/mpi_<backend>.jl` loads its backend, then calls `run_mpi_gpu_suite`
+# `test/mpi/<backend>.jl` loads its backend, then calls `run_mpi_gpu_suite`
 # with a small config describing those differences.
 #
 # Data plane is host-staged through P2P (no GPU-aware MPI required).
@@ -36,10 +36,10 @@ using Dagger: In, Out, InOut, Deps
 
 const MPIExt = Base.get_extension(Dagger, :MPIExt)
 
-include(joinpath(@__DIR__, "util.jl"))
-include(joinpath(@__DIR__, "array", "stencil_defs.jl"))
-include(joinpath(@__DIR__, "array", "sparse_defs.jl"))
-include(joinpath(@__DIR__, "array", "linalg", "matvec_defs.jl"))
+include(joinpath(@__DIR__, "..", "util.jl"))
+include(joinpath(@__DIR__, "..", "array", "stencil_defs.jl"))
+include(joinpath(@__DIR__, "..", "array", "sparse_defs.jl"))
+include(joinpath(@__DIR__, "..", "array", "linalg", "matvec_defs.jl"))
 
 # Broadcast-only mutation helpers (scalar indexing is illegal on GPU arrays)
 add1!(X) = (X .+= 1; nothing)
@@ -196,7 +196,7 @@ end
 if get(cfg, :subarray_depmod, false)
     @testset "GPU SubArray + dep_mod dataflow" begin
         # View remainders and non-identity dep_mods exercise multi-span KA pack
-        # / copy paths across ranks (mirrors test/mpi.jl Cross-rank dataflow)
+        # / copy paths across ranks (mirrors test/mpi/cpu.jl Cross-rank dataflow)
         Random.seed!(24)
         A = rand(elt, 8, 8)
         ref = copy(A)

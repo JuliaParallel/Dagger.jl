@@ -1,15 +1,15 @@
-# MPI × GPU datadeps suite for Metal. See test/mpi_gpu_suite.jl for the shared
+# MPI × GPU datadeps suite for Metal. See test/mpi/gpu_suite.jl for the shared
 # logic; this file only supplies the Metal-specific config.
 #
 # Run (macOS; env must provide Dagger, MPI, Metal; see test/metalenv):
-#   mpiexec -n 2 julia --project=test/metalenv --threads=2 test/mpi_metal.jl
+#   mpiexec -n 2 julia --project=test/metalenv --threads=2 test/mpi/metal.jl
 
 using Dagger, MPI, Metal, LinearAlgebra, Random, Test
 using Dagger: In, Out, InOut, Deps
 
 using Distributed
 
-include(joinpath(@__DIR__, "mpi_gpu_suite.jl"))
+include(joinpath(@__DIR__, "gpu_suite.jl"))
 
 const MetalExt = Base.get_extension(Dagger, :MetalExt)
 @assert MetalExt !== nothing "MetalExt failed to load"

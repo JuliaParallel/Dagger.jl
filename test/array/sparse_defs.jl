@@ -10,8 +10,8 @@
 #                          broader test/array/linalg/matmul_sparse.jl and
 #                          array/linalg/iterativesolvers.jl)
 #   Distributed x GPU  -> test/gpu.jl
-#   MPI x CPU          -> test/mpi.jl
-#   MPI x GPU          -> test/mpi_gpu_suite.jl (test/mpi_opencl.jl, mpi_cuda.jl, ...)
+#   MPI x CPU          -> test/mpi/cpu.jl
+#   MPI x GPU          -> test/mpi/gpu_suite.jl (test/mpi/opencl.jl, test/mpi/cuda.jl, ...)
 #
 # `scope` selects the compute backend (`nothing` for the ambient one) and
 # `check_tile` optionally asserts that a distributed tile is device-resident.
@@ -171,7 +171,7 @@ end
 # `writeback_visible` must be false on the MPI ranks that do not own the origin:
 # a bare Julia object is replicated per-rank under SPMD, so Datadeps writes back
 # into rank 0's copy and every other rank keeps its own untouched replica. This
-# is the same reason test/mpi.jl guards its in-place assertions with `rank == 0`.
+# is the same reason test/mpi/cpu.jl guards its in-place assertions with `rank == 0`.
 function test_sparse_bare_args(; scope=nothing, T=Float64, writeback_visible=true)
     Random.seed!(1234)
     S = sprand(T, 16, 16, 0.3)

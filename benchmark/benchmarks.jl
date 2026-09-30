@@ -189,7 +189,7 @@ function spawn_worker()
     if MPI_RANKS > 0
         # `MPI.mpiexec` only sets up the environment mpiexec needs (library
         # paths for the bundled MPICH_jll, etc.) for the dynamic extent of the
-        # callback (mirrors test/run_mpi.jl) -- so the actual `run` call must
+        # callback (mirrors test/mpi/run.jl) -- so the actual `run` call must
         # happen *inside* the `do` block. Extracting the bare executable via
         # e.g. `MPI.mpiexec(identity)` and running it afterwards drops that
         # environment and the spawned process dies immediately.
