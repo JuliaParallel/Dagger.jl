@@ -467,10 +467,55 @@ steps:
     artifacts:
       - "benchmark-results-*/**/*"
 
-  - label: "GPU benchmark summary"
-    key: gpu-benchmark-report
+  - label: "GPU benchmark summary (cuda)"
+    key: gpu-benchmark-report-cuda
     if: build.message !~ /\[skip tests\]/ && build.message !~ /\[skip benchmarks\]/ && (build.pull_request.id != null || build.message =~ /\[run benchmarks\]/)
-    depends_on: [bench-cuda-gpu, bench-cuda-gpu-distributed, bench-cuda-gpu-mpi, bench-rocm-gpu, bench-rocm-gpu-distributed, bench-rocm-gpu-mpi, bench-oneapi-gpu, bench-oneapi-gpu-distributed, bench-oneapi-gpu-mpi, bench-metal-gpu, bench-metal-gpu-distributed, bench-metal-gpu-mpi]
+    depends_on: [bench-cuda-gpu, bench-cuda-gpu-distributed, bench-cuda-gpu-mpi]
+    allow_dependency_failure: true
+    timeout_in_minutes: 10
+    agents:
+      queue: "upload"
+      os: linux
+      arch: x86_64
+    env:
+      BENCHMARK_GPU_VENDORS: "cuda,rocm,oneapi,metal"
+    concurrency: 1
+    concurrency_group: "dagger-gpu-benchmark-comments"
+    command: "python3 -m unittest discover -s .buildkite -p 'test_*.py' && bash .buildkite/report_gpu_benchmarks.sh"
+  - label: "GPU benchmark summary (rocm)"
+    key: gpu-benchmark-report-rocm
+    if: build.message !~ /\[skip tests\]/ && build.message !~ /\[skip benchmarks\]/ && (build.pull_request.id != null || build.message =~ /\[run benchmarks\]/)
+    depends_on: [bench-rocm-gpu, bench-rocm-gpu-distributed, bench-rocm-gpu-mpi]
+    allow_dependency_failure: true
+    timeout_in_minutes: 10
+    agents:
+      queue: "upload"
+      os: linux
+      arch: x86_64
+    env:
+      BENCHMARK_GPU_VENDORS: "cuda,rocm,oneapi,metal"
+    concurrency: 1
+    concurrency_group: "dagger-gpu-benchmark-comments"
+    command: "python3 -m unittest discover -s .buildkite -p 'test_*.py' && bash .buildkite/report_gpu_benchmarks.sh"
+  - label: "GPU benchmark summary (oneapi)"
+    key: gpu-benchmark-report-oneapi
+    if: build.message !~ /\[skip tests\]/ && build.message !~ /\[skip benchmarks\]/ && (build.pull_request.id != null || build.message =~ /\[run benchmarks\]/)
+    depends_on: [bench-oneapi-gpu, bench-oneapi-gpu-distributed, bench-oneapi-gpu-mpi]
+    allow_dependency_failure: true
+    timeout_in_minutes: 10
+    agents:
+      queue: "upload"
+      os: linux
+      arch: x86_64
+    env:
+      BENCHMARK_GPU_VENDORS: "cuda,rocm,oneapi,metal"
+    concurrency: 1
+    concurrency_group: "dagger-gpu-benchmark-comments"
+    command: "python3 -m unittest discover -s .buildkite -p 'test_*.py' && bash .buildkite/report_gpu_benchmarks.sh"
+  - label: "GPU benchmark summary (metal)"
+    key: gpu-benchmark-report-metal
+    if: build.message !~ /\[skip tests\]/ && build.message !~ /\[skip benchmarks\]/ && (build.pull_request.id != null || build.message =~ /\[run benchmarks\]/)
+    depends_on: [bench-metal-gpu, bench-metal-gpu-distributed, bench-metal-gpu-mpi]
     allow_dependency_failure: true
     timeout_in_minutes: 10
     agents:
