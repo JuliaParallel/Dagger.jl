@@ -137,6 +137,9 @@ steps:
 
   - label: "Benchmarks (CUDA, gpu, {{matrix}})"
     key: "bench-cuda-gpu"
+    # GPU timings must not compete with sibling benchmark shards.
+    concurrency: 1
+    concurrency_group: "dagger-gpu-benchmarks-cuda"
     if: build.message !~ /\[skip tests\]/ && build.message !~ /\[skip benchmarks\]/ && (build.pull_request.id != null || build.message =~ /\[run benchmarks\]/)
     depends_on: [test-cuda]
     timeout_in_minutes: 120
@@ -164,6 +167,9 @@ steps:
 
   - label: "Benchmarks (CUDA, gpu-distributed, {{matrix}})"
     key: "bench-cuda-gpu-distributed"
+    # GPU timings must not compete with sibling benchmark shards.
+    concurrency: 1
+    concurrency_group: "dagger-gpu-benchmarks-cuda"
     if: build.message !~ /\[skip tests\]/ && build.message !~ /\[skip benchmarks\]/ && (build.pull_request.id != null || build.message =~ /\[run benchmarks\]/)
     depends_on: [test-cuda]
     timeout_in_minutes: 120
@@ -192,6 +198,9 @@ steps:
 
   - label: "Benchmarks (CUDA, gpu-mpi, {{matrix}})"
     key: "bench-cuda-gpu-mpi"
+    # GPU timings must not compete with sibling benchmark shards.
+    concurrency: 1
+    concurrency_group: "dagger-gpu-benchmarks-cuda"
     if: build.message !~ /\[skip tests\]/ && build.message !~ /\[skip benchmarks\]/ && (build.pull_request.id != null || build.message =~ /\[run benchmarks\]/)
     depends_on: [test-cuda, test-cuda-mpi]
     timeout_in_minutes: 120
@@ -220,6 +229,9 @@ steps:
 
   - label: "Benchmarks (ROCm, gpu, {{matrix}})"
     key: "bench-rocm-gpu"
+    # GPU timings must not compete with sibling benchmark shards.
+    concurrency: 1
+    concurrency_group: "dagger-gpu-benchmarks-rocm"
     if: build.message !~ /\[skip tests\]/ && build.message !~ /\[skip benchmarks\]/ && (build.pull_request.id != null || build.message =~ /\[run benchmarks\]/)
     depends_on: [test-rocm]
     timeout_in_minutes: 120
@@ -247,6 +259,9 @@ steps:
 
   - label: "Benchmarks (ROCm, gpu-distributed, {{matrix}})"
     key: "bench-rocm-gpu-distributed"
+    # GPU timings must not compete with sibling benchmark shards.
+    concurrency: 1
+    concurrency_group: "dagger-gpu-benchmarks-rocm"
     if: build.message !~ /\[skip tests\]/ && build.message !~ /\[skip benchmarks\]/ && (build.pull_request.id != null || build.message =~ /\[run benchmarks\]/)
     depends_on: [test-rocm]
     timeout_in_minutes: 120
@@ -275,6 +290,9 @@ steps:
 
   - label: "Benchmarks (ROCm, gpu-mpi, {{matrix}})"
     key: "bench-rocm-gpu-mpi"
+    # GPU timings must not compete with sibling benchmark shards.
+    concurrency: 1
+    concurrency_group: "dagger-gpu-benchmarks-rocm"
     if: build.message !~ /\[skip tests\]/ && build.message !~ /\[skip benchmarks\]/ && (build.pull_request.id != null || build.message =~ /\[run benchmarks\]/)
     depends_on: [test-rocm, test-rocm-mpi]
     timeout_in_minutes: 120
@@ -303,6 +321,9 @@ steps:
 
   - label: "Benchmarks (oneAPI, gpu, {{matrix}})"
     key: "bench-oneapi-gpu"
+    # GPU timings must not compete with sibling benchmark shards.
+    concurrency: 1
+    concurrency_group: "dagger-gpu-benchmarks-oneapi"
     if: build.message !~ /\[skip tests\]/ && build.message !~ /\[skip benchmarks\]/ && (build.pull_request.id != null || build.message =~ /\[run benchmarks\]/)
     depends_on: [test-oneapi]
     timeout_in_minutes: 120
@@ -330,6 +351,9 @@ steps:
 
   - label: "Benchmarks (oneAPI, gpu-distributed, {{matrix}})"
     key: "bench-oneapi-gpu-distributed"
+    # GPU timings must not compete with sibling benchmark shards.
+    concurrency: 1
+    concurrency_group: "dagger-gpu-benchmarks-oneapi"
     if: build.message !~ /\[skip tests\]/ && build.message !~ /\[skip benchmarks\]/ && (build.pull_request.id != null || build.message =~ /\[run benchmarks\]/)
     depends_on: [test-oneapi]
     timeout_in_minutes: 120
@@ -358,6 +382,9 @@ steps:
 
   - label: "Benchmarks (oneAPI, gpu-mpi, {{matrix}})"
     key: "bench-oneapi-gpu-mpi"
+    # GPU timings must not compete with sibling benchmark shards.
+    concurrency: 1
+    concurrency_group: "dagger-gpu-benchmarks-oneapi"
     if: build.message !~ /\[skip tests\]/ && build.message !~ /\[skip benchmarks\]/ && (build.pull_request.id != null || build.message =~ /\[run benchmarks\]/)
     depends_on: [test-oneapi, test-oneapi-mpi]
     timeout_in_minutes: 120
@@ -386,6 +413,9 @@ steps:
 
   - label: "Benchmarks (Metal, gpu, {{matrix}})"
     key: "bench-metal-gpu"
+    # GPU timings must not compete with sibling benchmark shards.
+    concurrency: 1
+    concurrency_group: "dagger-gpu-benchmarks-metal"
     if: build.message !~ /\[skip tests\]/ && build.message !~ /\[skip benchmarks\]/ && (build.pull_request.id != null || build.message =~ /\[run benchmarks\]/)
     depends_on: [test-metal]
     timeout_in_minutes: 120
@@ -413,6 +443,9 @@ steps:
 
   - label: "Benchmarks (Metal, gpu-distributed, {{matrix}})"
     key: "bench-metal-gpu-distributed"
+    # GPU timings must not compete with sibling benchmark shards.
+    concurrency: 1
+    concurrency_group: "dagger-gpu-benchmarks-metal"
     if: build.message !~ /\[skip tests\]/ && build.message !~ /\[skip benchmarks\]/ && (build.pull_request.id != null || build.message =~ /\[run benchmarks\]/)
     depends_on: [test-metal]
     timeout_in_minutes: 120
@@ -441,6 +474,9 @@ steps:
 
   - label: "Benchmarks (Metal, gpu-mpi, {{matrix}})"
     key: "bench-metal-gpu-mpi"
+    # GPU timings must not compete with sibling benchmark shards.
+    concurrency: 1
+    concurrency_group: "dagger-gpu-benchmarks-metal"
     if: build.message !~ /\[skip tests\]/ && build.message !~ /\[skip benchmarks\]/ && (build.pull_request.id != null || build.message =~ /\[run benchmarks\]/)
     depends_on: [test-metal, test-metal-mpi]
     timeout_in_minutes: 120

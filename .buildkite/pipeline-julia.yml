@@ -193,6 +193,9 @@ steps:
 
   - label: "Benchmarks (OpenCL, gpu, {{matrix}})"
     key: "bench-opencl-gpu"
+    # GPU timings must not compete with sibling benchmark shards.
+    concurrency: 1
+    concurrency_group: "dagger-gpu-benchmarks-opencl"
     if: build.message !~ /\[skip tests\]/ && build.message !~ /\[skip benchmarks\]/ && (build.pull_request.id != null || build.message =~ /\[run benchmarks\]/)
     depends_on: [test-opencl]
     timeout_in_minutes: 120
@@ -222,6 +225,9 @@ steps:
 
   - label: "Benchmarks (OpenCL, gpu-distributed, {{matrix}})"
     key: "bench-opencl-gpu-distributed"
+    # GPU timings must not compete with sibling benchmark shards.
+    concurrency: 1
+    concurrency_group: "dagger-gpu-benchmarks-opencl"
     if: build.message !~ /\[skip tests\]/ && build.message !~ /\[skip benchmarks\]/ && (build.pull_request.id != null || build.message =~ /\[run benchmarks\]/)
     depends_on: [test-opencl]
     timeout_in_minutes: 120
@@ -252,6 +258,9 @@ steps:
 
   - label: "Benchmarks (OpenCL, gpu-mpi, {{matrix}})"
     key: "bench-opencl-gpu-mpi"
+    # GPU timings must not compete with sibling benchmark shards.
+    concurrency: 1
+    concurrency_group: "dagger-gpu-benchmarks-opencl"
     if: build.message !~ /\[skip tests\]/ && build.message !~ /\[skip benchmarks\]/ && (build.pull_request.id != null || build.message =~ /\[run benchmarks\]/)
     depends_on: [test-opencl, test-opencl-mpi]
     timeout_in_minutes: 120
