@@ -599,3 +599,21 @@ lesson.
     reading the caller's original `Ref` on other ranks can return stale status.
     Submit a final scalar read with `In(ref)` inside the region, then fetch its
     uniform task result for error checks and returned factorization status.
+
+57. **GPU benchmark scope must cover setup, probes, and the timed run.**
+    Loading a GPU extension does not enable its processors by default. Apply
+    the explicit device scope around both suite construction and BenchmarkTools
+    execution, so fixtures and capability probes use the same backend as the
+    measured operation. CPU named cyclic grids do not preserve GPU placement;
+    leave GPU fixtures on the scope-aware allocator. Use Float32 for portable
+    GPU coverage (Metal and some OpenCL devices lack Float64). Require one
+    backend per worker: a mixed CPU/GPU specification would otherwise measure
+    GPU fixtures under the CPU method label.
+
+58. **A reused benchmark workdir must discard old response IDs.** The plain
+    worker protocol starts request IDs at one for each orchestration run.
+    Reusing `BENCHMARK_WORKDIR` without removing old `response_*.json` and
+    `result_*.json` lets the orchestrator accept a previous run's response
+    immediately, including an error that kills a healthy new worker. Clear
+    protocol outputs when starting a worker; already-loaded trials remain in
+    the orchestrator's result dictionary.

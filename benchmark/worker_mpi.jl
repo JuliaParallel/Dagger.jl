@@ -57,25 +57,7 @@ rank == 0 && @info "[worker_mpi] Configuration" ranks=MPI.Comm_size(comm) thread
 # so a plain `using` suffices here (worker.jl uses `@everywhere using` because
 # it may have addprocs'd extra Distributed workers).
 
-for accel in accelerations
-    if accel == "cuda"
-        try
-            using DaggerGPU, CUDA
-        catch err
-            error("Failed to load CUDA acceleration; ensure DaggerGPU and CUDA " *
-                  "are available (e.g. `benchpkg ... -a DaggerGPU,CUDA`)\n$err")
-        end
-    elseif accel == "amdgpu"
-        try
-            using DaggerGPU, AMDGPU
-        catch err
-            error("Failed to load AMDGPU acceleration; ensure DaggerGPU and " *
-                  "AMDGPU are available (e.g. `benchpkg ... -a DaggerGPU,AMDGPU`)\n$err")
-        end
-    else
-        error("Unknown acceleration: $accel")
-    end
-end
+include(joinpath(@__DIR__, "backend.jl"))
 
 # --- Build the benchmark suites ---------------------------------------------
 # Every rank builds the identical suite (deterministic; no per-rank
@@ -100,7 +82,9 @@ for (suite_name, bench_list) in benches
                      "$(bench.method)+$(join(bench.accels, "+"))"
         rank == 0 && @info "[worker_mpi] Creating benchmarks for suite=$suite_name method=$method_key"
         suite_group[method_key] =
-            suite_setup[suite_name](nothing; method=bench.method, accels=bench.accels)
+            with_benchmark_scope() do
+                suite_setup[suite_name](nothing; method=bench.method, accels=bench.accels)
+            end
     end
     SUITE[suite_name] = suite_group
 end
@@ -187,7 +171,7 @@ for (keypath, bench) in leaves
     kp = String[string(k) for k in keypath]
     rank == 0 && @info "[worker_mpi] Running: $(join(kp, " / "))"
     try
-        trial = run_mpi_benchmark(bench)
+        trial = with_benchmark_scope(() -> run_mpi_benchmark(bench))
         rank == 0 && push!(results, (kp, trial))
     catch err
         bt = catch_backtrace()
