@@ -32,21 +32,37 @@ end
 function linalg_suite(ctx; method, accels)
     @assert method == "dagger" "Linalg suite only supports `dagger` execution"
     accel = isempty(accels) ? "cpu" : only(accels)
-    @assert accel == "cpu" "Linalg suite only supports CPU execution"
+    @assert accel == "cpu" || haskey(GPU_BACKENDS, accel) "Unknown backend"
 
-    T = Float64
+    T = benchmark_eltype()
     # Match the array/stencil suites: arbitrary fixture placement changes both
     # data movement and the driver's allocation share across revisions/samples.
     # Named cyclic grids are Distributed-only; leave MPI on its native allocator.
-    fixture_assignment = length(procs()) > 1 ? :cyclicrow : :arbitrary
-    # Some older Dagger revisions use a Distributed-only processor grid for
-    # tiled SVD. Under MPI that grid is empty and `_tile_index` divides by zero.
-    # This script is shared by both Airspeed revisions, so probe once and omit
-    # SVD where the revision/backend combination cannot execute it.
-    svd_ok = supported("linalg/svd") do
+    fixture_assignment = benchmark_assignment()
+    # Probe GPU operations on a multi-tile input. GPU libraries can implement
+    # multiplication but lack a triangular copy or factorization used by syrk.
+    matmul_ok = accel == "cpu" || supported("linalg/matmul") do
+        A = rand(Blocks(4, 4), T, 8, 8)
+        wait(A * A)
+    end
+    syrk_ok = accel == "cpu" || supported("linalg/syrk") do
+        A = rand(Blocks(4, 4), T, 8, 8)
+        wait(A' * A)
+    end
+    matvec_ok = accel == "cpu" || supported("linalg/matvec") do
+        A = rand(Blocks(4, 4), T, 8, 8)
+        x = rand(Blocks(4), T, 8)
+        wait(A * x)
+    end
+    # Older revisions use a Distributed-only grid for tiled SVD. Keep GPU
+    # factorization fallbacks out of these native-device benchmarks as well.
+    svd_ok = accel == "cpu" && supported("linalg/svd") do
         A = rand(Blocks(4, 4), T, 8, 8; assignment=fixture_assignment)
         wait(A)
         wait(svd(A).U)
+    end
+    cholesky_ok = accel == "cpu" || supported("linalg/cholesky") do
+        wait(cholesky(_spd(T, 8, 4)).factors)
     end
     suite = BenchmarkGroup()
 
@@ -56,30 +72,38 @@ function linalg_suite(ctx; method, accels)
 
             # gemm needs A and the result resident; factorizations copy internally.
             if fits_budget(dense_bytes(N; nmats=3, T=T))
-                sub["matmul (A*A)"] = @benchmarkable(wait(A * A),
-                    setup = (A = rand(Blocks($b, $b), $T, $N, $N; assignment=$fixture_assignment); wait(A)),
-                    teardown = (A = nothing; @everywhere GC.gc()))
+                if matmul_ok
+                    sub["matmul (A*A)"] = @benchmarkable(wait(A * A),
+                        setup = (A = rand(Blocks($b, $b), $T, $N, $N; assignment=$fixture_assignment); wait(A)),
+                        teardown = (A = nothing; @everywhere GC.gc()))
+                end
 
-                sub["syrk (A'*A)"] = @benchmarkable(wait(A' * A),
-                    setup = (A = rand(Blocks($b, $b), $T, $N, $N; assignment=$fixture_assignment); wait(A)),
-                    teardown = (A = nothing; @everywhere GC.gc()))
+                if syrk_ok
+                    sub["syrk (A'*A)"] = @benchmarkable(wait(A' * A),
+                        setup = (A = rand(Blocks($b, $b), $T, $N, $N; assignment=$fixture_assignment); wait(A)),
+                        teardown = (A = nothing; @everywhere GC.gc()))
+                end
 
-                sub["lu"] = @benchmarkable(wait(lu(A, RowMaximum()).factors),
-                    setup = (A = rand(Blocks($b, $b), $T, $N, $N; assignment=$fixture_assignment); wait(A)),
-                    teardown = (A = nothing; @everywhere GC.gc()))
+                # GPU panels need backend-specific factorization support; keep
+                # these CPU fallbacks out of GPU performance measurements.
+                if accel == "cpu"
+                    sub["lu"] = @benchmarkable(wait(lu(A, RowMaximum()).factors),
+                        setup = (A = rand(Blocks($b, $b), $T, $N, $N; assignment=$fixture_assignment); wait(A)),
+                        teardown = (A = nothing; @everywhere GC.gc()))
 
-                sub["qr"] = @benchmarkable(wait(qr(A).factors),
-                    setup = (A = rand(Blocks($b, $b), $T, $N, $N; assignment=$fixture_assignment); wait(A)),
-                    teardown = (A = nothing; @everywhere GC.gc()))
+                    sub["qr"] = @benchmarkable(wait(qr(A).factors),
+                        setup = (A = rand(Blocks($b, $b), $T, $N, $N; assignment=$fixture_assignment); wait(A)),
+                        teardown = (A = nothing; @everywhere GC.gc()))
 
-                sub["solve (A\\b via lu)"] = @benchmarkable(wait(lu(A, RowMaximum()) \ b),
-                    setup = (A = rand(Blocks($b, $b), $T, $N, $N; assignment=$fixture_assignment);
-                             b = rand(Blocks($b), $T, $N; assignment=$fixture_assignment); wait(A); wait(b)),
-                    teardown = (A = nothing; b = nothing; @everywhere GC.gc()))
+                    sub["solve (A\\b via lu)"] = @benchmarkable(wait(lu(A, RowMaximum()) \ b),
+                        setup = (A = rand(Blocks($b, $b), $T, $N, $N; assignment=$fixture_assignment);
+                                 b = rand(Blocks($b), $T, $N; assignment=$fixture_assignment); wait(A); wait(b)),
+                        teardown = (A = nothing; b = nothing; @everywhere GC.gc()))
+                end
             end
 
             # Cholesky additionally holds the SPD-construction temporary.
-            if fits_budget(dense_bytes(N; nmats=4, T=T))
+            if cholesky_ok && fits_budget(dense_bytes(N; nmats=4, T=T))
                 sub["cholesky"] = @benchmarkable(wait(cholesky(A).factors),
                     setup = (A = _spd($T, $N, $b; assignment=$fixture_assignment)),
                     teardown = (A = nothing; @everywhere GC.gc()))
@@ -95,7 +119,7 @@ function linalg_suite(ctx; method, accels)
             end
 
             # gemv is cheap (one matrix + two vectors).
-            if fits_budget(dense_bytes(N; nmats=1, T=T))
+            if matvec_ok && fits_budget(dense_bytes(N; nmats=1, T=T))
                 sub["matvec (A*x)"] = @benchmarkable(wait(A * x),
                     setup = (A = rand(Blocks($b, $b), $T, $N, $N; assignment=$fixture_assignment);
                              x = rand(Blocks($b), $T, $N; assignment=$fixture_assignment); wait(A); wait(x)),

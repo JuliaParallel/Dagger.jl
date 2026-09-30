@@ -55,7 +55,7 @@
 #                  iterative Krylov solve)
 #     - "dtable" : DTables data operations (legacy; opt-in, see below)
 #   Available methods: "raw" (non-Dagger), "dagger" (Dagger).
-#   Available accelerations: "cuda", "amdgpu" (require the relevant packages,
+#   Available accelerations: "cuda", "amdgpu", "oneapi", "metal", "opencl" (require the relevant packages,
 #   see below). Defaults to "array:dagger;linalg:dagger;sparse:dagger".
 #
 #   "dtable" is intentionally NOT part of the default set (DTables is not
@@ -111,13 +111,20 @@
 #
 # GPU acceleration
 # ----------------
-# The "cuda"/"amdgpu" accelerations require `DaggerGPU` plus `CUDA`/`AMDGPU`.
+# GPU accelerations use Dagger extensions from `CUDA`, `AMDGPU`, `oneAPI`,
+# `Metal`, or `OpenCL`.
 # These are intentionally not hard dependencies of the benchmark environment.
 # Make them available to AirspeedVelocity with the `--add` flag, e.g.:
 #
 #     BENCHMARK=linalg:dagger+cuda \
 #         benchpkg Dagger --rev dirty --path . \
-#             --script benchmark/benchmarks.jl -a DaggerGPU,CUDA
+#             --script benchmark/benchmarks.jl -a CUDA
+#
+# Combine with BENCHMARK_PROCS=1:2 for GPU+Distributed, or
+# BENCHMARK_MPI_RANKS=2 for GPU+MPI. Every process/rank uses device 1 in its
+# visible device set; ranks can share one GPU. Fixtures and timed operations
+# use an explicit GPU scope and Float32. For local software-device validation,
+# use opencl with BENCHMARK_OPENCL_SOFTWARE=true and add pocl_jll.
 
 using BenchmarkTools
 import JSON3
@@ -173,7 +180,10 @@ function spawn_worker()
     rm(joinpath(WORKDIR, "done"); force=true)
     rm(joinpath(WORKDIR, "results_mpi_manifest.json"); force=true)
     for name in readdir(WORKDIR)
-        startswith(name, "error_mpi_rank_") || continue
+        # A persisted workdir may contain response IDs from a preceding run.
+        # Never accept those as responses from this newly started worker.
+        (startswith(name, "error_mpi_rank_") || startswith(name, "response_") ||
+         startswith(name, "result_")) || continue
         rm(joinpath(WORKDIR, name); force=true)
     end
     if MPI_RANKS > 0
@@ -238,11 +248,15 @@ function run_all_external()
 
     proc = spawn_worker()
     if !wait_ready(proc)
-        @error "Benchmark worker failed to start; producing empty SUITE."
-        return results
+        process_running(proc) && kill(proc)
+        error("Benchmark worker failed to start")
     end
 
     plan = JSON3.read(read(joinpath(WORKDIR, "plan.json"), String))
+    if isempty(plan)
+        kill(proc)
+        error("Benchmark worker produced an empty benchmark plan")
+    end
     # Process in ascending-N order within each (suite, method) so that, after an
     # OOM at some N, every remaining same-group item is at N >= the failing N and
     # can be skipped.
@@ -273,6 +287,11 @@ function run_all_external()
         elseif status == "missing"
             @warn "Worker has no such benchmark (capability probe differs?): $(join(it.keypath, " / "))"
         elseif status == "error"
+            if occursin("+", it.method)
+                kill(proc)
+                try; wait(proc); catch; end
+                error("GPU benchmark failed: $(join(it.keypath, " / ")): $(response.message)")
+            end
             @warn "Benchmark errored (skipped): $(join(it.keypath, " / "))" message=response.message
         else  # "oom" / "died" / "timeout"
             @warn "Benchmark $(status); skipping this and larger scales of $(it.suite)/$(it.method)" benchmark = join(it.keypath, " / ")

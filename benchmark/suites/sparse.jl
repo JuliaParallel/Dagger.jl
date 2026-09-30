@@ -32,9 +32,10 @@ laplacian_1d(T, n) = SparseArrays.spdiagm(
 function sparse_suite(ctx; method, accels)
     @assert method == "dagger" "Sparse suite only supports `dagger` execution"
     accel = isempty(accels) ? "cpu" : only(accels)
-    @assert accel == "cpu" "Sparse suite only supports CPU execution"
+    @assert accel == "cpu" || haskey(GPU_BACKENDS, accel) "Unknown backend"
 
-    T = Float64
+    T = benchmark_eltype()
+    atol, rtol = T(1e-8), T(1e-6)
     # Target a fixed number of nonzeros per row, so density shrinks with N and
     # the nonzero count stays ~O(N).
     nnz_per_row = 16
@@ -58,7 +59,7 @@ function sparse_suite(ctx; method, accels)
     cg_ok = KRYLOV_AVAILABLE && isdefined(Dagger, :cg) && supported("sparse/cg solve") do
         A = distribute(laplacian_1d(T, 8), Blocks(4, 4))
         rhs = distribute(rand(T, 8), Blocks(4))
-        wait(first(Dagger.cg(A, rhs; atol=1e-8, rtol=1e-6, itmax=50)))
+        wait(first(Dagger.cg(A, rhs; atol=atol, rtol=rtol, itmax=50)))
     end
 
     suite = BenchmarkGroup()
@@ -85,7 +86,7 @@ function sparse_suite(ctx; method, accels)
 
         # Iterative solve of an SPD system via conjugate gradients.
         if cg_ok && fits_budget(sparse_bytes(N; nmats=2, density=3 / N, T=T))
-            sub["cg solve (laplacian)"] = @benchmarkable(wait(first(Dagger.cg(A, rhs; atol=1e-8, rtol=1e-6, itmax=200))),
+            sub["cg solve (laplacian)"] = @benchmarkable(wait(first(Dagger.cg(A, rhs; atol=$atol, rtol=$rtol, itmax=200))),
                 setup = (A = distribute(laplacian_1d($T, $N), Blocks($b, $b));
                          rhs = distribute(rand($T, $N), Blocks($b)); wait(A); wait(rhs)),
                 teardown = (A = nothing; rhs = nothing; @everywhere GC.gc()))

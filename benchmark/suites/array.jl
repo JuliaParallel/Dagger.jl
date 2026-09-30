@@ -9,14 +9,23 @@
 function array_suite(ctx; method, accels)
     @assert method == "dagger" "Array suite only supports `dagger` execution"
     accel = isempty(accels) ? "cpu" : only(accels)
-    @assert accel == "cpu" "Array suite only supports CPU execution"
+    @assert accel == "cpu" || haskey(GPU_BACKENDS, accel) "Unknown backend"
 
-    T = Float64
+    T = benchmark_eltype()
     suite = BenchmarkGroup()
     # The named cyclic grids are currently backed by Distributed processors;
     # an MPI worker has no Distributed workers and must use the MPI-aware
     # arbitrary allocator instead.
-    fixture_assignment = length(procs()) > 1 ? :cyclicrow : :arbitrary
+    fixture_assignment = benchmark_assignment()
+
+    sum_init = accel == "cpu" ? Base._InitialValue() : zero(T)
+    # Some device libraries cannot combine scalar reduction intermediates.
+    # Probe the complete multi-tile reduction, not just a single device tile.
+    sum_ok = accel == "cpu" || supported("array/sum") do
+        X = rand(Blocks(4, 4), T, 8, 8)
+        wait(X)
+        sum(X; init=sum_init)
+    end
 
     for N in scales
         # Elementwise ops hold at most the input plus a same-size result.
@@ -49,9 +58,11 @@ function array_suite(ctx; method, accels)
                 setup = (X = rand(Blocks($b, $b), $T, $N, $N; assignment=$fixture_assignment); wait(X)),
                 teardown = (X = nothing; @everywhere GC.gc()))
 
-            sub["reduce (sum)"] = @benchmarkable(sum(X),
-                setup = (X = rand(Blocks($b, $b), $T, $N, $N; assignment=$fixture_assignment); wait(X)),
-                teardown = (X = nothing; @everywhere GC.gc()))
+            if sum_ok
+                sub["reduce (sum)"] = @benchmarkable(sum(X; init=$sum_init),
+                    setup = (X = rand(Blocks($b, $b), $T, $N, $N; assignment=$fixture_assignment); wait(X)),
+                    teardown = (X = nothing; @everywhere GC.gc()))
+            end
 
             sub["norm"] = @benchmarkable(norm(X),
                 setup = (X = rand(Blocks($b, $b), $T, $N, $N; assignment=$fixture_assignment); wait(X)),

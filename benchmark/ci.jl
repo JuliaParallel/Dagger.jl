@@ -63,6 +63,19 @@ if get(ENV, "BENCHMARK_MPI_RANKS", "0") != "0"
     push!(EXTRA_PKGS, "MPI")
 end
 
+# Install the requested extension package in both Airspeed revision environments.
+const gpu_packages = Dict("cuda" => "CUDA", "amdgpu" => "AMDGPU",
+                          "oneapi" => "oneAPI", "metal" => "Metal", "opencl" => "OpenCL")
+for spec in split(get(ENV, "BENCHMARK", ""), ';'), method in split(last(split(spec, ':')), ',')
+    for accel in split(method, '+')[2:end]
+        push!(EXTRA_PKGS, gpu_packages[accel])
+    end
+end
+if get(ENV, "BENCHMARK_OPENCL_SOFTWARE", "false") == "true"
+    push!(EXTRA_PKGS, "pocl_jll")
+end
+unique!(EXTRA_PKGS)
+
 mkpath(OUTPUT_DIR)
 
 @info "Benchmarking $CUR_REV vs $BASE_REV" project = PROJECT_DIR script = SCRIPT
