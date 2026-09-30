@@ -485,9 +485,8 @@ end
 Dagger.ipc_eligible(::CUDAVRAMMemorySpace, ::CUDAVRAMMemorySpace) = ipc_enabled()
 
 # The driver API wrappers live in CUDA itself on 5.x and in CUDACore
-# (DeviceMemory's home module) on 6.x
-const CUDADRV = isdefined(CUDA, :cuIpcGetMemHandle) ? CUDA :
-                parentmodule(CUDA.DeviceMemory)
+# on 6.x. Select the module once so every IPC call uses the same API.
+const CUDADRV = pkgversion(CUDA) < v"6" ? CUDA : CUDA.CUDACore
 
 struct CuIpcInfo{T,N}
     handle::CUDADRV.CUipcMemHandle
