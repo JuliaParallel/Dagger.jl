@@ -874,3 +874,16 @@ lesson.
    paths on equal memory spaces, not equal workers, read addresses without
    ownership side effects, and test with tiles on two devices of one
    process: the one-GPU-per-worker suites cannot see any of this.
+
+73. **Reading a GPU task's result needs Dagger's stream, not the caller's.**
+   GPU `execute!` returns without synchronizing: the kernels are still queued
+   on Dagger's per-device stream. A plain `fetch` + `Array(x)` from the
+   caller copies on the caller's own task-local stream, and is correct only
+   if the array library synchronizes the previous owner when another stream
+   touches a buffer. CUDA, AMDGPU and OpenCL do; oneAPI does not, and it also
+   copies on the *calling task's* device. A green CUDA run therefore does not
+   prove the wait exists. Before reading a tile on the host, call
+   `gpu_synchronize(chunk.processor)` and copy under `with_context`, on the
+   chunk's owner (as `collect` does via `_collect_host_tile`). Note that
+   IntelExt's hooks sync only the calling task's stream, and each oneAPI
+   `execute!` runs on a fresh task, so oneAPI's own hook is not sufficient yet.
