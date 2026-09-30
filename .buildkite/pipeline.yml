@@ -149,7 +149,7 @@ steps:
           version: "1.11"
     agents:
       queue: "cuda"
-    command: "bash .buildkite/run_gpu_benchmarks.sh {{{{matrix}}}}"
+    command: "bash .buildkite/run_gpu_benchmarks.sh {{matrix}}"
     env:
       BENCHMARK_GPU: "cuda"
       BENCHMARK_VARIANT: "gpu"
@@ -179,7 +179,7 @@ steps:
           version: "1.11"
     agents:
       queue: "cuda"
-    command: "bash .buildkite/run_gpu_benchmarks.sh {{{{matrix}}}}"
+    command: "bash .buildkite/run_gpu_benchmarks.sh {{matrix}}"
     env:
       BENCHMARK_GPU: "cuda"
       BENCHMARK_VARIANT: "gpu-distributed"
@@ -210,7 +210,7 @@ steps:
           version: "1.11"
     agents:
       queue: "cuda"
-    command: "bash .buildkite/run_gpu_benchmarks.sh {{{{matrix}}}}"
+    command: "bash .buildkite/run_gpu_benchmarks.sh {{matrix}}"
     env:
       BENCHMARK_GPU: "cuda"
       BENCHMARK_VARIANT: "gpu-mpi"
@@ -241,7 +241,7 @@ steps:
           version: "1.11"
     agents:
       queue: "rocm"
-    command: "bash .buildkite/run_gpu_benchmarks.sh {{{{matrix}}}}"
+    command: "bash .buildkite/run_gpu_benchmarks.sh {{matrix}}"
     env:
       BENCHMARK_GPU: "amdgpu"
       BENCHMARK_VARIANT: "gpu"
@@ -271,7 +271,7 @@ steps:
           version: "1.11"
     agents:
       queue: "rocm"
-    command: "bash .buildkite/run_gpu_benchmarks.sh {{{{matrix}}}}"
+    command: "bash .buildkite/run_gpu_benchmarks.sh {{matrix}}"
     env:
       BENCHMARK_GPU: "amdgpu"
       BENCHMARK_VARIANT: "gpu-distributed"
@@ -302,7 +302,7 @@ steps:
           version: "1.11"
     agents:
       queue: "rocm"
-    command: "bash .buildkite/run_gpu_benchmarks.sh {{{{matrix}}}}"
+    command: "bash .buildkite/run_gpu_benchmarks.sh {{matrix}}"
     env:
       BENCHMARK_GPU: "amdgpu"
       BENCHMARK_VARIANT: "gpu-mpi"
@@ -333,7 +333,7 @@ steps:
           version: "1.11"
     agents:
       queue: "oneapi"
-    command: "bash .buildkite/run_gpu_benchmarks.sh {{{{matrix}}}}"
+    command: "bash .buildkite/run_gpu_benchmarks.sh {{matrix}}"
     env:
       BENCHMARK_GPU: "oneapi"
       BENCHMARK_VARIANT: "gpu"
@@ -363,7 +363,7 @@ steps:
           version: "1.11"
     agents:
       queue: "oneapi"
-    command: "bash .buildkite/run_gpu_benchmarks.sh {{{{matrix}}}}"
+    command: "bash .buildkite/run_gpu_benchmarks.sh {{matrix}}"
     env:
       BENCHMARK_GPU: "oneapi"
       BENCHMARK_VARIANT: "gpu-distributed"
@@ -394,7 +394,7 @@ steps:
           version: "1.11"
     agents:
       queue: "oneapi"
-    command: "bash .buildkite/run_gpu_benchmarks.sh {{{{matrix}}}}"
+    command: "bash .buildkite/run_gpu_benchmarks.sh {{matrix}}"
     env:
       BENCHMARK_GPU: "oneapi"
       BENCHMARK_VARIANT: "gpu-mpi"
@@ -425,7 +425,7 @@ steps:
           version: "1.11"
     agents:
       queue: "metal"
-    command: "bash .buildkite/run_gpu_benchmarks.sh {{{{matrix}}}}"
+    command: "bash .buildkite/run_gpu_benchmarks.sh {{matrix}}"
     env:
       BENCHMARK_GPU: "metal"
       BENCHMARK_VARIANT: "gpu"
@@ -455,7 +455,7 @@ steps:
           version: "1.11"
     agents:
       queue: "metal"
-    command: "bash .buildkite/run_gpu_benchmarks.sh {{{{matrix}}}}"
+    command: "bash .buildkite/run_gpu_benchmarks.sh {{matrix}}"
     env:
       BENCHMARK_GPU: "metal"
       BENCHMARK_VARIANT: "gpu-distributed"
@@ -486,7 +486,7 @@ steps:
           version: "1.11"
     agents:
       queue: "metal"
-    command: "bash .buildkite/run_gpu_benchmarks.sh {{{{matrix}}}}"
+    command: "bash .buildkite/run_gpu_benchmarks.sh {{matrix}}"
     env:
       BENCHMARK_GPU: "metal"
       BENCHMARK_VARIANT: "gpu-mpi"

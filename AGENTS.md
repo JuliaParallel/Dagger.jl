@@ -627,3 +627,9 @@ lesson.
     when the CPU reporter finishes later. Trigger aggregate snapshots after
     each vendor completes, with a shared writer concurrency group: an offline
     vendor queue must not withhold another vendor's finished results.
+
+60. **Validate Buildkite matrix expansion, not just YAML syntax.** Buildkite
+    replaces `{{matrix}}` once. A command containing `{{{{matrix}}}}` is valid
+    YAML but passes `{{array}}` to the benchmark worker, which rejects the suite
+    before sampling. Check the expanded command arguments and artifact paths
+    for every pipeline; parser and dependency checks do not catch this error.

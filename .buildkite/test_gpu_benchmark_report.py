@@ -1,6 +1,8 @@
 import importlib.util
 import json
 import os
+import re
+import shlex
 from pathlib import Path
 import tempfile
 import subprocess
@@ -67,6 +69,26 @@ class ReportTests(unittest.TestCase):
                 self.assertEqual((root / "executed").exists(), expected)
                 if expected:
                     self.assertEqual((root / "executed").read_text(), "array:dagger+opencl")
+
+    def test_pipeline_matrix_expands_to_valid_suite_arguments(self):
+        # Buildkite replaces {{matrix}} once; extra braces survive into argv.
+        directory = Path(__file__).parent
+        for filename, expected_count in [("pipeline.yml", 12), ("pipeline-julia.yml", 3)]:
+            source = (directory / filename).read_text()
+            commands = re.findall(r'command: "(bash \.buildkite/run_gpu_benchmarks\.sh [^"\n]+)"', source)
+            self.assertEqual(len(commands), expected_count)
+            outputs = re.findall(r'BENCHMARK_OUTPUT_DIR: "(benchmark-results-[^"\n]+-gpu[^"\n]*)"', source)
+            self.assertEqual(len(outputs), expected_count)
+            for suite in ("array", "linalg", "sparse", "stencil"):
+                for command in commands:
+                    with self.subTest(pipeline=filename, command=command, suite=suite):
+                        expanded = command.replace("{{matrix}}", suite)
+                        self.assertEqual(shlex.split(expanded),
+                                         ["bash", ".buildkite/run_gpu_benchmarks.sh", suite])
+                for output in outputs:
+                    expanded = output.replace("{{matrix}}", suite)
+                    self.assertTrue(expanded.endswith("-" + suite))
+                    self.assertNotRegex(expanded, r"[{}]")
 
     def test_bounds_details(self):
         with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {"BENCHMARK_GPU_VENDORS": "metal"}):

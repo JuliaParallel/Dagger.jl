@@ -207,7 +207,7 @@ steps:
       queue: "juliaecosystem"
       os: "macos"
       arch: "aarch64"
-    command: "bash .buildkite/run_gpu_benchmarks.sh {{{{matrix}}}}"
+    command: "bash .buildkite/run_gpu_benchmarks.sh {{matrix}}"
     env:
       BENCHMARK_GPU: "opencl"
       BENCHMARK_VARIANT: "gpu"
@@ -239,7 +239,7 @@ steps:
       queue: "juliaecosystem"
       os: "macos"
       arch: "aarch64"
-    command: "bash .buildkite/run_gpu_benchmarks.sh {{{{matrix}}}}"
+    command: "bash .buildkite/run_gpu_benchmarks.sh {{matrix}}"
     env:
       BENCHMARK_GPU: "opencl"
       BENCHMARK_VARIANT: "gpu-distributed"
@@ -272,7 +272,7 @@ steps:
       queue: "juliaecosystem"
       os: "macos"
       arch: "aarch64"
-    command: "bash .buildkite/run_gpu_benchmarks.sh {{{{matrix}}}}"
+    command: "bash .buildkite/run_gpu_benchmarks.sh {{matrix}}"
     env:
       BENCHMARK_GPU: "opencl"
       BENCHMARK_VARIANT: "gpu-mpi"
