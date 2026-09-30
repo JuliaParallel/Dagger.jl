@@ -624,4 +624,6 @@ lesson.
     check (`buildkite-agent step get outcome`). Keep GPU+MPI dependent on the
     ordinary GPU test as well as the GPU+MPI test. Aggregate reports with one
     writer, retain only sections for the same PR head, and preserve GPU sections
-    when the CPU reporter finishes later.
+    when the CPU reporter finishes later. Trigger aggregate snapshots after
+    each vendor completes, with a shared writer concurrency group: an offline
+    vendor queue must not withhold another vendor's finished results.
