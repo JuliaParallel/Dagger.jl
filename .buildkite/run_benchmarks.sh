@@ -29,7 +29,7 @@ if command -v buildkite-agent >/dev/null 2>&1; then
     if [ -f "${OUTPUT_DIR}/report.md" ]; then
         STYLE="success"
         [ "$CODE" -ne 0 ] && STYLE="error"
-        buildkite-agent annotate --style "$STYLE" --context benchmarks \
+        buildkite-agent annotate --style "$STYLE" --context "${BENCHMARK_OUTPUT_DIR}" \
             < "${OUTPUT_DIR}/report.md" || true
     fi
 fi
@@ -38,7 +38,7 @@ fi
 # pull-request write access; silently skipped otherwise. Plots are not inlined
 # here (GitHub can't render Buildkite `artifact://` refs) -- we link to the
 # Buildkite build instead, where the annotation shows the plots inline.
-if [ -n "${GITHUB_TOKEN:-}" ] && [ "${BUILDKITE_PULL_REQUEST:-false}" != "false" ]; then
+if [ "${BENCHMARK_SKIP_COMMENT:-0}" != "1" ] && [ -n "${GITHUB_TOKEN:-}" ] && [ "${BUILDKITE_PULL_REQUEST:-false}" != "false" ]; then
     echo "--- Commenting on GitHub PR #${BUILDKITE_PULL_REQUEST}"
     REPO_SLUG="$(echo "${BUILDKITE_REPO:-}" | sed -E 's#.*github.com[:/]##; s#\.git$##')"
     if [ -n "$REPO_SLUG" ] && [ -f "${OUTPUT_DIR}/report.md" ]; then

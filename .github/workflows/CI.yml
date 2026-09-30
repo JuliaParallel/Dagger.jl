@@ -359,7 +359,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: Test benchmark report rendering
-        run: node --test .github/scripts/benchmark-report.test.cjs
+        run: node --test .github/scripts/benchmark-report.test.cjs .github/scripts/benchmark-comment.test.cjs
       - name: Download benchmark results
         if: always()
         continue-on-error: true
@@ -377,17 +377,23 @@ jobs:
           script: |
             const { buildReport, marker } = require('./.github/scripts/benchmark-report.cjs');
             const runUrl = `${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID}`;
-            const body = buildReport('results', runUrl);
+            let body = buildReport('results', runUrl);
+            const head = context.payload.pull_request.head.sha;
+            const { mergeCPUReport } = require('./.github/scripts/benchmark-comment.cjs');
 
             const { owner, repo } = context.repo;
             const issue_number = context.issue.number;
+            const { data: currentPR } = await github.rest.pulls.get({ owner, repo, pull_number: issue_number });
+            if (currentPR.head.sha !== head) return;
             const comments = await github.paginate(github.rest.issues.listComments, {
               owner, repo, issue_number,
             });
             const existing = comments.find(c => c.body && c.body.includes(marker));
             if (existing) {
+              body = mergeCPUReport(body, existing.body, head);
               await github.rest.issues.updateComment({ owner, repo, comment_id: existing.id, body });
             } else {
+              body = mergeCPUReport(body, null, head);
               await github.rest.issues.createComment({ owner, repo, issue_number, body });
             }
 
