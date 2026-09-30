@@ -523,7 +523,7 @@ function Dagger.ipc_copyto!(dest::CUDA.StridedCuArray{T,N}, info::CuIpcInfo{T,N}
         copyto!(dest, src)
         CUDA.device_synchronize()
     finally
-        CUDA.cuIpcCloseMemHandle(raw)
+        CUDADRV.cuIpcCloseMemHandle(raw)
     end
     return dest
 end
