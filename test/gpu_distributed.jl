@@ -11,6 +11,14 @@ using Distributed, Dagger, LinearAlgebra, Test
         A .*= 2f0
         return nothing
     end
+    # Slow on purpose, and exact in Float32: a read that doesn't wait for the
+    # kernel shows up as a wrong value rather than a rounding difference.
+    function distributed_gpu_slowinc(x)
+        for _ in 1:20000
+            x += 1f0
+        end
+        return x - 19999f0
+    end
 end
 
 function test_distributed_gpu(kind, gpu_key)
@@ -78,6 +86,26 @@ function test_distributed_gpu(kind, gpu_key)
         end
         @test A == (ref .+ 1f0) .* 2f0 .+ 1f0
 
+    end
+
+    @testset "collect waits for queued kernels" begin
+        # GPU tasks return with their kernels still queued on Dagger's stream;
+        # `collect` must wait on that stream, not the caller's. Covers tiles
+        # owned by the driver and by remote workers.
+        A = reshape(Float32.(1:4096), 64, 64)
+        local_gpu = any(p -> p isa Dagger.gpu_processor(kind),
+                        Dagger.get_processors(Dagger.OSProc(myid())))
+        scopes = local_gpu ? (Dagger.scope(; worker=myid(), gpu_kw...), s1, s2) : (s1, s2)
+        for s in scopes
+            for _ in 1:3
+                B = Dagger.with_options(; scope=s) do
+                    DB = map(distributed_gpu_slowinc, Dagger.distribute(A, Dagger.Blocks(32, 32)))
+                    wait(DB)
+                    collect(DB)
+                end
+                @test B == A .+ 1f0
+            end
+        end
     end
 
     @testset "Distributed GPU arrays" begin
