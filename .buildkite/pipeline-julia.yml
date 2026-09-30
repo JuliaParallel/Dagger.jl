@@ -113,6 +113,7 @@ steps:
           codecov: true
 
   - label: Julia 1.11 (OpenCL)
+    key: test-opencl
     <<: *gputest
     timeout_in_minutes: 20
     plugins:
@@ -130,9 +131,10 @@ steps:
     command: "julia --project -e 'using Pkg; Pkg.develop(;path=\"lib/TimespanLogging\")'"
 
   # MPI × OpenCL SPMD datadeps suite. Runs on the same macOS/aarch64 agent as the
-  # non-MPI OpenCL job, but drives test/mpi_opencl.jl under MPI.jl's bundled
-  # `mpiexec` via test/run_mpi.jl (no `julia-test` plugin, no system MPI).
+  # non-MPI OpenCL job, but drives test/mpi/opencl.jl under MPI.jl's bundled
+  # `mpiexec` via test/mpi/run.jl (no `julia-test` plugin, no system MPI).
   - label: Julia 1.11 (OpenCL, MPI)
+    key: test-opencl-mpi
     <<: *gputest
     timeout_in_minutes: 20
     plugins:
@@ -144,7 +146,7 @@ steps:
       arch: aarch64
     command: |
       julia --project=test/openclenv -e 'using Pkg; Pkg.develop([PackageSpec(path=pwd()), PackageSpec(path="lib/TimespanLogging")]); Pkg.instantiate()'
-      julia --project=test/openclenv test/run_mpi.jl 2 2 test/mpi_opencl.jl
+      julia --project=test/openclenv test/mpi/run.jl 2 2 test/mpi/opencl.jl
 
   - label: Julia 1 - TimespanLogging
     <<: *test
@@ -188,3 +190,117 @@ steps:
 
 # env:
 #   SECRET_CODECOV_TOKEN: ""
+
+  - label: "Benchmarks (OpenCL, gpu, {{matrix}})"
+    key: "bench-opencl-gpu"
+    # GPU timings must not compete with sibling benchmark shards.
+    concurrency: 1
+    concurrency_group: "dagger-gpu-benchmarks-opencl"
+    if: build.message !~ /\[skip tests\]/ && build.message !~ /\[skip benchmarks\]/ && (build.pull_request.id != null || build.message =~ /\[run benchmarks\]/)
+    depends_on: [test-opencl]
+    timeout_in_minutes: 120
+    matrix: [array, linalg, sparse, stencil]
+    plugins:
+      - JuliaCI/julia#v1:
+          version: "1.11"
+    agents:
+      queue: "juliaecosystem"
+      os: "macos"
+      arch: "aarch64"
+    command: "bash .buildkite/run_gpu_benchmarks.sh {{matrix}}"
+    env:
+      BENCHMARK_GPU: "opencl"
+      BENCHMARK_VARIANT: "gpu"
+      BENCHMARK_TEST_STEPS: "test-opencl"
+      BENCHMARK_CI_THREADS: "2"
+      OPENBLAS_NUM_THREADS: "1"
+      BENCHMARK_SCALE: "[256, 1024]"
+      BENCHMARK_BLOCKSIZE: "[128, 512]"
+      BENCHMARK_SECONDS: "30"
+      BENCHMARK_SAMPLES: "5"
+      BENCHMARK_REGRESSION_THRESHOLD: "0.35"
+      BENCHMARK_OUTPUT_DIR: "benchmark-results-opencl-gpu-{{matrix}}"
+    artifacts:
+      - "benchmark-results-*/**/*"
+
+  - label: "Benchmarks (OpenCL, gpu-distributed, {{matrix}})"
+    key: "bench-opencl-gpu-distributed"
+    # GPU timings must not compete with sibling benchmark shards.
+    concurrency: 1
+    concurrency_group: "dagger-gpu-benchmarks-opencl"
+    if: build.message !~ /\[skip tests\]/ && build.message !~ /\[skip benchmarks\]/ && (build.pull_request.id != null || build.message =~ /\[run benchmarks\]/)
+    depends_on: [test-opencl]
+    timeout_in_minutes: 120
+    matrix: [array, linalg, sparse, stencil]
+    plugins:
+      - JuliaCI/julia#v1:
+          version: "1.11"
+    agents:
+      queue: "juliaecosystem"
+      os: "macos"
+      arch: "aarch64"
+    command: "bash .buildkite/run_gpu_benchmarks.sh {{matrix}}"
+    env:
+      BENCHMARK_GPU: "opencl"
+      BENCHMARK_VARIANT: "gpu-distributed"
+      BENCHMARK_TEST_STEPS: "test-opencl"
+      BENCHMARK_CI_THREADS: "2"
+      OPENBLAS_NUM_THREADS: "1"
+      BENCHMARK_SCALE: "[256, 1024]"
+      BENCHMARK_BLOCKSIZE: "[128, 512]"
+      BENCHMARK_SECONDS: "30"
+      BENCHMARK_SAMPLES: "5"
+      BENCHMARK_REGRESSION_THRESHOLD: "0.35"
+      BENCHMARK_OUTPUT_DIR: "benchmark-results-opencl-gpu-distributed-{{matrix}}"
+      BENCHMARK_PROCS: "1:2"
+    artifacts:
+      - "benchmark-results-*/**/*"
+
+  - label: "Benchmarks (OpenCL, gpu-mpi, {{matrix}})"
+    key: "bench-opencl-gpu-mpi"
+    # GPU timings must not compete with sibling benchmark shards.
+    concurrency: 1
+    concurrency_group: "dagger-gpu-benchmarks-opencl"
+    if: build.message !~ /\[skip tests\]/ && build.message !~ /\[skip benchmarks\]/ && (build.pull_request.id != null || build.message =~ /\[run benchmarks\]/)
+    depends_on: [test-opencl, test-opencl-mpi]
+    timeout_in_minutes: 120
+    matrix: [array, linalg, sparse, stencil]
+    plugins:
+      - JuliaCI/julia#v1:
+          version: "1.11"
+    agents:
+      queue: "juliaecosystem"
+      os: "macos"
+      arch: "aarch64"
+    command: "bash .buildkite/run_gpu_benchmarks.sh {{matrix}}"
+    env:
+      BENCHMARK_GPU: "opencl"
+      BENCHMARK_VARIANT: "gpu-mpi"
+      BENCHMARK_TEST_STEPS: "test-opencl,test-opencl-mpi"
+      BENCHMARK_CI_THREADS: "2"
+      OPENBLAS_NUM_THREADS: "1"
+      BENCHMARK_SCALE: "[256, 1024]"
+      BENCHMARK_BLOCKSIZE: "[128, 512]"
+      BENCHMARK_SECONDS: "30"
+      BENCHMARK_SAMPLES: "5"
+      BENCHMARK_REGRESSION_THRESHOLD: "0.35"
+      BENCHMARK_OUTPUT_DIR: "benchmark-results-opencl-gpu-mpi-{{matrix}}"
+      BENCHMARK_MPI_RANKS: "2"
+    artifacts:
+      - "benchmark-results-*/**/*"
+
+  - label: "GPU benchmark summary"
+    key: opencl-benchmark-report
+    if: build.message !~ /\[skip tests\]/ && build.message !~ /\[skip benchmarks\]/ && (build.pull_request.id != null || build.message =~ /\[run benchmarks\]/)
+    depends_on: [bench-opencl-gpu, bench-opencl-gpu-distributed, bench-opencl-gpu-mpi]
+    allow_dependency_failure: true
+    timeout_in_minutes: 10
+    agents:
+      queue: "juliaecosystem"
+      os: linux
+      arch: x86_64
+    env:
+      BENCHMARK_GPU_VENDORS: "opencl"
+    concurrency: 1
+    concurrency_group: "dagger-gpu-benchmark-comments"
+    command: "python3 -m unittest discover -s .buildkite -p 'test_*.py' && bash .buildkite/report_gpu_benchmarks.sh"

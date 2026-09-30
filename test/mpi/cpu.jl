@@ -6,6 +6,7 @@
 # NOT re-tested here. This suite covers only MPI-exclusive machinery:
 #
 #   - SPMD-uniform chunk creation (deterministic placement, MPIRef handles)
+#   - deterministic Datadeps placement across the threads within each rank
 #   - check_uniform / compare_all agreement
 #   - acceleration-aware wrapping of non-Chunk arguments (rank-0 ownership)
 #   - the SPMD-symmetric endpoint (MPIWireValue move_rewrap, aliased-object
@@ -24,12 +25,12 @@
 #     halo exchange (including the stencil_source_chunks pre-sweep snapshot
 #     for self-referencing Wrap stencils) across MPI ranks
 #
-# GPU coverage lives in test/mpi_cuda.jl (CUDA) and test/mpi_rocm.jl (ROCm).
+# GPU coverage lives in test/mpi/cuda.jl (CUDA) and test/mpi/rocm.jl (ROCm).
 #
 # Known gaps (not tested): NaiveScheduler/UltraScheduler use rank-local cost
 # measurements and are not deterministic across ranks.
 #
-# Run: mpiexec -n 4 julia --project --threads=2 test/mpi.jl
+# Run: mpiexec -n 4 julia --project --threads=2 test/mpi/cpu.jl
 
 using Dagger, MPI, LinearAlgebra, Random, SparseArrays, Krylov, Test
 using Dagger: In, Out, InOut, Deps
@@ -40,9 +41,9 @@ using Distributed
 # not in Dagger core. Reference them through the extension module.
 const MPIExt = Base.get_extension(Dagger, :MPIExt)
 
-include(joinpath(@__DIR__, "util.jl"))
-include(joinpath(@__DIR__, "array", "stencil_defs.jl"))
-include(joinpath(@__DIR__, "array", "sparse_defs.jl"))
+include(joinpath(@__DIR__, "..", "util.jl"))
+include(joinpath(@__DIR__, "..", "array", "stencil_defs.jl"))
+include(joinpath(@__DIR__, "..", "array", "sparse_defs.jl"))
 
 Dagger.accelerate!(:mpi)
 Dagger.check_uniformity!(true)
@@ -51,8 +52,8 @@ const rank = MPI.Comm_rank(comm)
 const nranks = MPI.Comm_size(comm)
 const accel = Dagger.current_acceleration()
 
-include("mpi-broadcast.jl")
-include("mpi-receive.jl")
+include("broadcast.jl")
+include("receive.jl")
 
 mpi_procs() = sort(collect(Dagger.get_processors(MPIExt.MPIClusterProc(comm)));
                    by=p->(p.rank, Dagger.short_name(p)))
@@ -145,6 +146,8 @@ end
 end
 
 @testset "Datadeps" begin
+
+include("threads.jl")
 
 @testset "Uniform chunk creation" begin
     Random.seed!(1)
@@ -823,21 +826,7 @@ end # @testset "Datadeps"
     @test recon < 1e-12
 end
 
-@testset "LU" begin
-    Random.seed!(1234)
-    A = randn(100, 100)
-    orig_A = copy(A)
-    DA = DArray(A, Blocks(25, 25))
-
-    F = lu!(DA, RowMaximum(); check=false)
-    lu!(A, RowMaximum())
-
-    @test norm(collect(A) - collect(DA)) / norm(collect(A)) < 1e-12
-    DAc = collect(DA)
-    p = LinearAlgebra.ipiv2perm(collect(F.ipiv), size(DAc, 1))
-    LtU = UnitLowerTriangular(DAc) * UpperTriangular(DAc)
-    @test norm(LtU - orig_A[p, :]) / norm(orig_A) < 1e-12
-end
+include("lu.jl")
 
 @testset "Stencils" begin
     # Chunks are placed round-robin across ranks (see "Uniform chunk

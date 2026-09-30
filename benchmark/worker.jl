@@ -66,25 +66,7 @@ end
 
 # --- Load acceleration backends (only if requested) ------------------------
 
-for accel in accelerations
-    if accel == "cuda"
-        try
-            @everywhere using DaggerGPU, CUDA
-        catch err
-            error("Failed to load CUDA acceleration; ensure DaggerGPU and CUDA " *
-                  "are available (e.g. `benchpkg ... -a DaggerGPU,CUDA`)\n$err")
-        end
-    elseif accel == "amdgpu"
-        try
-            @everywhere using DaggerGPU, AMDGPU
-        catch err
-            error("Failed to load AMDGPU acceleration; ensure DaggerGPU and " *
-                  "AMDGPU are available (e.g. `benchpkg ... -a DaggerGPU,AMDGPU`)\n$err")
-        end
-    else
-        error("Unknown acceleration: $accel")
-    end
-end
+include(joinpath(@__DIR__, "backend.jl"))
 
 # --- Build the benchmark suites --------------------------------------------
 
@@ -104,7 +86,9 @@ for (suite_name, bench_list) in benches
                      "$(bench.method)+$(join(bench.accels, "+"))"
         @info "[worker] Creating benchmarks for suite=$suite_name method=$method_key"
         suite_group[method_key] =
-            suite_setup[suite_name](ctx; method=bench.method, accels=bench.accels)
+            with_benchmark_scope() do
+                suite_setup[suite_name](ctx; method=bench.method, accels=bench.accels)
+            end
     end
     SUITE[suite_name] = suite_group
 end
@@ -182,7 +166,7 @@ function serve(bench_by_path, workdir)
         bench = bench_by_path[kp]
         @info "[worker] Running: $(join(kp, " / "))"
         try
-            trial = BenchmarkTools.run(bench)
+            trial = with_benchmark_scope(() -> BenchmarkTools.run(bench))
             BenchmarkTools.save(joinpath(workdir, "result_$(id).json"), trial)
             atomic_write(resppath, JSON3.write((; status="ok")))
         catch err

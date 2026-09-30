@@ -66,13 +66,13 @@ end
 function stencil_suite(ctx; method, accels)
     @assert method == "dagger" "Stencil suite only supports `dagger` execution"
     accel = isempty(accels) ? "cpu" : only(accels)
-    @assert accel == "cpu" "Stencil suite only supports CPU execution"
+    @assert accel == "cpu" || haskey(GPU_BACKENDS, accel) "Unknown backend"
 
-    T = Float64
+    T = benchmark_eltype()
     suite = BenchmarkGroup()
     # Named cyclic grids use Distributed processors. MPI ranks do not populate
     # `Distributed.procs()`, so retain the MPI-aware arbitrary allocator there.
-    fixture_assignment = length(procs()) > 1 ? :cyclicrow : :arbitrary
+    fixture_assignment = benchmark_assignment()
 
     # Keep fixture placement identical across revisions. Besides stabilizing
     # transfer work, this makes the driver's process-local allocation sample

@@ -198,6 +198,11 @@ end
     end
 end
 
+# Backend capability rather than outer processor type: accelerations can wrap
+# a CPU thread while preserving its ability to execute the native panel kernel.
+supports_lapack_panel(::Processor) = false
+supports_lapack_panel(::ThreadProc) = true
+
 # Factor an entire block-column panel (the diagonal block plus all
 # off-diagonal blocks below it) with partial pivoting, in a single task.
 #
@@ -274,7 +279,7 @@ function LinearAlgebra.lu!(A::DMatrix{T}, ::LinearAlgebra.RowMaximum; check::Boo
     mb, nb = A.partitioning.blocksize
     min_mb_nb = min(mb, nb)
     local ipiv
-    maybe_copy_buffered(A => Blocks(min_mb_nb, min_mb_nb)) do A
+    info_value = maybe_copy_buffered(A => Blocks(min_mb_nb, min_mb_nb)) do A
         Ac = A.chunks
         mb, nb = A.partitioning.blocksize
         mt, nt = size(Ac)
@@ -289,11 +294,11 @@ function LinearAlgebra.lu!(A::DMatrix{T}, ::LinearAlgebra.RowMaximum; check::Boo
         # scope options (not argument types) determine where a task actually
         # executes, check the current task-local compute scope rather than
         # inspecting `Ac[1,1]`'s type.
-        use_lapack_panel = all(proc isa Dagger.ThreadProc for proc in Dagger.compatible_processors(Dagger.get_compute_scope()))
+        use_lapack_panel = all(supports_lapack_panel, compatible_processors(get_compute_scope()))
 
         # Using full Chunks in annotations for simplicity
         # ChunkViews work correctly and could be used here if needed.
-        Dagger.spawn_datadeps() do
+        info_task = Dagger.spawn_datadeps() do
             for k in 1:min(mt, nt)
                 if use_lapack_panel
                     panel_spawn_args = Any[
@@ -356,16 +361,25 @@ function LinearAlgebra.lu!(A::DMatrix{T}, ::LinearAlgebra.RowMaximum; check::Boo
                     end
                 end
             end
+            # Plain Ref writes are visible only on their owning MPI rank.
+            # Read the final status through the same dependency graph and fetch
+            # its uniform result so every rank reports singularity consistently.
+            if uniform_execution()
+                return Dagger.@spawn getindex(In(info))
+            end
+            return nothing
         end
+        panel_info = info_task === nothing ? info[] : fetch(info_task)::Int
 
         if check
             @static if VERSION >= v"1.11-"
-                LinearAlgebra._check_lu_success(info[], allowsingular)
+                LinearAlgebra._check_lu_success(panel_info, allowsingular)
             else
-                LinearAlgebra.checknonsingular(info[])
+                LinearAlgebra.checknonsingular(panel_info)
             end
         end
+        return panel_info
     end
 
-    return LinearAlgebra.LU{T,DMatrix{T},DVector{Int}}(A, ipiv, info[])
+    return LinearAlgebra.LU{T,DMatrix{T},DVector{Int}}(A, ipiv, info_value)
 end

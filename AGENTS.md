@@ -176,7 +176,7 @@ lesson.
    device* — and generic `cat` fills its output element by element, which is
    scalar indexing. Keep shared test bodies in a `test/array/*_defs.jl` file
    (as `stencil_defs.jl` and `sparse_defs.jl` do) and call them from all four
-   entry points; `test/mpi_opencl.jl` makes the fourth cell cheap to run
+   entry points; `test/mpi/opencl.jl` makes the fourth cell cheap to run
    locally.
 
 17. **Extensions of the same package must not reach into each other.** Load
@@ -535,3 +535,101 @@ lesson.
    generic `ReshapedArray` of a DArray also falls back to scalar indexing.
    Use nonuniform values and offset views crossing tile boundaries, with
    scalar indexing disabled, to check placement as well as dispatch.
+
+50. **Uniform scheduling must preserve Datadeps' chosen thread.** The
+   planner already chooses a rank-uniform processor, but widening its scope
+   to every processor in that memory space discards the thread choice. MPI
+   ignores rank-local capacity and uses a deterministic processor order, so
+   every task then lands on the first thread of its rank. MPI also disables
+   work stealing; it cannot repair that placement later. Retain an exact
+   processor scope under uniform execution, while leaving Distributed's
+   memory-space scope available for load balancing. Test both flat and
+   hierarchical planners with several rounds of tasks, checking actual thread
+   IDs as well as uniform processor metadata and restricted user scopes.
+
+51. **Asynchronous benchmark workers need explicit output streams.** Julia's
+   `run(cmd; wait=false)` redirects stdout and stderr to `devnull`; it does
+   not inherit them as synchronous `run` does. The benchmark orchestrator
+   consequently hid all worker progress and errors while CI appeared stuck
+   at "Loading benchmark script" for 85 minutes. Launch both plain and MPI
+   workers through `pipeline(...; stdout=stdout, stderr=stderr)` so the last
+   active benchmark and any failure are visible in the job log.
+
+52. **A missing benchmark spread is not evidence of a repeatable change.**
+   AirspeedVelocity omits quartiles when a trial has one timed sample. The
+   three-second CI budget included setup, teardown and GC, so even sub-ms
+   kernels often produced only one sample. Treating either missing spread as
+   automatically significant bypassed the other revision's measured noise:
+   a broadcast trial with 0.25 ms and 2.91 ms samples became a +327% regression
+   against a single 0.37 ms sample. Report such timing changes as inconclusive
+   in both directions, preserve allocation gates, and budget enough wall time
+   for repeated samples. Keep the classification in one place and export its
+   structured results for aggregation; do not infer significance by parsing
+   rendered Markdown.
+
+53. **Performance workers must not silently enable correctness diagnostics.**
+    The MPI benchmark worker copied `check_uniformity!(true)` from the test
+    bootstrap. That hashes and compares planning values across ranks for every
+    task and argument, so short kernels mostly measured diagnostic traffic.
+    A warmed 2-rank × 2-thread matrix-vector benchmark on the same baseline
+    took a median 249 ms with checks and 13 ms without; minimum allocations
+    fell from 166,088 to 78,470. Use the documented production default for
+    benchmarks, log the selected mode, and make checks an explicit diagnostic
+    option. Keep uniformity checking enabled in functional MPI tests. Repeat
+    comparisons before attributing a few noisy samples to a scheduling change.
+
+54. **Timing verdicts need actual sample counts and independent confirmation.**
+    AirspeedVelocity's flattened statistics omit the sample count, and
+    BenchmarkTools' `params.samples` is a limit rather than a measurement.
+    Recover counts from raw `times` arrays. A tight spread within one process
+    does not measure variation between revisions' runs: require five samples
+    per revision and confirm timing regressions in fresh processes with the
+    revision order reversed before counting them.
+
+55. **CPU-only scope checks must account for MPI processor wrappers.**
+    `compatible_processors` under MPI includes `MPIProcessor{ThreadProc}`, so
+    `all(proc isa ThreadProc for proc in ...)` rejects an all-CPU scope.
+    LU's former `use_lapack_panel` check selected the per-row task
+    fallback under MPI. Test backend capability through a wrapper-aware hook
+    or forwarding predicate rather than the outer processor type. Increasing
+    matrix size also increases that fallback's scheduling work.
+
+56. **MPI callers must read mutable scalar status through the dependency graph.**
+    A plain `Ref` used as a Datadeps argument is updated on its owning rank;
+    reading the caller's original `Ref` on other ranks can return stale status.
+    Submit a final scalar read with `In(ref)` inside the region, then fetch its
+    uniform task result for error checks and returned factorization status.
+
+57. **GPU benchmark scope must cover setup, probes, and the timed run.**
+    Loading a GPU extension does not enable its processors by default. Apply
+    the explicit device scope around both suite construction and BenchmarkTools
+    execution, so fixtures and capability probes use the same backend as the
+    measured operation. CPU named cyclic grids do not preserve GPU placement;
+    leave GPU fixtures on the scope-aware allocator. Use Float32 for portable
+    GPU coverage (Metal and some OpenCL devices lack Float64). Require one
+    backend per worker: a mixed CPU/GPU specification would otherwise measure
+    GPU fixtures under the CPU method label.
+
+58. **A reused benchmark workdir must discard old response IDs.** The plain
+    worker protocol starts request IDs at one for each orchestration run.
+    Reusing `BENCHMARK_WORKDIR` without removing old `response_*.json` and
+    `result_*.json` lets the orchestrator accept a previous run's response
+    immediately, including an error that kills a healthy new worker. Clear
+    protocol outputs when starting a worker; already-loaded trials remain in
+    the orchestrator's result dictionary.
+
+59. **Buildkite dependencies do not require an actual passing test.** A test
+    skipped by its condition satisfies `depends_on`, so benchmark jobs that
+    require successful tests need both matching skip conditions and an outcome
+    check (`buildkite-agent step get outcome`). Keep GPU+MPI dependent on the
+    ordinary GPU test as well as the GPU+MPI test. Aggregate reports with one
+    writer, retain only sections for the same PR head, and preserve GPU sections
+    when the CPU reporter finishes later. Trigger aggregate snapshots after
+    each vendor completes, with a shared writer concurrency group: an offline
+    vendor queue must not withhold another vendor's finished results.
+
+60. **Validate Buildkite matrix expansion, not just YAML syntax.** Buildkite
+    replaces `{{matrix}}` once. A command containing `{{{{matrix}}}}` is valid
+    YAML but passes `{{array}}` to the benchmark worker, which rejects the suite
+    before sampling. Check the expanded command arguments and artifact paths
+    for every pipeline; parser and dependency checks do not catch this error.

@@ -1,15 +1,15 @@
-# MPI × GPU datadeps suite for ROCm. See test/mpi_gpu_suite.jl for the shared
+# MPI × GPU datadeps suite for ROCm. See test/mpi/gpu_suite.jl for the shared
 # logic; this file only supplies the ROCm-specific config.
 #
 # Run (env must provide Dagger, MPI, AMDGPU; see test/rocmenv):
-#   mpiexec -n 2 julia --project=test/rocmenv --threads=2 test/mpi_rocm.jl
+#   mpiexec -n 2 julia --project=test/rocmenv --threads=2 test/mpi/rocm.jl
 
 using Dagger, MPI, AMDGPU, LinearAlgebra, Random, Test
 using Dagger: In, Out, InOut, Deps
 
 using Distributed
 
-include(joinpath(@__DIR__, "mpi_gpu_suite.jl"))
+include(joinpath(@__DIR__, "gpu_suite.jl"))
 
 const ROCExt = Base.get_extension(Dagger, :ROCExt)
 @assert ROCExt !== nothing "ROCExt failed to load"

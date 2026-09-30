@@ -384,4 +384,4 @@ host staging pools:
 - **oneAPI (Intel)**: Level Zero `zeMem*IpcHandle` same-node IPC. GPU-direct is **opt-in** because MPI.jl has no `has_ze`: set `DAGGER_MPI_GPU_DIRECT=1`, or use Intel MPI with `I_MPI_OFFLOAD≥1` (optional `JULIA_MPI_HAS_ONEAPI=true`).
 - **Metal / OpenCL**: Same remap / sync / staging-pool hooks; **no** CUDA-style process IPC and **no** GPU-aware MPI path in Julia — transfers host-stage. `DAGGER_IPC=0` disables IPC on backends that support it.
 
-Dedicated MPI smoke suites live under `test/mpi_{cuda,rocm,oneapi,opencl,metal}.jl` with matching `test/*env` projects.
+Dedicated MPI smoke suites live under `test/mpi/{cuda,rocm,oneapi,opencl,metal}.jl` with matching `test/*env` projects.

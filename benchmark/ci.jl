@@ -14,13 +14,13 @@
 #   (default "0.10", i.e. 10%).
 # - BENCHMARK_ALLOC_REGRESSION_THRESHOLD: fractional increase in allocation
 #   count or allocated bytes that fails CI (default "0.25", i.e. 25%).
-#   Allocation counts are near-deterministic, but Dagger's steady state has
-#   some scheduling-dependent variance, so this is looser than the time gate
-#   while still catching any real allocation regression.
+#   These are process-local minima across timed evaluations. Placement and
+#   incomplete warmup can affect them, so investigate flags with repeated,
+#   warmed runs rather than assuming they describe global allocation growth.
 # - BENCHMARK_NOISE_TOLERANCE: multiple of the reported timing spread that a
 #   change must clear before it is called a regression or an improvement
 #   (default "1.0"). See "Regression check" below; set to "0" to disable the
-#   significance gate and report purely on the thresholds.
+#   spread gate; the five-sample and confirmation requirements still apply.
 # - BENCHMARK_CI_THREADS: Julia threads for each benchmark run (default "4").
 # - BENCHMARK_OUTPUT_DIR: where JSON/plots/report are written
 #   (default "benchmark_results").
@@ -29,9 +29,10 @@ using Pkg
 Pkg.activate(; temp=true)
 # PlotlyKaleido is a transitive dep of AirspeedVelocity, but we need it as a
 # direct dep here to render the comparison plots.
-Pkg.add(["AirspeedVelocity", "PlotlyKaleido"])
+Pkg.add(["AirspeedVelocity", "PlotlyKaleido", "JSON3"])
 
 using AirspeedVelocity
+using JSON3
 using AirspeedVelocity.Utils: benchmark, load_results
 using AirspeedVelocity.TableUtils: create_table
 
@@ -62,6 +63,19 @@ if get(ENV, "BENCHMARK_MPI_RANKS", "0") != "0"
     push!(EXTRA_PKGS, "MPI")
 end
 
+# Install the requested extension package in both Airspeed revision environments.
+const gpu_packages = Dict("cuda" => "CUDA", "amdgpu" => "AMDGPU",
+                          "oneapi" => "oneAPI", "metal" => "Metal", "opencl" => "OpenCL")
+for spec in split(get(ENV, "BENCHMARK", ""), ';'), method in split(last(split(spec, ':')), ',')
+    for accel in split(method, '+')[2:end]
+        push!(EXTRA_PKGS, gpu_packages[accel])
+    end
+end
+if get(ENV, "BENCHMARK_OPENCL_SOFTWARE", "false") == "true"
+    push!(EXTRA_PKGS, "pocl_jll")
+end
+unique!(EXTRA_PKGS)
+
 mkpath(OUTPUT_DIR)
 
 @info "Benchmarking $CUR_REV vs $BASE_REV" project = PROJECT_DIR script = SCRIPT
@@ -77,7 +91,16 @@ benchmark(
     tune = false,
 )
 
-combined = load_results("Dagger", [BASE_REV, CUR_REV]; input_dir = OUTPUT_DIR)
+include(joinpath(@__DIR__, "compare.jl"))
+function load_sampled_results(dir)
+    combined = load_results("Dagger", [BASE_REV, CUR_REV]; input_dir=dir)
+    for rev in (BASE_REV, CUR_REV)
+        raw = JSON3.read(read(joinpath(dir, "results_Dagger@$(replace(rev, '/' => '_')).json"), String), Dict{String,Any})
+        attach_sample_counts!(combined[rev], raw)
+    end
+    return combined
+end
+combined = load_sampled_results(OUTPUT_DIR)
 
 # --- Results table ---------------------------------------------------------
 
@@ -86,8 +109,8 @@ println("\nBenchmark results (median time):\n")
 println(table)
 
 # Allocations/memory table (the ratio column compares allocated bytes). Each
-# BenchmarkTools trial records the allocation count and bytes of a single
-# post-warmup evaluation, so these are near-deterministic per revision.
+# BenchmarkTools trial records the minimum allocation count and bytes across
+# timed evaluations; it does not retain an allocation distribution.
 alloc_table = create_table(combined; key = "memory", add_ratio_col = true)
 println("\nBenchmark results (allocations / memory):\n")
 println(alloc_table)
@@ -115,82 +138,24 @@ end
 base = combined[BASE_REV]
 cur = combined[CUR_REV]
 
-# Each benchmark is gated on three metrics: median time, allocation count, and
-# allocated bytes. Entries are (metric label, results key, threshold).
-const METRICS = [
-    ("time", "median", THRESHOLD),
-    ("allocs", "allocs", ALLOC_THRESHOLD),
-    ("memory", "memory", ALLOC_THRESHOLD),
-]
-
-# A change is only called a regression or an improvement when it is both *large*
-# (past the metric's threshold) and *resolvable* (bigger than the run-to-run
-# noise). Without the second condition a benchmark whose timing wanders by more
-# than the threshold from run to run reports a regression or an improvement on
-# essentially every build, which is how the benchmark job ends up red for no
-# reason -- and, worse, trains everyone to ignore it.
-#
-# The noise model is the same one the results table prints, so the report can
-# never contradict itself: timings are summarized as `median ± (q75 - q25)`, and
-# a change counts only if those bands do not overlap. `BENCHMARK_NOISE_TOLERANCE`
-# scales the band (0 disables the gate).
-#
-# Only timings carry a spread: each BenchmarkTools trial records the allocation
-# count and byte count of a *single* post-warmup evaluation, so `allocs`/`memory`
-# have no distribution to speak of and stay gated on their threshold alone.
-"""
-    noise_halfwidth(stats, key) -> Float64 or nothing
-
-Half-width of the uncertainty band around `stats[key]`, or `nothing` when the
-metric was not sampled repeatedly and so carries no spread information.
-"""
-function noise_halfwidth(stats, key)
-    key == "median" || return nothing
-    q25 = get(stats, "25", nothing)
-    q75 = get(stats, "75", nothing)
-    (q25 === nothing || q75 === nothing) && return nothing
-    return NOISE_TOLERANCE * (q75 - q25)
+# Require five actual samples in both revisions, then confirm timing flags in
+# fresh processes with revision order reversed to expose run-order effects.
+comparison_options = (; threshold=THRESHOLD, alloc_threshold=ALLOC_THRESHOLD,
+                        noise_tolerance=NOISE_TOLERANCE)
+comparison = compare_benchmarks(base, cur; comparison_options...)
+confirmation = nothing
+if any(entry -> entry[2] == "time", comparison.regressions)
+    confirmation_dir = joinpath(OUTPUT_DIR, "confirmation")
+    mkpath(confirmation_dir)
+    @info "Confirming timing regressions with a fresh comparison in reversed revision order"
+    benchmark("Dagger", [CUR_REV, BASE_REV]; output_dir=confirmation_dir,
+              script=SCRIPT, path=PROJECT_DIR, extra_pkgs=EXTRA_PKGS,
+              exeflags=`-t $CI_THREADS`, tune=false)
+    confirmation = load_sampled_results(confirmation_dir)
+    repeated = compare_benchmarks(confirmation[BASE_REV], confirmation[CUR_REV]; comparison_options...)
+    comparison = confirm_timing_regressions(comparison, repeated)
 end
-
-regressions = Tuple{String,String,Float64}[]
-improvements = Tuple{String,String,Float64}[]
-within_noise = Tuple{String,String,Float64}[]
-for (name, stats) in cur
-    name == "time_to_load" && continue  # too noisy to gate on
-    haskey(base, name) || continue
-    for (label, key, threshold) in METRICS
-        bm = get(base[name], key, nothing)
-        cm = get(stats, key, nothing)
-        (bm === nothing || cm === nothing || bm == 0) && continue
-        ratio = cm / bm
-        direction = if ratio > 1 + threshold
-            :regression
-        elseif ratio < 1 - threshold
-            :improvement
-        else
-            continue
-        end
-        base_hw = noise_halfwidth(base[name], key)
-        cur_hw = noise_halfwidth(stats, key)
-        significant = if base_hw === nothing || cur_hw === nothing
-            true  # no spread recorded: the threshold is all we have
-        elseif direction === :regression
-            cm - cur_hw > bm + base_hw
-        else
-            cm + cur_hw < bm - base_hw
-        end
-        if !significant
-            push!(within_noise, (name, label, ratio))
-        elseif direction === :regression
-            push!(regressions, (name, label, ratio))
-        else
-            push!(improvements, (name, label, ratio))
-        end
-    end
-end
-sort!(regressions; by = last, rev = true)
-sort!(improvements; by = last)
-sort!(within_noise; by = last, rev = true)
+(; regressions, improvements, within_noise, insufficient) = comparison
 
 pct(r) = string(round((r - 1) * 100; digits = 1), "%")
 
@@ -220,20 +185,35 @@ end
 job_regression_counts = job_tally(regressions)
 job_improvement_counts = job_tally(improvements)
 job_noise_counts = job_tally(within_noise)
+job_insufficient_counts = job_tally(insufficient)
 
 # Worst jobs (most regressions, then fewest improvements) sort to the top.
 job_summary_rows = [(j, get(job_regression_counts, j, 0), get(job_improvement_counts, j, 0),
-                      get(job_noise_counts, j, 0)) for j in job_names]
+                      get(job_noise_counts, j, 0), get(job_insufficient_counts, j, 0)) for j in job_names]
 sort!(job_summary_rows; by = r -> (-r[2], -r[3], r[1]))
 
 function job_summary_table(io, rows)
-    println(io, "| Job | Regressions | Improvements | Within noise |")
-    println(io, "|:---|---:|---:|---:|")
-    for (job, nreg, nimp, nnoise) in rows
+    println(io, "| Job | Regressions | Improvements | Within noise | Inconclusive time |")
+    println(io, "|:---|---:|---:|---:|---:|")
+    for (job, nreg, nimp, nnoise, ninsufficient) in rows
         marker = nreg > 0 ? " ⚠️" : (nimp > 0 ? " ✅" : "")
-        println(io, "| `", job, "`", marker, " | ", nreg, " | ", nimp, " | ", nnoise, " |")
+        println(io, "| `", job, "`", marker, " | ", nreg, " | ", nimp, " | ", nnoise, " | ", ninsufficient, " |")
     end
 end
+
+# A machine-readable summary lets CI aggregate suites without parsing Markdown
+# or duplicating the regression rules in the PR-comment renderer.
+entries_json(entries) = [(; name, metric, ratio) for (name, metric, ratio) in entries]
+summary = (;
+    schema_version=1, base_revision=BASE_REV, current_revision=CUR_REV,
+    thresholds=(; time=THRESHOLD, allocations=ALLOC_THRESHOLD, noise=NOISE_TOLERANCE, min_samples=5),
+    timing_confirmation_run=confirmation !== nothing,
+    jobs=[(; name, regressions=nreg, improvements=nimp, within_noise=nnoise,
+             insufficient=ninsufficient) for (name, nreg, nimp, nnoise, ninsufficient) in job_summary_rows],
+    regressions=entries_json(regressions), improvements=entries_json(improvements),
+    within_noise=entries_json(within_noise), insufficient=entries_json(insufficient),
+)
+open(io -> JSON3.write(io, summary), joinpath(OUTPUT_DIR, "summary.json"), "w")
 
 # --- Markdown report (for the Buildkite annotation / optional PR comment) ---
 
@@ -281,6 +261,24 @@ open(joinpath(OUTPUT_DIR, "report.md"), "w") do io
         println(io, "</details>")
     end
     println(io)
+    if !isempty(insufficient)
+        println(io, "#### Inconclusive timing changes")
+        println(io)
+        println(io, "These changes had fewer than five timed samples in at least one revision, lacked a measured spread, or were not confirmed by the independent run; they are not counted as improvements or regressions.")
+        println(io)
+        for (name, metric, r) in insufficient
+            println(io, "- `", name, "` (", metric, "): ", pct(r))
+        end
+        println(io)
+    end
+    if confirmation !== nothing
+        println(io, "#### Independent confirmation (reversed revision order)")
+        println(io)
+        println(io, "Timing regressions are counted only when both comparisons agree, with at least five samples per revision.")
+        println(io)
+        println(io, create_table(confirmation; key="median", add_ratio_col=true))
+        println(io)
+    end
     println(io, "#### Median time")
     println(io)
     println(io, table)
@@ -312,8 +310,12 @@ if !isempty(within_noise)
     end
 end
 
+if !isempty(insufficient)
+    println("\n$(length(insufficient)) timing change(s) are inconclusive: fewer than five samples, missing spread, or no independent confirmation.")
+end
+
 if isempty(regressions)
-    println("\nNo benchmarks regressed (time > $(round(THRESHOLD * 100))%, allocs/memory > $(round(ALLOC_THRESHOLD * 100))%).")
+    println("\nNo confirmed benchmark regressions (time > $(round(THRESHOLD * 100))%, allocs/memory > $(round(ALLOC_THRESHOLD * 100))%).")
     exit(0)
 else
     println("\n$(length(regressions)) benchmark metric(s) regressed:")

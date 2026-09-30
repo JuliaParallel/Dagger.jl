@@ -11,7 +11,7 @@ Validate the full MPI test suite on Tuolumne in two GPU configurations:
 | **T1** | Single GPU, single node | 1 node, exclusive | `N_GPU=1`, `N=4` |
 | **T2** | Multi-GPU, single node | 1 node, exclusive | `N_GPU=4`, `N=4` |
 
-Both runs execute `contrib/mpi/run_mpi_tests.sh`, which covers CPU MPI tests and ROCm GPU tests (`test/mpi_rocm.jl`). CUDA tests are skipped (`SKIP_CUDA=1`).
+Both runs execute `contrib/mpi/run_mpi_tests.sh`, which covers CPU MPI tests and ROCm GPU tests (`test/mpi/rocm.jl`). CUDA tests are skipped (`SKIP_CUDA=1`).
 
 ## System facts (Tuolumne)
 
@@ -234,9 +234,9 @@ Order of suites:
 
 | # | Suite | Ranks var | Project | Notes |
 |---|-------|-----------|---------|-------|
-| 1 | `test/mpi.jl` | `N` (default 4) | repo root | CPU MPI suite (datadeps + linalg smokes) |
-| 2 | `test/mpi_cuda.jl` | `N_GPU` | `test/cudaenv` | **Skipped on Tuolumne** (`SKIP_CUDA=1`) |
-| 3 | `test/mpi_rocm.jl` | `N_GPU` | `test/rocmenv` | ROCm GPU datadeps |
+| 1 | `test/mpi/cpu.jl` | `N` (default 4) | repo root | CPU MPI suite (datadeps + linalg smokes) |
+| 2 | `test/mpi/cuda.jl` | `N_GPU` | `test/cudaenv` | **Skipped on Tuolumne** (`SKIP_CUDA=1`) |
+| 3 | `test/mpi/rocm.jl` | `N_GPU` | `test/rocmenv` | ROCm GPU datadeps |
 
 ### Environment variables
 
@@ -244,7 +244,7 @@ Order of suites:
 |----------|----------|----------|---------|
 | `SKIP_CUDA` | `1` | `1` | Skip NVIDIA CUDA suite |
 | `N` | `4` | `4` | MPI ranks for CPU suites |
-| `N_GPU` | `1` | `4` | MPI ranks for `mpi_rocm.jl` |
+| `N_GPU` | `1` | `4` | MPI ranks for `test/mpi/rocm.jl` |
 | `THREADS` | `4` | `4` | Julia threads per MPI rank |
 | `JULIA_BIN` | from profile | from profile | Julia executable |
 | `ROCM_GPU_PROJECT` | `test/rocmenv` | `test/rocmenv` | ROCm Julia env |
@@ -329,7 +329,7 @@ export JULIA_DEPOT_PATH=/p/lustre5/${USER}/.julia_depot:${JULIA_DEPOT_PATH:-}
 ## Optional extensions (out of scope unless requested)
 
 - **CPU-only** quick smoke: `SKIP_GPU=1 contrib/mpi/run_mpi_tests.sh`
-- **Individual suite:** `mpiexec -n 4 ${JULIA_BIN} --project=. --threads=4 test/mpi.jl`
+- **Individual suite:** `mpiexec -n 4 ${JULIA_BIN} --project=. --threads=4 test/mpi/cpu.jl`
 - **Long batch queue:** change `#flux: -q pdebug` → `#flux: -q pbatch` in flux scripts
 - **Multi-node MPI:** not required for this mission; current suites target single-node GPU configs
 
@@ -341,10 +341,11 @@ export JULIA_DEPOT_PATH=/p/lustre5/${USER}/.julia_depot:${JULIA_DEPOT_PATH:-}
 Dagger.jl/
 ├── contrib/mpi/run_mpi_tests.sh  # Main orchestrator
 ├── test/
-│   ├── mpi.jl                    # CPU MPI suite (datadeps + linalg smokes)
-│   ├── mpi_gpu_suite.jl          # Shared GPU suite (parametrized per backend)
-│   ├── mpi_cuda.jl               # CUDA only — skipped on Tuolumne
-│   ├── mpi_rocm.jl               # ROCm GPU suite (Tuolumne)
+│   ├── mpi/
+│   │   ├── cpu.jl              # CPU MPI suite (datadeps + linalg smokes)
+│   │   ├── gpu_suite.jl        # Shared GPU suite (parametrized per backend)
+│   │   ├── cuda.jl             # CUDA only — skipped on Tuolumne
+│   │   └── rocm.jl             # ROCm GPU suite (Tuolumne)
 │   ├── rocmenv/Project.toml
 │   └── cudaenv/Project.toml
 └── contrib/tuolumne/
