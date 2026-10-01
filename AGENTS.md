@@ -948,3 +948,17 @@ lesson.
    (`x .+= a .* p`) matched their owners on 2 GPUs (3.8 ms) and moved every
    chunk off and back on 4 (170 ms), which made a CG solve 30x slower at 4
    GPUs than at 2. Test placement-sensitive code at more than two processors.
+
+78. **A process-lifetime cache must not hold what it was computed from.** The
+   AOT schedule cache stored each region's full `DAGSpec` as its key: the
+   tasks, their `DTaskSpec`s, and through those every argument. A cached plan
+   lives as long as the process, so the first region of every shape kept its
+   data alive forever; a benchmark rebuilding 12 GB of GPU arrays per trial
+   kept one extra trial resident under any caching scheduler and ran out of
+   memory on the third. Store only what lookups compare
+   (`_schedule_cache_key`). Tests that harvested `DAGSpec` fixtures from the
+   cache now opt in with `DATADEPS_SCHEDULE_CACHE_FULL_SPECS`. Measure
+   leaks with `CUDA.CUDACore.memory_stats(dev).live`, not free memory (the
+   pool caches freed blocks), and give MemPool's work queue time to drain
+   first: dropping a DArray only *queues* its release, so "the last array is
+   still alive right after `GC.gc()`" is expected, not a leak.

@@ -300,10 +300,36 @@ function _schedule_cache_find(scheduler::DataDepsScheduler, schedule_cache, dag_
     return nothing, nothing
 end
 
+# The part of `dag_spec` a cached plan is matched on (see
+# `datadeps_dag_equivalent`). The full spec also holds every task, its
+# `DTaskSpec` and so its arguments; the cache lives as long as the process, so
+# storing those pinned the data of the first region of each shape -- a
+# benchmark rebuilding its arrays per trial kept one more trial's arrays alive
+# under every caching scheduler, and Gray-Scott ran out of GPU memory.
+#
+# `DATADEPS_SCHEDULE_CACHE_FULL_SPECS[] = true` stores the full spec instead,
+# for tests that take real `DAGSpec` fixtures from the cache.
+const DATADEPS_SCHEDULE_CACHE_FULL_SPECS = Ref(false)
+function _schedule_cache_key(dag_spec::DAGSpec)
+    DATADEPS_SCHEDULE_CACHE_FULL_SPECS[] && return dag_spec
+    key = DAGSpec()
+    for _ in 1:nv(dag_spec.g)
+        add_vertex!(key.g)
+    end
+    for v in 1:nv(dag_spec.g), w in outneighbors(dag_spec.g, v)
+        add_edge!(key.g, v, w)
+    end
+    merge!(key.id_to_functype, dag_spec.id_to_functype)
+    merge!(key.id_to_argtypes, dag_spec.id_to_argtypes)
+    merge!(key.id_to_scope, dag_spec.id_to_scope)
+    return key
+end
+
 # Cache `spec_schedule` for `dag_spec`, in place of `stale` if that is still there.
 function _schedule_cache_store!(schedule_cache, dag_spec::DAGSpec,
                                 spec_schedule::DAGSpecSchedule,
                                 stale::Union{DAGSpecSchedule, Nothing})
+    dag_spec = _schedule_cache_key(dag_spec)
     @lock DATADEPS_DAG_SPECS_LOCK begin
         idx = stale === nothing ? nothing : findfirst(p -> p.second === stale, schedule_cache)
         if idx === nothing

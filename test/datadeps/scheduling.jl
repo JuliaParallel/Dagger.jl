@@ -15,6 +15,28 @@ using LinearAlgebra
 using Random
 using Test
 
+# Plans are cached for the life of the process, so a cached entry must not
+# keep its region's tasks (and through them, its arguments) alive.
+cache_test_add!(a, b) = (a .+= b; nothing)
+@testset "Schedule cache retains no tasks or arguments" begin
+    @test !Dagger.DATADEPS_SCHEDULE_CACHE_FULL_SPECS[]
+    Base.ScopedValues.with(DATADEPS_SCHEDULER => GreedyScheduler()) do
+        cache = datadeps_schedule_cache(GreedyScheduler())
+        empty!(cache)
+        A = rand(8); B = rand(8)
+        Dagger.spawn_datadeps() do
+            Dagger.@spawn cache_test_add!(InOut(A), In(B))
+        end
+        @test length(cache) == 1
+        key = first(cache).first
+        @test length(key) == 1
+        @test isempty(key.id_to_spec) && isempty(key.id_to_task)
+        empty!(cache)
+    end
+end
+# The tests below take real `DAGSpec` fixtures (tasks, specs) from the cache.
+Dagger.DATADEPS_SCHEDULE_CACHE_FULL_SPECS[] = true
+
 # ---------- equivalent_structure unit tests ----------
 
 @testset "equivalent_structure" begin
@@ -2681,3 +2703,5 @@ end
         end
     end
 end
+
+Dagger.DATADEPS_SCHEDULE_CACHE_FULL_SPECS[] = false
