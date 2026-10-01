@@ -41,8 +41,8 @@ function Dagger.aliasing(x::CuArray{T}) where T
     # calling task's active device, which throws when that device cannot reach
     # `x` (e.g. aliasing RPCs on a multi-GPU worker) and re-stamps ownership as
     # a side effect. Aliasing only needs the address.
-    cuptr = convert(CUDA.CuPtr{T}, x.data[].mem) + x.offset
-    rptr = Dagger.RemotePtr{Cvoid}(UInt64(cuptr), space)
+    # (`x.offset` counts elements; pointer arithmetic counts bytes)
+    rptr = Dagger.RemotePtr{Cvoid}(UInt64(_raw_cuaddr(x)), space)
     return Dagger.ContiguousAliasing(Dagger.MemorySpan{S}(rptr, sizeof(T)*length(x)))
 end
 
@@ -195,6 +195,12 @@ function Dagger.move!(to_space::CUDAVRAMMemorySpace, from_space::CUDAVRAMMemoryS
     end
     return
 end
+
+# Device addresses for aliasing, read without `pointer`: that would take
+# CUDA.jl stream ownership for the active device, which throws without P2P.
+_buffer_key(x::CuArray) = UInt(convert(CUDA.CuPtr{Cvoid}, x.data[].mem))
+_raw_cuaddr(x::CuArray) = _buffer_key(x) + UInt(x.offset * Base.elsize(x))
+Dagger.data_address(x::CuArray) = UInt64(_raw_cuaddr(x))
 
 # Out-of-place HtoD
 function Dagger.move(from_proc::CPUProc, to_proc::CuArrayDeviceProc, x)
