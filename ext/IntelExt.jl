@@ -180,13 +180,28 @@ function Dagger.move!(to_space::Dagger.CPURAMMemorySpace, from_space::IntelVRAMM
         sync_with_context(from_space)
         with_context!(from_space)
     end
-    copyto!(to, from)
+    if from isa DenseArray
+        copyto!(to, from)
+    else
+        # A strided device view: gather it with a kernel first, since
+        # `copyto!` would index it element by element from the host
+        dense = similar(from, size(from))
+        dense .= from
+        copyto!(to, Array(dense))
+    end
     # N.B. DtoH will synchronize
     return
 end
 function Dagger.move!(to_space::IntelVRAMMemorySpace, from_space::Dagger.CPURAMMemorySpace, to::AbstractArray{T,N}, from::AbstractArray{T,N}) where {T,N}
     with_context!(to_space)
-    copyto!(to, from)
+    if to isa DenseArray
+        copyto!(to, from)
+    else
+        # A strided device view: upload densely, then scatter with a kernel
+        dense = oneArray{T,N}(undef, size(from))
+        copyto!(dense, from isa DenseArray ? from : collect(from))
+        to .= dense
+    end
     return
 end
 function Dagger.move!(to_space::IntelVRAMMemorySpace, from_space::IntelVRAMMemorySpace, to::AbstractArray{T,N}, from::AbstractArray{T,N}) where {T,N}
@@ -216,6 +231,10 @@ function Dagger.move(from_proc::CPUProc, to_proc::oneArrayDeviceProc, x::Chunk)
     to_w = Dagger.root_worker_id(to_proc)
     @assert myid() == to_w
     cpu_data = remotecall_fetch(unwrap, from_w, x)
+    # A chunk labelled with a host processor can already hold device memory:
+    # Datadeps rebuilding a view of a host array on a GPU passes the parent
+    # it already moved there. Treating that as host memory throws.
+    cpu_data isa oneArray && return Dagger.move(from_proc, to_proc, cpu_data)
     with_context(to_proc) do
         if cpu_data isa DenseArray && isbitstype(eltype(cpu_data))
             Dagger.pin_buffer!(:oneAPI, cpu_data)
