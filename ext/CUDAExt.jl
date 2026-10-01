@@ -178,7 +178,14 @@ end
 function Dagger.move(from_proc::CPUProc, to_proc::CuArrayDeviceProc, x)
     with_context(to_proc) do
         if x isa DenseArray && isbitstype(eltype(x))
-            Dagger.pin_buffer!(:CUDA, x)
+            buf, token = pin_host!(x)
+            try
+                arr = adapt(CuArray, buf)
+                CUDA.synchronize()
+                return arr
+            finally
+                unpin_host!(token)
+            end
         end
         arr = adapt(CuArray, x)
         CUDA.synchronize()
@@ -192,7 +199,14 @@ function Dagger.move(from_proc::CPUProc, to_proc::CuArrayDeviceProc, x::Chunk)
     cpu_data = remotecall_fetch(unwrap, from_w, x)
     with_context(to_proc) do
         if cpu_data isa DenseArray && isbitstype(eltype(cpu_data))
-            Dagger.pin_buffer!(:CUDA, cpu_data)
+            buf, token = pin_host!(cpu_data)
+            try
+                arr = adapt(CuArray, buf)
+                CUDA.synchronize()
+                return arr
+            finally
+                unpin_host!(token)
+            end
         end
         arr = adapt(CuArray, cpu_data)
         CUDA.synchronize()
@@ -284,8 +298,14 @@ function Dagger.move(from_proc::CuArrayDeviceProc, to_proc::CuArrayDeviceProc, x
             end
         end
         return with_context(to_proc) do
-            Dagger.pin_buffer!(:CUDA, host_copy)
-            return CuArray(host_copy)
+            buf, token = pin_host!(host_copy)
+            try
+                arr = CuArray(buf)
+                CUDA.synchronize()
+                return arr
+            finally
+                unpin_host!(token)
+            end
         end
     end
 end
@@ -307,8 +327,14 @@ function Dagger.move(from_proc::CuArrayDeviceProc, to_proc::CuArrayDeviceProc, x
             return Dagger.pinned_host_array(x)
         end
         return with_context(to_proc) do
-            Dagger.pin_buffer!(:CUDA, host_copy)
-            return CuArray(host_copy)
+            buf, token = pin_host!(host_copy)
+            try
+                arr = CuArray(buf)
+                CUDA.synchronize()
+                return arr
+            finally
+                unpin_host!(token)
+            end
         end
     end
 end
@@ -473,6 +499,80 @@ function Dagger.pin_buffer!(::Val{:CUDA}, buf::DenseArray)
     isempty(buf) && return
     @lock PIN_LOCK begin
         CUDADRV.is_pinned(pointer(buf)) || CUDA.pin(buf)
+    end
+    return
+end
+
+# Scoped host registration for one-shot HtoD sources.
+# `CUDA.pin` ties unregistration to a GC finalizer, so a registration can
+# outlive the transfer it was made for and collide with whatever the
+# allocator places at that address next (ALREADY_REGISTERED, or INVALID_VALUE
+# if the stale finalizer unregisters a newer owner's range mid-copy). Here the
+# registration is refcounted by us, keyed by base pointer (registration is
+# process-wide, not per context), and released by `unpin_host!` as soon as the
+# copy has completed, while the caller still holds the buffer.
+# A range already registered by anyone else (exact match through
+# `Dagger.pin_buffer!`, or an overlapping one) is never adopted or extended:
+# the caller gets a private fresh copy to register instead, since a partially
+# registered range is invalid for CUDA copies.
+mutable struct HostPinEntry
+    mem::Any
+    ctx::CuContext
+    size::Int
+    count::Int
+end
+const HOST_PINS = Dict{Ptr{Cvoid}, HostPinEntry}()
+
+function try_register(ptr, sz)
+    try
+        return CUDADRV.register(CUDADRV.HostMemory, ptr, sz)
+    catch err
+        err isa CUDA.CuError && err.code == CUDA.ERROR_HOST_MEMORY_ALREADY_REGISTERED ||
+            rethrow()
+        return nothing
+    end
+end
+
+# Returns (buf, token): copy from `buf` (which may be a private copy of the
+# argument), then call `unpin_host!(token)` once the copy has completed.
+# `token === nothing` means nothing to release.
+function pin_host!(buf::DenseArray)
+    isempty(buf) && return buf, nothing
+    ptr = convert(Ptr{Cvoid}, pointer(buf))
+    sz = sizeof(buf)
+    @lock PIN_LOCK begin
+        entry = get(HOST_PINS, ptr, nothing)
+        if entry !== nothing && entry.size == sz
+            entry.count += 1
+            return buf, ptr
+        end
+        # registration fails on *any* overlap, including a registration
+        # strictly inside the range that endpoint probes cannot see
+        mem = entry === nothing ? try_register(ptr, sz) : nothing
+        if mem === nothing
+            # Registered by someone else, or overlapping a registration we
+            # cannot reason about (ours of a different size, a
+            # finalizer-managed one): use a fresh, unregistered copy.
+            buf = copy(buf)
+            ptr = convert(Ptr{Cvoid}, pointer(buf))
+            sz = sizeof(buf)
+            mem = CUDADRV.register(CUDADRV.HostMemory, ptr, sz)
+        end
+        HOST_PINS[ptr] = HostPinEntry(mem, context(), sz, 1)
+    end
+    return buf, ptr
+end
+function unpin_host!(token)
+    token === nothing && return
+    @lock PIN_LOCK begin
+        entry = HOST_PINS[token]
+        entry.count -= 1
+        if entry.count == 0
+            delete!(HOST_PINS, token)
+            context!(entry.ctx) do
+                CUDADRV.unregister(entry.mem)
+            end
+        end
     end
     return
 end
