@@ -486,19 +486,52 @@ Dagger.mpi_device_direct(x::CUDA.StridedCuArray) = mpi_gpu_direct_enabled()
 Dagger.mpi_device_sync(x::CuArray) = CUDA.device_synchronize()
 Dagger.mpi_device_sync(::CUDAVRAMMemorySpace) = CUDA.device_synchronize()
 
-# Page-lock host staging buffers (~2x DtoH/HtoD bandwidth); CUDA.pin
-# registers a GC finalizer that unregisters the memory
+# Page-lock host staging buffers (~2x DtoH/HtoD bandwidth), unregistering
+# them from a GC finalizer.
 Dagger.gpu_memory_kind(::CuArray) = :CUDA
 Dagger.gpu_memory_kind(::CUDAVRAMMemorySpace) = :CUDA
-# N.B. CUDA.pin only dedupes per context, but host registration is
-# process-wide: pinning a buffer already registered through another device's
-# context (one host array moved to two GPUs) throws
-# HOST_MEMORY_ALREADY_REGISTERED. The range is page-locked either way, so skip it.
+# N.B. Not `CUDA.pin`: its finalizer takes a `ReentrantLock`, and a finalizer
+# that finds the lock contended throws "task switch not allowed from inside gc
+# finalizer". The unregistration is then lost, while GC frees the memory
+# anyway: a freed range stays registered with the driver, a later allocation
+# at that address fails to register or is DMA'd through stale pages, and
+# multi-GPU runs crashed with a segfault a few iterations in. Our finalizer
+# only `trylock`s, and on contention re-arms itself, which keeps the buffer
+# alive until a later GC can unregister it.
+# Host registration is process-wide, so a buffer already registered through
+# another device's context (one host array moved to two GPUs) is page-locked
+# either way, and is skipped.
 const PIN_LOCK = ReentrantLock()
+# Base pointer => (registration, context) for buffers pinned by `pin_buffer!`
+const FINALIZER_PINS = Dict{Ptr{Cvoid}, Tuple{Any,CuContext}}()
 function Dagger.pin_buffer!(::Val{:CUDA}, buf::DenseArray)
     isempty(buf) && return
+    ptr = convert(Ptr{Cvoid}, pointer(buf))
     @lock PIN_LOCK begin
-        CUDADRV.is_pinned(pointer(buf)) || CUDA.pin(buf)
+        CUDADRV.is_pinned(ptr) && return
+        mem = try_register(ptr, sizeof(buf))
+        mem === nothing && return
+        FINALIZER_PINS[ptr] = (mem, context())
+    end
+    finalizer(_unpin_finalizer, buf)
+    return
+end
+function _unpin_finalizer(buf)
+    if !trylock(PIN_LOCK)
+        finalizer(_unpin_finalizer, buf)
+        return
+    end
+    try
+        entry = pop!(FINALIZER_PINS, convert(Ptr{Cvoid}, pointer(buf)), nothing)
+        entry === nothing && return
+        mem, ctx = entry
+        context!(ctx) do
+            CUDADRV.unregister(mem)
+        end
+    catch err
+        Core.println("Dagger CUDAExt: failed to unregister a pinned host buffer: ", err)
+    finally
+        unlock(PIN_LOCK)
     end
     return
 end
