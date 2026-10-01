@@ -47,30 +47,54 @@ Dagger.mpi_remap_space(space::ROCVRAMMemorySpace, owner::Int) =
     ROCVRAMMemorySpace(owner, space.device_id)
 Dagger.value_memory_space(x::ROCArray) = Dagger.memory_space(x)
 
-# Page-lock host staging buffers (~2x DtoH/HtoD bandwidth); AMDGPU.Mem.pin
-# does not register a finalizer, so we unpin on GC
+# Page-lock host staging buffers (~2x DtoH/HtoD bandwidth), unregistering
+# them from a GC finalizer.
 Dagger.gpu_memory_kind(::ROCArray) = :ROC
 Dagger.gpu_memory_kind(::ROCVRAMMemorySpace) = :ROC
+# N.B. Not `AMDGPU.Mem.pin`/`unpin`: they take AMDGPU's registration lock (a
+# `ReentrantLock`), and a finalizer that finds it contended throws "task switch
+# not allowed from inside gc finalizer". The unregistration is then lost, while
+# GC frees the memory anyway: a freed range stays registered with the driver,
+# and a later HtoD copy from memory the allocator placed there segfaulted
+# inside `hipMemcpyWithStream`. We register with HIP directly, under our own
+# `PIN_LOCK`, and our finalizer only `trylock`s, and on contention re-arms
+# itself, which keeps the buffer alive until a later GC can unregister it.
+const PIN_LOCK = ReentrantLock()
+# Base pointers of buffers registered by `pin_buffer!`
+const FINALIZER_PINS = Set{Ptr{Cvoid}}()
 function Dagger.pin_buffer!(::Val{:ROC}, buf::DenseArray)
+    isempty(buf) && return
     ptr = Ptr{Cvoid}(pointer(buf))
-    sz = sizeof(buf)
-    # Avoid double-registering a finalizer if already page-locked
-    if !AMDGPU.Mem.is_pinned(ptr)
-        AMDGPU.Mem.pin(ptr, sz)
-        finalizer(buf) do b
-            AMDGPU.Mem.unpin(Ptr{Cvoid}(pointer(b)))
-        end
+    @lock PIN_LOCK begin
+        # Registered by someone else, and page-locked either way
+        AMDGPU.Mem.is_pinned(ptr) && return
+        AMDGPU.HIP.hipHostRegister(ptr, sizeof(buf), AMDGPU.HIP.hipHostRegisterMapped)
+        push!(FINALIZER_PINS, ptr)
     end
-    return nothing
+    finalizer(_unpin_finalizer, buf)
+    return
+end
+function _unpin_finalizer(buf)
+    if !trylock(PIN_LOCK)
+        finalizer(_unpin_finalizer, buf)
+        return
+    end
+    try
+        ptr = Ptr{Cvoid}(pointer(buf))
+        ptr in FINALIZER_PINS || return
+        delete!(FINALIZER_PINS, ptr)
+        AMDGPU.HIP.hipHostUnregister(ptr)
+    catch err
+        Core.println("Dagger ROCExt: failed to unregister a pinned host buffer: ", err)
+    finally
+        unlock(PIN_LOCK)
+    end
+    return
 end
 
-# Scoped host registration for one-shot HtoD sources.
-# `pin_buffer!` above unregisters from a GC finalizer, which cannot take
-# AMDGPU's registration lock when it is contended (a finalizer may not
-# switch tasks): the unregister is then dropped and the range stays registered,
-# colliding with whatever the allocator places there next. Registration is
-# instead tracked here, keyed by base pointer, and released by `unpin_host!`
-# once the copy has completed, while the caller still holds the buffer.
+# Scoped host registration for one-shot HtoD sources, tracked here, keyed by
+# base pointer, and released by `unpin_host!` once the copy has completed,
+# while the caller still holds the buffer.
 # HIP registration is neither refcounted nor exclusive: registering twice is
 # idempotent and one unregister drops it, and overlapping registrations are
 # accepted. We must therefore never unregister a range someone else
@@ -78,7 +102,6 @@ end
 # a buffer whose first or last byte is already registered gets a private copy
 # to register instead. A registration strictly inside the range survives
 # unregistering the enclosing one.
-const PIN_LOCK = ReentrantLock()
 mutable struct HostPinEntry
     size::Int
     count::Int
