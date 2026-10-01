@@ -923,3 +923,16 @@ lesson.
    `execute!` sees `Chunk`s, not arrays (unwrap before classifying, or every
    copy looks like an opaque argument and falls back to whole-stream waits);
    and `unsafe_free!` tasks hand you a freed array (check `data.freed`).
+
+77. **A policy that "works" may be working by coincidence of task order.**
+   RoundRobin placed a row-major GEMM's tasks exactly on their C tiles'
+   owners, because the inner loop ran over columns in owner order. Visiting
+   tiles diagonally (so each GPU starts with its local panel and copies
+   spread out) made the same RoundRobin move A, B *and* C for every task,
+   with 48 copies per call instead of 12. Count copies per call when changing
+   either the traversal or the scheduler; `GreedyScheduler` keeps
+   owner-computes regardless of order. The same coincidence hides in every
+   region whose tasks follow chunk order: in-place DArray broadcasts
+   (`x .+= a .* p`) matched their owners on 2 GPUs (3.8 ms) and moved every
+   chunk off and back on 4 (170 ms), which made a CG solve 30x slower at 4
+   GPUs than at 2. Test placement-sensitive code at more than two processors.
