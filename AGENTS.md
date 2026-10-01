@@ -633,3 +633,45 @@ lesson.
     YAML but passes `{{array}}` to the benchmark worker, which rejects the suite
     before sampling. Check the expanded command arguments and artifact paths
     for every pipeline; parser and dependency checks do not catch this error.
+
+61. **A Distributed GPU transfer must preserve the source's ownership.**
+   Sending a raw device array in a slot-creation RPC deserializes it on the
+   receiver while `from_proc` still names the sender. The subsequent GPU
+   `move` then activates a remote worker's context locally and asserts; some
+   backends cannot serialize the array in the first place. Send an owner-side
+   `Chunk` and use the backend's Chunk transport instead. The same rule
+   applies when fetching a remote source for in-place copies. Pin regression
+   inputs and consumers to different workers selecting device 1: a GPU scope
+   alone does not guarantee that a transfer actually happens.
+
+62. **CUDA IPC must export staging memory and return an owned copy.**
+   CUDA's pooled allocations cannot be exported with `cuIpcGetMemHandle`, and
+   returning an imported mapping makes the receiver alias the sender's data
+   and depend on its lifetime. Use the shared `ipc_export`/`ipc_materialize`
+   hooks, keep the staging token on the sender until the receiver finishes,
+   and release it in `finally`. Use `CUDADRV` for closing handles too: CUDA 6
+   moved the driver API into CUDACore. Test repeated transfers in both
+   directions and mutate the destination to verify source independence.
+
+63. **Two GPUs of one process are not one device, and may not even be
+   peers.** Several paths assumed "same worker" meant "one kernel may touch
+   both buffers": the same-worker device remainder copy, `collect`'s
+   in-process `cat`, and CUDA `pointer()` (which takes ownership for the
+   *active* device and throws without P2P). `CUDA.pin` is also only deduped
+   per context while host registration is process-wide. Key direct device
+   paths on equal memory spaces, not equal workers, read addresses without
+   ownership side effects, and test with tiles on two devices of one
+   process: the one-GPU-per-worker suites cannot see any of this.
+
+64. **Reading a GPU task's result needs Dagger's stream, not the caller's.**
+   GPU `execute!` returns without synchronizing: the kernels are still queued
+   on Dagger's per-device stream. A plain `fetch` + `Array(x)` from the
+   caller copies on the caller's own task-local stream, and is correct only
+   if the array library synchronizes the previous owner when another stream
+   touches a buffer. CUDA, AMDGPU and OpenCL do; oneAPI does not, and it also
+   copies on the *calling task's* device. A green CUDA run therefore does not
+   prove the wait exists. Before reading a tile on the host, call
+   `gpu_synchronize(chunk.processor)` and copy under `with_context`, on the
+   chunk's owner (as `collect` does via `_collect_host_tile`). Note that
+   IntelExt's hooks sync only the calling task's stream, and each oneAPI
+   `execute!` runs on a fresh task, so oneAPI's own hook is not sufficient yet.

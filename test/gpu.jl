@@ -13,6 +13,7 @@ end
 # header for the acceleration/backend matrix they cover.
 include(joinpath(@__DIR__, "array", "sparse_defs.jl"))
 include(joinpath(@__DIR__, "array", "linalg", "matvec_defs.jl"))
+include(joinpath(@__DIR__, "gpu_distributed.jl"))
 
 @testset "Dense matvec ($name)" for (name, scope) in GPU_SCOPES
     Dagger.with_options(; scope) do
