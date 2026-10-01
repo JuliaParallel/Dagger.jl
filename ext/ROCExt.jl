@@ -35,10 +35,33 @@ Dagger.memory_space(x::ROCArray) =
 function Dagger.aliasing(x::ROCArray{T}) where T
     space = Dagger.memory_space(x)
     S = typeof(space)
-    gpu_ptr = pointer(x)
-    rptr = Dagger.RemotePtr{Cvoid}(UInt64(gpu_ptr), space)
+    # N.B. Not `pointer(x)`: that takes AMDGPU stream ownership of `x` for the
+    # calling task's stream, synchronizing the stream `x` was last used on and
+    # re-stamping ownership as a side effect. Aliasing only needs the address.
+    rptr = Dagger.RemotePtr{Cvoid}(UInt64(_raw_rocaddr(x)), space)
     return Dagger.ContiguousAliasing(Dagger.MemorySpan{S}(rptr, sizeof(T)*length(x)))
 end
+
+# Device addresses for aliasing, read without `pointer` (see above).
+function _buffer_key(x::ROCArray)
+    mem = x.buf[].mem
+    return UInt(mem isa AMDGPU.Mem.HIPBuffer ? mem.ptr : mem.dev_ptr)
+end
+# `x.offset` counts elements in older AMDGPU.jl (e.g. 2.1) and bytes in newer
+# ones (e.g. 2.8). Ask this version's own `derive`, once: deriving a view one
+# `Float64` in reports an offset of 1 or of 8.
+const OFFSET_IN_BYTES = Ref{Union{Bool,Nothing}}(nothing)
+function _offset_in_bytes()
+    inbytes = OFFSET_IN_BYTES[]
+    inbytes === nothing || return inbytes
+    probe = ROCArray{Float64}(undef, 0)
+    inbytes = AMDGPU.GPUArrays.derive(Float64, probe, (0,), 1).offset == sizeof(Float64)
+    OFFSET_IN_BYTES[] = inbytes
+    return inbytes
+end
+_raw_rocaddr(x::ROCArray) =
+    _buffer_key(x) + UInt(_offset_in_bytes() ? x.offset : x.offset * Base.elsize(x))
+Dagger.data_address(x::ROCArray) = UInt64(_raw_rocaddr(x))
 
 # MPI (SPMD) integration: aliasing spans broadcast from an owner rank must be
 # stamped with that rank so same-device addresses on different ranks never

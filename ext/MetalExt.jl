@@ -43,9 +43,7 @@ function Dagger.memory_space(x::MtlArray)
     return MetalVRAMMemorySpace(myid(), device_id)
 end
 _device_id(dev::MtlDevice) = findfirst(other_dev->other_dev === dev, Metal.devices())
-function Dagger.aliasing(x::MtlArray{T}) where T
-    space = Dagger.memory_space(x)
-    S = typeof(space)
+function _mtl_addr(x::MtlArray)
     mtl_ptr = pointer(x)
     # Metal ≥1.10 defines `UInt(::MtlPtr)` as the GPU virtual address, which
     # `span_copy` uses via `UInt64(pointer(x))`. Metal <1.10 has no such method;
@@ -55,9 +53,17 @@ function Dagger.aliasing(x::MtlArray{T}) where T
     else
         Metal.contents(mtl_ptr.buffer) + mtl_ptr.offset
     end
-    rptr = Dagger.RemotePtr{Cvoid}(UInt64(addr), space)
+    return UInt64(addr)
+end
+function Dagger.aliasing(x::MtlArray{T}) where T
+    space = Dagger.memory_space(x)
+    S = typeof(space)
+    rptr = Dagger.RemotePtr{Cvoid}(_mtl_addr(x), space)
     return Dagger.ContiguousAliasing(Dagger.MemorySpan{S}(rptr, sizeof(T)*length(x)))
 end
+# Views locate themselves from their parent's address, which must match the
+# address the parent's own aliasing reports
+Dagger.data_address(x::MtlArray) = _mtl_addr(x)
 
 # MPI (SPMD) integration: stamp owning rank on VRAM spaces
 Dagger.mpi_remap_space(space::MetalVRAMMemorySpace, owner::Int) =
