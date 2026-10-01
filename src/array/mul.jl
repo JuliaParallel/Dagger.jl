@@ -223,8 +223,18 @@ function gemm_dagger!(
     end
 
     Dagger.spawn_datadeps() do
-        for m in range(1, Cmt)
+        # Visit C's tiles by diagonals (`m - n` constant, wrapping), not by
+        # rows. In a row-major sweep every column owner wants the same row
+        # panel of A at once: its copies to the other owners queue behind the
+        # panel owner's own kernels and fan out from one GPU while the rest
+        # wait, which on 2 GPUs left one idle for a whole tile. Along a
+        # diagonal each step needs a different panel per column, and with the
+        # usual matching row/column distributions the first diagonal is
+        # entirely local, so transfers for later diagonals overlap it.
+        # Each `C[m, n]`'s own `k` sequence is unchanged.
+        for d in range(0, Cmt - 1)
             for n in range(1, Cnt)
+                m = mod(n - 1 + d, Cmt) + 1
                 if transA == 'N'
                     if transB == 'N'
                         # A: NoTrans / B: NoTrans
