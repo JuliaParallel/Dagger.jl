@@ -64,6 +64,63 @@ function Dagger.pin_buffer!(::Val{:ROC}, buf::DenseArray)
     return nothing
 end
 
+# Scoped host registration for one-shot HtoD sources.
+# `pin_buffer!` above unregisters from a GC finalizer, which cannot take
+# AMDGPU's registration lock when it is contended (a finalizer may not
+# switch tasks): the unregister is then dropped and the range stays registered,
+# colliding with whatever the allocator places there next. Registration is
+# instead tracked here, keyed by base pointer, and released by `unpin_host!`
+# once the copy has completed, while the caller still holds the buffer.
+# HIP registration is neither refcounted nor exclusive: registering twice is
+# idempotent and one unregister drops it, and overlapping registrations are
+# accepted. We must therefore never unregister a range someone else
+# registered (a live buffer's finalizer-managed pin would silently vanish), so
+# a buffer whose first or last byte is already registered gets a private copy
+# to register instead. A registration strictly inside the range survives
+# unregistering the enclosing one.
+const PIN_LOCK = ReentrantLock()
+mutable struct HostPinEntry
+    size::Int
+    count::Int
+end
+const HOST_PINS = Dict{Ptr{Cvoid}, HostPinEntry}()
+
+# Returns (buf, token): copy from `buf` (which may be a private copy of the
+# argument), then call `unpin_host!(token)` once the copy has completed.
+function pin_host!(buf::DenseArray)
+    isempty(buf) && return buf, nothing
+    ptr = Ptr{Cvoid}(pointer(buf))
+    sz = sizeof(buf)
+    @lock PIN_LOCK begin
+        entry = get(HOST_PINS, ptr, nothing)
+        if entry !== nothing && entry.size == sz
+            entry.count += 1
+            return buf, ptr
+        end
+        if entry !== nothing || AMDGPU.Mem.is_pinned(ptr) ||
+           AMDGPU.Mem.is_pinned(ptr + sz - 1)
+            buf = copy(buf)
+            ptr = Ptr{Cvoid}(pointer(buf))
+            sz = sizeof(buf)
+        end
+        AMDGPU.HIP.hipHostRegister(ptr, sz, AMDGPU.HIP.hipHostRegisterMapped)
+        HOST_PINS[ptr] = HostPinEntry(sz, 1)
+    end
+    return buf, ptr
+end
+function unpin_host!(token)
+    token === nothing && return
+    @lock PIN_LOCK begin
+        entry = HOST_PINS[token]
+        entry.count -= 1
+        if entry.count == 0
+            delete!(HOST_PINS, token)
+            AMDGPU.HIP.hipHostUnregister(token)
+        end
+    end
+    return
+end
+
 function Dagger.unsafe_free!(x::ROCArray)
     AMDGPU.unsafe_free!(x)
     return
@@ -234,7 +291,14 @@ end
 function Dagger.move(from_proc::CPUProc, to_proc::ROCArrayDeviceProc, x)
     with_context(to_proc) do
         if x isa DenseArray && isbitstype(eltype(x))
-            Dagger.pin_buffer!(:ROC, x)
+            buf, token = pin_host!(x)
+            try
+                arr = adapt(ROCArray, buf)
+                AMDGPU.synchronize()
+                return arr
+            finally
+                unpin_host!(token)
+            end
         end
         arr = adapt(ROCArray, x)
         AMDGPU.synchronize()
@@ -248,7 +312,14 @@ function Dagger.move(from_proc::CPUProc, to_proc::ROCArrayDeviceProc, x::Chunk)
     cpu_data = remotecall_fetch(unwrap, from_w, x)
     with_context(to_proc) do
         if cpu_data isa DenseArray && isbitstype(eltype(cpu_data))
-            Dagger.pin_buffer!(:ROC, cpu_data)
+            buf, token = pin_host!(cpu_data)
+            try
+                arr = adapt(ROCArray, buf)
+                AMDGPU.synchronize()
+                return arr
+            finally
+                unpin_host!(token)
+            end
         end
         arr = adapt(ROCArray, cpu_data)
         AMDGPU.synchronize()
@@ -321,8 +392,14 @@ function Dagger.move(from_proc::ROCArrayDeviceProc, to_proc::ROCArrayDeviceProc,
             end
         end
         return with_context(to_proc) do
-            Dagger.pin_buffer!(:ROC, host_copy)
-            return ROCArray(host_copy)
+            buf, token = pin_host!(host_copy)
+            try
+                arr = ROCArray(buf)
+                AMDGPU.synchronize()
+                return arr
+            finally
+                unpin_host!(token)
+            end
         end
     end
 end
@@ -347,8 +424,14 @@ function Dagger.move(from_proc::ROCArrayDeviceProc, to_proc::ROCArrayDeviceProc,
             end
         end
         return with_context(to_proc) do
-            Dagger.pin_buffer!(:ROC, host_copy)
-            return ROCArray(host_copy)
+            buf, token = pin_host!(host_copy)
+            try
+                arr = ROCArray(buf)
+                AMDGPU.synchronize()
+                return arr
+            finally
+                unpin_host!(token)
+            end
         end
     end
 end
