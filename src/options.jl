@@ -32,6 +32,7 @@ Stores per-task options to be passed to the scheduler.
 - `stream_buffer_type::Union{Type,Nothing}=nothing`: (Streaming only) Specifies the type of buffer to use for the input and output buffers of the task. Defaults to `Dagger.ProcessRingBuffer`.
 - `stream_max_evals::Union{Int,Nothing}=nothing`: (Streaming only) Specifies the maximum number of times the task will be evaluated before returning a result. Defaults to infinite evaluations.
 - `acceleration::Union{Acceleration,Nothing}=nothing`: The acceleration backend used to plan and execute this task (e.g. `DistributedAcceleration`, `MPIAcceleration`). When `nothing`, the current acceleration (`Dagger.current_acceleration()`) is used.
+- `writes::Union{Vector{Int},Nothing}=nothing`: (Datadeps, set automatically) Indices, among the positional arguments passed to `execute!`, of the arguments this task writes. Lets asynchronous device backends order their own transfers against only the producers of the data they move. `nothing` means unknown.
 - `return_type::Union{Type,Nothing}=nothing`: The expected return type of the task's function. When set to a concrete type, it is used as the task's `chunktype` before the task has run (e.g. so downstream metadata and, under MPI, cross-rank type uniformity are known ahead of execution). When `nothing`, the type is left unknown until the result is available.
 """
 Base.@kwdef mutable struct Options
@@ -72,6 +73,8 @@ Base.@kwdef mutable struct Options
     stream_max_evals::Union{Int,Nothing} = nothing
 
     acceleration::Union{Acceleration,Nothing} = nothing
+
+    writes::Union{Vector{Int},Nothing} = nothing
 
     return_type::Union{Type,Nothing} = nothing
 end
