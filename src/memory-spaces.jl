@@ -751,16 +751,30 @@ function _memory_spans(a::StridedAliasing{T,N,S}, spans, ptr, dim) where {T,N,S}
 
     return spans
 end
+"""
+    data_address(x::DenseArray) -> UInt64
+
+The address of `x`'s first element, for aliasing analysis. Defaults to
+`pointer(x)`; GPU extensions override it where `pointer` has side effects
+(CUDA.jl's and AMDGPU.jl's take stream ownership for the *active* stream, and
+CUDA.jl's throws when that device cannot reach `x` without peer access), or
+where it differs from the address their `aliasing` reports (Metal).
+"""
+data_address(x) = UInt64(pointer(x))
+
 function aliasing(x::SubArray{T,N}) where {T,N}
     if isbitstype(T)
         p = parent(x)
         space = memory_space(p)
         S = typeof(space)
-        parent_ptr = RemotePtr{Cvoid}(UInt64(pointer(p)), space)
-        ptr = RemotePtr{Cvoid}(UInt64(pointer(x)), space)
+        base = data_address(p)
+        parent_ptr = RemotePtr{Cvoid}(base, space)
         NA = ndims(p)
         raw_inds = parentindices(x)
         inds = ntuple(i->raw_inds[i] isa Integer ? (raw_inds[i]:raw_inds[i]) : UnitRange(raw_inds[i]), NA)
+        # The view's first element, located from the parent's address
+        first_offset = isempty(x) ? 0 : sum(ntuple(i->(first(inds[i]) - 1) * stride(p, i), NA))
+        ptr = RemotePtr{Cvoid}(base + UInt64(first_offset * sizeof(T)), space)
         sz = ntuple(i->length(inds[i]), NA)
         return StridedAliasing{T,NA,S}(parent_ptr,
                                        ptr,
