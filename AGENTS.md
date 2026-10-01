@@ -887,3 +887,20 @@ lesson.
    chunk's owner (as `collect` does via `_collect_host_tile`). Note that
    IntelExt's hooks sync only the calling task's stream, and each oneAPI
    `execute!` runs on a fresh task, so oneAPI's own hook is not sufficient yet.
+
+74. **Never unregister host memory from a finalizer that can block.**
+   `CUDA.pin` unregisters in a GC finalizer that takes a `ReentrantLock`
+   (as does `AMDGPU.Mem.unpin`, which ROCExt's finalizer used to call). When
+   that lock is contended the finalizer throws "task switch not allowed from
+   inside gc finalizer", the unregistration is lost, and GC frees the memory
+   anyway: the range stays registered with the driver, and a later
+   allocation at that address fails to register or is DMA'd through stale
+   pages. Multi-GPU GEMM segfaulted a few iterations in, with a backtrace
+   that blew the stack while printing (`jl_static_show` recursion) and showed
+   nothing of the cause; the "error in running finalizer" lines before it
+   were the only clue. (On ROCm, 2-GPU Datadeps tests segfaulted the same
+   way, inside `hipMemcpyWithStream`.) CUDAExt's and ROCExt's `pin_buffer!`
+   now register buffers themselves, and their finalizers only `trylock`,
+   re-arming themselves on contention (which keeps the buffer alive until a
+   later GC can unregister it). Anything that must run before
+   memory is freed has to be finalizer-safe: no blocking locks, no yields.
