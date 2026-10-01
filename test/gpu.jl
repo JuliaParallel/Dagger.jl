@@ -152,6 +152,71 @@ end
             end
         end
 
+        # Two GPUs of one process: copies between them take the peer-copy
+        # path on a separate copy stream, ordered only against the producers
+        # and prior users of the allocations involved. Each case below would
+        # read stale or overwritten data if one of those orderings were lost.
+        ndevices > 1 && @testset "Cross-GPU copies, one process ($(nameof(typeof(sched))))" for sched in
+                (Dagger.RoundRobinScheduler(), Dagger.GreedyScheduler())
+            g1 = Dagger.scope(worker=1, cuda_gpu=1)
+            g2 = Dagger.scope(worker=1, cuda_gpu=2)
+            local_scope = Dagger.scope(worker=1, cuda_gpus=[1, 2])
+            # A region plans over its ambient scope's processors
+            region(f) = Dagger.with_options(; scope=local_scope) do
+                Dagger.spawn_datadeps(f; scheduler=sched)
+            end
+            n = 1024
+
+            # Writes alternating between the GPUs: each pulls the other's write
+            A = zeros(Float32, n, n)
+            region() do
+                for i in 1:8
+                    Dagger.@spawn scope=(isodd(i) ? g1 : g2) addarray!(InOut(A))
+                end
+            end
+            @test all(==(8f0), A)
+
+            # A writer on one GPU racing readers of its previous value on the
+            # other: each reader must see exactly the preceding write, and the
+            # next write (and the next copy into the reader's replica) must
+            # wait for the read
+            A = zeros(Float32, n, n)
+            Bs = [zeros(Float32, n, n) for _ in 1:6]
+            region() do
+                for i in 1:6
+                    Dagger.@spawn scope=g1 addarray!(InOut(A))
+                    Dagger.@spawn scope=g2 copyto!(Out(Bs[i]), In(A))
+                end
+            end
+            @test all(i->all(==(Float32(i)), Bs[i]), 1:6)
+            @test all(==(6f0), A)
+
+            # Strided views: many short spans, packed on each side
+            A = zeros(Float32, n, n)
+            V = view(A, 1:(n ÷ 2), :)
+            region() do
+                for i in 1:4
+                    Dagger.@spawn scope=(isodd(i) ? g1 : g2) addarray!(InOut(V))
+                end
+            end
+            @test all(==(4f0), A[1:(n ÷ 2), :])
+            @test all(iszero, A[(n ÷ 2 + 1):end, :])
+
+            # Tiled GEMM across both GPUs, repeated on the same operands
+            DA = rand(Blocks(256, 256), Float32, 1024, 1024)
+            DB = rand(Blocks(256, 256), Float32, 1024, 1024)
+            DC = zeros(Blocks(256, 256), Float32, 1024, 1024)
+            ref = collect(DA) * collect(DB)
+            Dagger.with(Dagger.DATADEPS_SCHEDULER => sched) do
+                Dagger.with_options(; scope=local_scope) do
+                    for _ in 1:3
+                        mul!(DC, DA, DB)
+                        @test collect(DC) ≈ ref
+                    end
+                end
+            end
+        end
+
         @testset "Datadeps (GPU $gpu)" for gpu in gpu_configs
             local_scope = Dagger.scope(worker=1, cuda_gpus=(gpu == :all ? Colon() : [gpu]))
 

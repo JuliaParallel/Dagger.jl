@@ -901,3 +901,25 @@ lesson.
    only `trylock`s, re-arming itself on contention (which keeps the buffer
    alive until a later GC can unregister it). Anything that must run before
    memory is freed has to be finalizer-safe: no blocking locks, no yields.
+
+75. **Two GPUs without peer access: never let CUDA.jl stage the copy.**
+   Without P2P, `copyto!` between devices goes through a fresh *pageable*
+   `Vector` with a synchronous DtoH: 1.4 GB/s on PCIe-attached L40S, where
+   `cuMemcpyPeerAsync` (which works without peer access; the driver pipelines
+   it through its own pinned buffers) reached 22 GB/s. A 4-GPU GEMM spent
+   27 s per call in copies. Check `can_access_peer` before assuming a copy
+   path is cheap, and measure the copy primitive in isolation first -- it
+   took one 30-line script to find a 15x.
+
+76. **One stream per device serializes every transfer with that device's
+   compute.** Copies enqueued on the device stream wait behind its kernels,
+   and an event recorded on the *source's* stream waits for kernels that
+   merely read the data being sent (a GEMM's panel owner is busy reading the
+   panel it is asked to send). Peer copies now run on a per-device copy stream
+   ordered only against the allocations they touch (`BUFFER_EVENTS`, fed by
+   Datadeps' `writes` option), and are host-synced so every existing
+   synchronization point stays valid; 4-GPU GEMM went from ~3.9 s to ~3.1 s.
+   Two traps found on the way: Datadeps spawns copy tasks `meta`, so
+   `execute!` sees `Chunk`s, not arrays (unwrap before classifying, or every
+   copy looks like an opaque argument and falls back to whole-stream waits);
+   and `unsafe_free!` tasks hand you a freed array (check `data.freed`).

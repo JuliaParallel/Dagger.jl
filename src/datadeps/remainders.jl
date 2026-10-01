@@ -551,6 +551,16 @@ function enqueue_copy_from!(state::DataDepsState, dest_space::MemorySpace, arg_w
     add_writer!(state, arg_w, dest_space, target_ainfo, copy_task, write_num; copied=true)
 end
 
+"""
+    device_remainder_copy!(to_space, from_space, to, from, spans) -> Bool
+
+Copy remainder `spans` (`(source, dest)` pairs) between two device memory
+spaces of this process without staging through the host, returning `true`, or
+return `false` to let the caller take the host-staged path. GPU extensions
+define methods for their own space and array types.
+"""
+device_remainder_copy!(to_space::MemorySpace, from_space::MemorySpace, to, from, spans) = false
+
 # Main copy function for RemainderAliasing
 function move!(dep_mod::RemainderAliasing{S}, to_space::MemorySpace, from_space::MemorySpace, to::Chunk, from::Chunk) where S
     # Same-device: copy spans directly with one KA launch. Not merely
@@ -565,6 +575,15 @@ function move!(dep_mod::RemainderAliasing{S}, to_space::MemorySpace, from_space:
         with_context!(to_space)
         multi_span_copy!(to_s, from_s, dep_mod.spans)
         return
+    end
+    # Two devices of this process: let the backend copy device-to-device
+    # (`device_remainder_copy!`) instead of round-tripping through a host buffer.
+    if from_space != to_space && root_worker_id(to_space) == myid() &&
+       root_worker_id(from_space) == myid() &&
+       is_device_space(to_space) && is_device_space(from_space)
+        from_s = storage_array(unwrap(from))
+        to_s = storage_array(unwrap(to))
+        device_remainder_copy!(to_space, from_space, to_s, from_s, dep_mod.spans) && return
     end
     # N.B. Whole-object containers (e.g. `DSparseArray`) never reach here: their
     # storage reallocates on write, so they can't be span-copied. They are routed

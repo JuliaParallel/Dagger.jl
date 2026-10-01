@@ -16,7 +16,7 @@ if isdefined(Base, :get_extension)
 else
     import ..CUDA
 end
-import CUDA: CuDevice, CuContext, CuStream, CuArray, CUDABackend
+import CUDA: CuDevice, CuContext, CuStream, CuEvent, CuArray, CUDABackend
 import CUDA: devices, attribute, context, context!, stream, stream!
 import CUDA: CUBLAS, CUSOLVER
 
@@ -164,7 +164,7 @@ Dagger.allocate_array_func(::CuArrayDeviceProc, ::Dagger.AllocateUndef{S}) where
 Dagger.can_alloc_uninit(::CUDAVRAMMemorySpace, ::Type{<:CuArray{T}}) where {T} = isbitstype(T)
 function Dagger.alloc_uninit(space::CUDAVRAMMemorySpace, ::Type{A}, dims::Dims{N}) where {T,N,A<:CuArray{T,N}}
     return with_context(space) do
-        A(undef, dims)
+        _note_alloc!(space.device, A(undef, dims))
     end
 end
 
@@ -201,6 +201,10 @@ function Dagger.move!(to_space::CUDAVRAMMemorySpace, from_space::Dagger.CPURAMMe
     return
 end
 function Dagger.move!(to_space::CUDAVRAMMemorySpace, from_space::CUDAVRAMMemorySpace, to::AbstractArray{T,N}, from::AbstractArray{T,N}) where {T,N}
+    if to_space != from_space && to_space.owner == from_space.owner == myid()
+        peer_move!(to_space, from_space, to, from)
+        return
+    end
     sync_with_context(from_space)
     with_context!(to_space)
     if Dagger.needs_multi_span_copy(to_space, from_space, to, from)
@@ -211,11 +215,327 @@ function Dagger.move!(to_space::CUDAVRAMMemorySpace, from_space::CUDAVRAMMemoryS
     return
 end
 
-# Device addresses for aliasing, read without `pointer`: that would take
+### Same-process copies between two GPUs
+# Two GPUs of one process need not be peers (PCIe-attached GPUs behind a host
+# bridge often are not). CUDA.jl's `copyto!` then stages through a fresh
+# *pageable* host `Vector` with a synchronous DtoH (~1.4 GB/s on L40S over
+# PHB), and a KA kernel touching both buffers is illegal outright.
+# `cuMemcpyPeerAsync` works without peer access -- the driver pipelines it
+# through its own pinned buffers (~22 GB/s on the same machine).
+#
+# The copy runs on the destination's `COPY_STREAMS` entry rather than on the
+# device stream every Dagger task uses, so it overlaps that device's kernels:
+# a GEMM rotating panels between GPUs otherwise spends every transfer with
+# the destination's compute stalled behind it. Ordering is per allocation
+# (`BUFFER_EVENTS`): the copy stream waits only for the source's last write
+# and the destination's last write and read, not for everything queued on
+# either device -- the source GPU is usually busy *reading* the very panel
+# being sent. The copying task then waits on the host for the copy alone, so
+# when Datadeps sees the copy task finish the copy is complete: later
+# consumers, writers of the source, frees and host reads need no further
+# ordering, and every existing synchronization point stays valid.
+# Only addresses are read (as `Dagger.aliasing` does): `pointer` would take
 # CUDA.jl stream ownership for the active device, which throws without P2P.
 _buffer_key(x::CuArray) = UInt(convert(CUDA.CuPtr{Cvoid}, x.data[].mem))
 _raw_cuaddr(x::CuArray) = _buffer_key(x) + UInt(x.offset * Base.elsize(x))
+_cudevice(x::CuArray) = x.data[].mem.dev.handle
 Dagger.data_address(x::CuArray) = UInt64(_raw_cuaddr(x))
+
+const COPY_STREAMS = Dict{Int, CuStream}()
+
+# Outstanding device-stream work per allocation, keyed by base address.
+# `write`/`read` are events recorded on the owning device's stream after the
+# last task that wrote/read the allocation there; `nothing` means nothing
+# outstanding. An allocation with no entry has an unknown history, and a copy
+# waits on its whole device stream. Entries for freed allocations go stale;
+# a stale event only makes a copy into a reused address wait longer.
+mutable struct BufferEvents
+    write::Union{CuEvent,Nothing}
+    read::Union{CuEvent,Nothing}
+    # Set by a peer copy into the allocation (already complete), so the copy
+    # task's own record in `execute!` does not replace it with a device-stream
+    # event that would make later copies out of it wait on unrelated kernels.
+    peer_done::Bool
+end
+const BUFFER_EVENTS = Dict{UInt, BufferEvents}()
+# Per device, the event after the last task with an argument that may hold
+# device memory but is not an array of this backend (so any allocation of
+# the device may have been touched); copies wait on it as well.
+const UNTRACKED_EVENTS = Dict{Int, CuEvent}()
+const BUFFER_EVENTS_LOCK = ReentrantLock()
+const BUFFER_EVENTS_PRUNE_AT = Ref(4096)
+
+function _record_on(dev::Int, stream::CuStream)
+    return context!(CONTEXTS[dev]) do
+        ev = CUDA.CuEvent(CUDA.EVENT_DISABLE_TIMING)
+        CUDA.record(ev, stream)
+        ev
+    end
+end
+
+_tracked_buffer(x::CuArray) = x
+function _tracked_buffer(x)
+    x isa AbstractArray || return nothing
+    s = Dagger.storage_array(x)
+    return s isa CuArray ? s : nothing
+end
+_maybe_device_memory(x) =
+    !(isbits(x) || x isa Union{Symbol,AbstractString,Function,Type,Module} ||
+      (x isa Array && isbitstype(eltype(x))))
+
+_local_value(x) = x
+# A remote chunk is in no allocation of this process
+_local_value(x::Chunk) = Dagger.root_worker_id(x) == myid() ? unwrap(x) : nothing
+
+# Caller holds `BUFFER_EVENTS_LOCK`
+function _note_use!(dev::Int, ev::CuEvent, x, written::Bool)
+    buf = _tracked_buffer(x)
+    if buf === nothing
+        _maybe_device_memory(x) && (UNTRACKED_EVENTS[dev] = ev)
+        return
+    end
+    # e.g. Datadeps' `unsafe_free!` tasks; the stale entry is pruned later
+    buf.data.freed && return
+    _cudevice(buf) == dev || return
+    key = _buffer_key(buf)
+    entry = get(BUFFER_EVENTS, key, nothing)
+    if written
+        if entry === nothing
+            BUFFER_EVENTS[key] = BufferEvents(ev, nothing, false)
+        elseif entry.peer_done
+            entry.peer_done = false
+        else
+            entry.write = ev
+            entry.read = nothing
+        end
+    elseif entry !== nothing
+        # Reads on one stream are ordered, so the latest stands for all
+        entry.read = ev
+    end
+    # (A read of an allocation with no entry stays unknown: a later copy
+    # into it then waits on the whole device stream, which covers the read.)
+    return
+end
+
+_event_pending(ev::Union{CuEvent,Nothing}) = ev !== nothing && !CUDA.isdone(ev)
+function _prune_buffer_events!()
+    length(BUFFER_EVENTS) < BUFFER_EVENTS_PRUNE_AT[] && return
+    filter!(BUFFER_EVENTS) do (_, entry)
+        _event_pending(entry.write) || _event_pending(entry.read)
+    end
+    BUFFER_EVENTS_PRUNE_AT[] = max(4096, 2 * length(BUFFER_EVENTS))
+    return
+end
+
+# Record what a task launched on `dev` used, once its work is enqueued.
+# `writes` lists the written positional arguments (the `writes` option);
+# `nothing` (no Datadeps) treats every argument as possibly written.
+function _record_task!(dev::Int, @nospecialize(f), @nospecialize(args::Tuple), @nospecialize(result),
+                       writes::Union{Vector{Int},Nothing})
+    ev = _record_on(dev, STREAMS[dev])
+    @lock BUFFER_EVENTS_LOCK begin
+        if Dagger.is_move_task(f) && length(args) == 5
+            # move!(dep_mod, to_space, from_space, to, from), whose array
+            # arguments arrive as `Chunk`s (Datadeps spawns copies `meta`)
+            _note_use!(dev, ev, _local_value(args[4]), true)
+            _note_use!(dev, ev, _local_value(args[5]), false)
+        else
+            for i in eachindex(args)
+                _note_use!(dev, ev, args[i], writes === nothing || i in writes)
+            end
+        end
+        _note_use!(dev, ev, result, true)
+        _prune_buffer_events!()
+    end
+    return
+end
+
+# A fresh allocation on `dev`'s stream: copies into it wait for the
+# allocation only (it may reuse memory freed by work still queued there)
+function _note_alloc!(dev::Int, x::CuArray)
+    ev = _record_on(dev, STREAMS[dev])
+    @lock BUFFER_EVENTS_LOCK begin
+        BUFFER_EVENTS[_buffer_key(x)] = BufferEvents(ev, nothing, false)
+    end
+    return x
+end
+# An allocation with no outstanding device-stream work
+function _note_complete!(x::CuArray)
+    @lock BUFFER_EVENTS_LOCK begin
+        BUFFER_EVENTS[_buffer_key(x)] = BufferEvents(nothing, nothing, false)
+    end
+    return x
+end
+
+# Events a copy reading `from` (on device `s`) into `to` (on device `d`) must
+# wait for
+function _copy_dependencies(s::Int, from::CuArray, d::Int, to::CuArray)
+    evs = CuEvent[]
+    @lock BUFFER_EVENTS_LOCK begin
+        entry = get(BUFFER_EVENTS, _buffer_key(from), nothing)
+        if entry === nothing
+            push!(evs, _record_on(s, STREAMS[s]))
+        elseif entry.write !== nothing
+            push!(evs, entry.write)
+        end
+        haskey(UNTRACKED_EVENTS, s) && push!(evs, UNTRACKED_EVENTS[s])
+        entry = get(BUFFER_EVENTS, _buffer_key(to), nothing)
+        if entry === nothing
+            push!(evs, _record_on(d, STREAMS[d]))
+        else
+            entry.write !== nothing && push!(evs, entry.write)
+            entry.read !== nothing && push!(evs, entry.read)
+        end
+        haskey(UNTRACKED_EVENTS, d) && push!(evs, UNTRACKED_EVENTS[d])
+    end
+    # Work CUDA.jl tracks on some other stream (e.g. code outside Dagger)
+    for (dev, buf) in ((s, from), (d, to))
+        managed = buf.data[]
+        if managed.dirty && managed.stream != STREAMS[dev] &&
+           managed.stream != COPY_STREAMS[dev]
+            push!(evs, _record_on(dev, managed.stream))
+        end
+    end
+    return evs
+end
+
+# Copy `lens[i]` bytes from `src_ptrs[i]` (inside `from`, on `from_space`)
+# to `dst_ptrs[i]` (inside `to`, on `to_space`); returns once complete.
+function peer_copy_spans!(to_space::CUDAVRAMMemorySpace, from_space::CUDAVRAMMemorySpace,
+                          to::CuArray, from::CuArray, dst_ptrs, src_ptrs, lens)
+    isempty(lens) && return
+    d, s = to_space.device, from_space.device
+    @assert _cudevice(to) == d && _cudevice(from) == s
+    dst_ctx = CONTEXTS[d]
+    src_ctx = CONTEXTS[s]
+    copy_stream = COPY_STREAMS[d]
+    deps = _copy_dependencies(s, from, d, to)
+    context!(dst_ctx) do
+        for ev in deps
+            CUDADRV.cuStreamWaitEvent(copy_stream, ev, 0)
+        end
+        for i in eachindex(lens)
+            len = lens[i]
+            len == 0 && continue
+            CUDADRV.cuMemcpyPeerAsync(CUDA.CuPtr{Cvoid}(dst_ptrs[i]), dst_ctx,
+                                      CUDA.CuPtr{Cvoid}(src_ptrs[i]), src_ctx,
+                                      len, copy_stream)
+        end
+        done = CUDA.CuEvent(CUDA.EVENT_DISABLE_TIMING)
+        CUDA.record(done, copy_stream)
+        CUDA.synchronize(done)
+    end
+    # Everything the copy waited for is complete too
+    @lock BUFFER_EVENTS_LOCK begin
+        BUFFER_EVENTS[_buffer_key(to)] = BufferEvents(nothing, nothing, true)
+    end
+    return
+end
+
+# Spans below this average size are packed into one contiguous buffer on each
+# side first: every peer copy without P2P is a host-staged transfer with its
+# own fixed cost, so a halo's thousands of short column segments would
+# otherwise cost thousands of round trips.
+const PEER_PACK_MAX_AVG_BYTES = 256 * 1024
+const PEER_PACK_MIN_SPANS = 16
+
+function peer_copy_span_pairs!(to_space::CUDAVRAMMemorySpace, from_space::CUDAVRAMMemorySpace,
+                               to_s::CuArray{T}, from_s::CuArray{T},
+                               dst_ptrs::Vector{UInt64}, src_ptrs::Vector{UInt64},
+                               lens::Vector{UInt64}) where T
+    n = length(lens)
+    total = sum(lens; init=UInt64(0))
+    total == 0 && return
+    if n < PEER_PACK_MIN_SPANS || total ÷ n >= PEER_PACK_MAX_AVG_BYTES
+        peer_copy_spans!(to_space, from_space, to_s, from_s, dst_ptrs, src_ptrs, lens)
+        return
+    end
+    elsize = sizeof(T)
+    @assert total % elsize == 0
+    nelem = Int(total ÷ elsize)
+    # Gather on the source device, copy one buffer, scatter on the destination.
+    # (`multi_span_copy!` synchronizes its device after each kernel.)
+    src_packed = with_context(from_space) do
+        packed = CuArray{T}(undef, nelem)
+        base = UInt64(_raw_cuaddr(packed))
+        offs = UInt64(0)
+        packed_ptrs = Vector{UInt64}(undef, n)
+        for i in 1:n
+            packed_ptrs[i] = base + offs
+            offs += lens[i]
+        end
+        Dagger.multi_span_copy!(packed, from_s, packed_ptrs, src_ptrs, lens)
+        _note_complete!(packed)
+    end
+    dst_packed = with_context(() -> _note_alloc!(to_space.device, CuArray{T}(undef, nelem)), to_space)
+    peer_copy_spans!(to_space, from_space, dst_packed, src_packed,
+                     UInt64[_raw_cuaddr(dst_packed)], UInt64[_raw_cuaddr(src_packed)], UInt64[total])
+    with_context(to_space) do
+        base = UInt64(_raw_cuaddr(dst_packed))
+        offs = UInt64(0)
+        packed_ptrs = Vector{UInt64}(undef, n)
+        for i in 1:n
+            packed_ptrs[i] = base + offs
+            offs += lens[i]
+        end
+        Dagger.multi_span_copy!(to_s, dst_packed, dst_ptrs, packed_ptrs, lens)
+    end
+    return
+end
+
+function peer_move!(to_space::CUDAVRAMMemorySpace, from_space::CUDAVRAMMemorySpace,
+                    to::AbstractArray{T}, from::AbstractArray{T}) where T
+    if to isa CuArray && from isa CuArray
+        @assert length(to) == length(from)
+        peer_copy_spans!(to_space, from_space, to, from, UInt64[_raw_cuaddr(to)],
+                         UInt64[_raw_cuaddr(from)], UInt64[sizeof(from)])
+        return
+    end
+    to_spans = Dagger.memory_spans(Dagger.aliasing(to))
+    from_spans = Dagger.memory_spans(Dagger.aliasing(from))
+    @assert length(to_spans) == length(from_spans)
+    n = length(to_spans)
+    dst_ptrs = Vector{UInt64}(undef, n)
+    src_ptrs = Vector{UInt64}(undef, n)
+    lens = Vector{UInt64}(undef, n)
+    for i in 1:n
+        @assert Dagger.span_len(to_spans[i]) == Dagger.span_len(from_spans[i])
+        dst_ptrs[i] = UInt64(Dagger.span_start(to_spans[i]))
+        src_ptrs[i] = UInt64(Dagger.span_start(from_spans[i]))
+        lens[i] = UInt64(Dagger.span_len(from_spans[i]))
+    end
+    peer_copy_span_pairs!(to_space, from_space, Dagger.storage_array(to),
+                          Dagger.storage_array(from), dst_ptrs, src_ptrs, lens)
+    return
+end
+
+# Out-of-place copy of `x` to another GPU of this process (complete on return).
+function _peer_copy_out(to_proc::CuArrayDeviceProc, from_proc::CuArrayDeviceProc, x::CuArray)
+    to_space = only(Dagger.memory_spaces(to_proc))
+    from_space = only(Dagger.memory_spaces(from_proc))
+    to_arr = with_context(() -> _note_alloc!(to_proc.device, similar(x)), to_proc)
+    peer_move!(to_space, from_space, to_arr, x)
+    return to_arr
+end
+
+# Remainder copies between two GPUs of this process (see `remainders.jl`).
+function Dagger.device_remainder_copy!(to_space::CUDAVRAMMemorySpace, from_space::CUDAVRAMMemorySpace,
+                                       to_s::CuArray{T}, from_s::CuArray{T},
+                                       spans::Vector{Tuple{Dagger.LocalMemorySpan,Dagger.LocalMemorySpan}}) where T
+    n = length(spans)
+    dst_ptrs = Vector{UInt64}(undef, n)
+    src_ptrs = Vector{UInt64}(undef, n)
+    lens = Vector{UInt64}(undef, n)
+    for i in 1:n
+        src_span, dst_span = spans[i]
+        @assert src_span.len == dst_span.len
+        dst_ptrs[i] = dst_span.ptr
+        src_ptrs[i] = src_span.ptr
+        lens[i] = src_span.len
+    end
+    peer_copy_span_pairs!(to_space, from_space, to_s, from_s, dst_ptrs, src_ptrs, lens)
+    return true
+end
 
 # Out-of-place HtoD
 function Dagger.move(from_proc::CPUProc, to_proc::CuArrayDeviceProc, x)
@@ -312,14 +632,7 @@ function Dagger.move(from_proc::CuArrayDeviceProc, to_proc::CuArrayDeviceProc, x
         return arr
     elseif Dagger.root_worker_id(from_proc) == Dagger.root_worker_id(to_proc)
         # Same process but different GPUs, use DtoD copy
-        from_arr = unwrap(x)
-        with_context(CUDA.synchronize, from_proc)
-        return with_context(to_proc) do
-            to_arr = similar(from_arr)
-            copyto!(to_arr, from_arr)
-            CUDA.synchronize()
-            return to_arr
-        end
+        return _peer_copy_out(to_proc, from_proc, unwrap(x))
     elseif ipc_enabled() && Dagger.datasize(x) >= Dagger.IPC_MIN_BYTES[] &&
            from_proc.device == to_proc.device &&
            Dagger.same_node(Dagger.current_acceleration(), from_proc.owner, to_proc.owner)
@@ -365,13 +678,7 @@ function Dagger.move(from_proc::CuArrayDeviceProc, to_proc::CuArrayDeviceProc, x
         with_context(CUDA.synchronize, from_proc)
         return x
     elseif Dagger.root_worker_id(from_proc) == Dagger.root_worker_id(to_proc)
-        with_context(CUDA.synchronize, from_proc)
-        return with_context(to_proc) do
-            to_arr = similar(x)
-            copyto!(to_arr, x)
-            CUDA.synchronize()
-            return to_arr
-        end
+        return _peer_copy_out(to_proc, from_proc, x)
     else
         host_copy = with_context(from_proc) do
             return Dagger.pinned_host_array(x)
@@ -398,10 +705,14 @@ Dagger.move(from_proc::CPUProc, to_proc::CuArrayDeviceProc, x::Chunk{T}) where {
 function Dagger.execute!(proc::CuArrayDeviceProc, f, args...; kwargs...)
     @nospecialize f args kwargs
     tls = Dagger.get_tls()
+    spec = tls.task_spec
+    writes = spec isa Dagger.Sch.TaskSpec && spec.options !== nothing ?
+             spec.options.writes : nothing
     task = Threads.@spawn begin
         Dagger.set_tls!(tls)
         with_context!(proc)
         result = Base.@invokelatest f(args...; kwargs...)
+        _record_task!(proc.device, f, args, result, writes)
         # N.B. Synchronization must be done when accessing result or args
         return result
     end
@@ -738,6 +1049,7 @@ function __init__()
                 CONTEXTS[dev.handle] = ctx
                 context!(ctx) do
                     STREAMS[dev.handle] = stream()
+                    COPY_STREAMS[dev.handle] = CuStream(; flags=CUDA.STREAM_NON_BLOCKING)
                 end
                 return proc
             end

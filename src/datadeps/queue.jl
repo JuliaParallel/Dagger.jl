@@ -443,6 +443,23 @@ map_or_ntuple(f, xs::Vector) = map(f, 1:length(xs))
 # N.B. Accept any `Tuple` (typed specs produce heterogeneous tuples of
 # `TypedArgument{T}`, not a homogeneous `NTuple{N,T}`).
 @inline map_or_ntuple(@specialize(f), xs::Tuple) = ntuple(f, Val(length(xs)))
+# Indices, among the positional arguments `execute!` will receive (the function
+# excluded), of the arguments a task writes; see the `writes` option.
+function written_positions(task_arg_ws, deps_vec)
+    writes = nothing
+    npos = 0
+    for idx in 2:length(task_arg_ws)
+        arg_ws = task_arg_ws[idx]
+        ispositional(arg_ws.pos) || continue
+        npos += 1
+        if any(di->deps_vec[di].writedep, arg_deps_range(arg_ws))
+            writes = something(writes, Int[])
+            push!(writes, npos)
+        end
+    end
+    return something(writes, Int[])
+end
+
 function distribute_task!(queue::DataDepsTaskQueue, state::DataDepsState, all_procs, all_scope, spec::DTaskSpec{typed}, task::DTask, fargs, proc_to_scope_lfu, write_num::Int; proc::Union{Processor,Nothing}=nothing, ownership=nothing) where typed
     @specialize spec fargs
 
@@ -627,6 +644,7 @@ function distribute_task!(queue::DataDepsTaskQueue, state::DataDepsState, all_pr
     new_spec = DTaskSpec(new_fargs, spec.options)
     new_spec.options.scope = our_scope
     new_spec.options.exec_scope = our_scope
+    new_spec.options.writes = written_positions(task_arg_ws, deps_vec)
     if uniform
         new_spec.options.occupancy = Dict(Any=>0)
     end
