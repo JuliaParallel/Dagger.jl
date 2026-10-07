@@ -143,12 +143,17 @@ steps:
 # env:
 #   SECRET_CODECOV_TOKEN: ""
 
+# The GPU benchmarks occupy the shared GPU runners for a long time, so they only run when
+# requested, by labeling the pull request `benchmarks` or by putting `[run benchmarks]` in
+# the commit message. Buildkite does not start a build when a label is added, so push a
+# commit (an empty one is enough) after labeling.
+
   - label: "Benchmarks (CUDA, gpu, {{matrix}})"
     key: "bench-cuda-gpu"
     # GPU timings must not compete with sibling benchmark shards.
     concurrency: 1
     concurrency_group: "dagger-gpu-benchmarks-cuda"
-    if: build.message !~ /\[skip tests\]/ && build.message !~ /\[skip benchmarks\]/ && (build.pull_request.id != null || build.message =~ /\[run benchmarks\]/)
+    if: build.message !~ /\[skip tests\]/ && build.message !~ /\[skip benchmarks\]/ && (build.pull_request.labels includes "benchmarks" || build.message =~ /\[run benchmarks\]/)
     depends_on: [test-cuda]
     timeout_in_minutes: 120
     matrix: [array, linalg, sparse, stencil]
@@ -178,7 +183,7 @@ steps:
     # GPU timings must not compete with sibling benchmark shards.
     concurrency: 1
     concurrency_group: "dagger-gpu-benchmarks-cuda"
-    if: build.message !~ /\[skip tests\]/ && build.message !~ /\[skip benchmarks\]/ && (build.pull_request.id != null || build.message =~ /\[run benchmarks\]/)
+    if: build.message !~ /\[skip tests\]/ && build.message !~ /\[skip benchmarks\]/ && (build.pull_request.labels includes "benchmarks" || build.message =~ /\[run benchmarks\]/)
     depends_on: [test-cuda]
     timeout_in_minutes: 120
     matrix: [array, linalg, sparse, stencil]
@@ -209,7 +214,7 @@ steps:
     # GPU timings must not compete with sibling benchmark shards.
     concurrency: 1
     concurrency_group: "dagger-gpu-benchmarks-cuda"
-    if: build.message !~ /\[skip tests\]/ && build.message !~ /\[skip benchmarks\]/ && (build.pull_request.id != null || build.message =~ /\[run benchmarks\]/)
+    if: build.message !~ /\[skip tests\]/ && build.message !~ /\[skip benchmarks\]/ && (build.pull_request.labels includes "benchmarks" || build.message =~ /\[run benchmarks\]/)
     depends_on: [test-cuda, test-cuda-mpi]
     timeout_in_minutes: 120
     matrix: [array, linalg, sparse, stencil]
@@ -240,7 +245,7 @@ steps:
     # GPU timings must not compete with sibling benchmark shards.
     concurrency: 1
     concurrency_group: "dagger-gpu-benchmarks-rocm"
-    if: build.message !~ /\[skip tests\]/ && build.message !~ /\[skip benchmarks\]/ && (build.pull_request.id != null || build.message =~ /\[run benchmarks\]/)
+    if: build.message !~ /\[skip tests\]/ && build.message !~ /\[skip benchmarks\]/ && (build.pull_request.labels includes "benchmarks" || build.message =~ /\[run benchmarks\]/)
     depends_on: [test-rocm]
     timeout_in_minutes: 120
     matrix: [array, linalg, sparse, stencil]
@@ -270,7 +275,7 @@ steps:
     # GPU timings must not compete with sibling benchmark shards.
     concurrency: 1
     concurrency_group: "dagger-gpu-benchmarks-rocm"
-    if: build.message !~ /\[skip tests\]/ && build.message !~ /\[skip benchmarks\]/ && (build.pull_request.id != null || build.message =~ /\[run benchmarks\]/)
+    if: build.message !~ /\[skip tests\]/ && build.message !~ /\[skip benchmarks\]/ && (build.pull_request.labels includes "benchmarks" || build.message =~ /\[run benchmarks\]/)
     depends_on: [test-rocm]
     timeout_in_minutes: 120
     matrix: [array, linalg, sparse, stencil]
@@ -301,7 +306,7 @@ steps:
     # GPU timings must not compete with sibling benchmark shards.
     concurrency: 1
     concurrency_group: "dagger-gpu-benchmarks-rocm"
-    if: build.message !~ /\[skip tests\]/ && build.message !~ /\[skip benchmarks\]/ && (build.pull_request.id != null || build.message =~ /\[run benchmarks\]/)
+    if: build.message !~ /\[skip tests\]/ && build.message !~ /\[skip benchmarks\]/ && (build.pull_request.labels includes "benchmarks" || build.message =~ /\[run benchmarks\]/)
     depends_on: [test-rocm, test-rocm-mpi]
     timeout_in_minutes: 120
     matrix: [array, linalg, sparse, stencil]
@@ -332,7 +337,7 @@ steps:
     # GPU timings must not compete with sibling benchmark shards.
     concurrency: 1
     concurrency_group: "dagger-gpu-benchmarks-oneapi"
-    if: build.message !~ /\[skip tests\]/ && build.message !~ /\[skip benchmarks\]/ && (build.pull_request.id != null || build.message =~ /\[run benchmarks\]/)
+    if: build.message !~ /\[skip tests\]/ && build.message !~ /\[skip benchmarks\]/ && (build.pull_request.labels includes "benchmarks" || build.message =~ /\[run benchmarks\]/)
     depends_on: [test-oneapi]
     timeout_in_minutes: 120
     matrix: [array, linalg, sparse]
@@ -362,7 +367,7 @@ steps:
     # GPU timings must not compete with sibling benchmark shards.
     concurrency: 1
     concurrency_group: "dagger-gpu-benchmarks-oneapi"
-    if: build.message !~ /\[skip tests\]/ && build.message !~ /\[skip benchmarks\]/ && (build.pull_request.id != null || build.message =~ /\[run benchmarks\]/)
+    if: build.message !~ /\[skip tests\]/ && build.message !~ /\[skip benchmarks\]/ && (build.pull_request.labels includes "benchmarks" || build.message =~ /\[run benchmarks\]/)
     depends_on: [test-oneapi]
     timeout_in_minutes: 120
     matrix: [array, linalg, sparse]
@@ -395,7 +400,7 @@ steps:
   #   # GPU timings must not compete with sibling benchmark shards.
   #   concurrency: 1
   #   concurrency_group: "dagger-gpu-benchmarks-oneapi"
-  #   if: build.message !~ /\[skip tests\]/ && build.message !~ /\[skip benchmarks\]/ && (build.pull_request.id != null || build.message =~ /\[run benchmarks\]/)
+  #   if: build.message !~ /\[skip tests\]/ && build.message !~ /\[skip benchmarks\]/ && (build.pull_request.labels includes "benchmarks" || build.message =~ /\[run benchmarks\]/)
   #   depends_on: [test-oneapi, test-oneapi-mpi]
   #   timeout_in_minutes: 120
   #   matrix: [array, linalg, sparse]
@@ -426,7 +431,7 @@ steps:
     # GPU timings must not compete with sibling benchmark shards.
     concurrency: 1
     concurrency_group: "dagger-gpu-benchmarks-metal"
-    if: build.message !~ /\[skip tests\]/ && build.message !~ /\[skip benchmarks\]/ && (build.pull_request.id != null || build.message =~ /\[run benchmarks\]/)
+    if: build.message !~ /\[skip tests\]/ && build.message !~ /\[skip benchmarks\]/ && (build.pull_request.labels includes "benchmarks" || build.message =~ /\[run benchmarks\]/)
     depends_on: [test-metal]
     timeout_in_minutes: 120
     matrix: [array, linalg, sparse, stencil]
@@ -456,7 +461,7 @@ steps:
     # GPU timings must not compete with sibling benchmark shards.
     concurrency: 1
     concurrency_group: "dagger-gpu-benchmarks-metal"
-    if: build.message !~ /\[skip tests\]/ && build.message !~ /\[skip benchmarks\]/ && (build.pull_request.id != null || build.message =~ /\[run benchmarks\]/)
+    if: build.message !~ /\[skip tests\]/ && build.message !~ /\[skip benchmarks\]/ && (build.pull_request.labels includes "benchmarks" || build.message =~ /\[run benchmarks\]/)
     depends_on: [test-metal]
     timeout_in_minutes: 120
     matrix: [array, linalg, sparse, stencil]
@@ -489,7 +494,7 @@ steps:
   #   # GPU timings must not compete with sibling benchmark shards.
   #   concurrency: 1
   #   concurrency_group: "dagger-gpu-benchmarks-metal"
-  #   if: build.message !~ /\[skip tests\]/ && build.message !~ /\[skip benchmarks\]/ && (build.pull_request.id != null || build.message =~ /\[run benchmarks\]/)
+  #   if: build.message !~ /\[skip tests\]/ && build.message !~ /\[skip benchmarks\]/ && (build.pull_request.labels includes "benchmarks" || build.message =~ /\[run benchmarks\]/)
   #   depends_on: [test-metal, test-metal-mpi]
   #   timeout_in_minutes: 120
   #   matrix: [array, linalg, sparse, stencil]
@@ -517,7 +522,7 @@ steps:
 
   - label: "GPU benchmark summary (cuda)"
     key: gpu-benchmark-report-cuda
-    if: build.message !~ /\[skip tests\]/ && build.message !~ /\[skip benchmarks\]/ && (build.pull_request.id != null || build.message =~ /\[run benchmarks\]/)
+    if: build.message !~ /\[skip tests\]/ && build.message !~ /\[skip benchmarks\]/ && (build.pull_request.labels includes "benchmarks" || build.message =~ /\[run benchmarks\]/)
     depends_on: [bench-cuda-gpu, bench-cuda-gpu-distributed, bench-cuda-gpu-mpi]
     allow_dependency_failure: true
     timeout_in_minutes: 10
@@ -532,7 +537,7 @@ steps:
     command: "python3 -m unittest discover -s .buildkite -p 'test_*.py' && bash .buildkite/report_gpu_benchmarks.sh"
   - label: "GPU benchmark summary (rocm)"
     key: gpu-benchmark-report-rocm
-    if: build.message !~ /\[skip tests\]/ && build.message !~ /\[skip benchmarks\]/ && (build.pull_request.id != null || build.message =~ /\[run benchmarks\]/)
+    if: build.message !~ /\[skip tests\]/ && build.message !~ /\[skip benchmarks\]/ && (build.pull_request.labels includes "benchmarks" || build.message =~ /\[run benchmarks\]/)
     depends_on: [bench-rocm-gpu, bench-rocm-gpu-distributed, bench-rocm-gpu-mpi]
     allow_dependency_failure: true
     timeout_in_minutes: 10
@@ -547,7 +552,7 @@ steps:
     command: "python3 -m unittest discover -s .buildkite -p 'test_*.py' && bash .buildkite/report_gpu_benchmarks.sh"
   - label: "GPU benchmark summary (oneapi)"
     key: gpu-benchmark-report-oneapi
-    if: build.message !~ /\[skip tests\]/ && build.message !~ /\[skip benchmarks\]/ && (build.pull_request.id != null || build.message =~ /\[run benchmarks\]/)
+    if: build.message !~ /\[skip tests\]/ && build.message !~ /\[skip benchmarks\]/ && (build.pull_request.labels includes "benchmarks" || build.message =~ /\[run benchmarks\]/)
     depends_on: [bench-oneapi-gpu, bench-oneapi-gpu-distributed]
     allow_dependency_failure: true
     timeout_in_minutes: 10
@@ -562,7 +567,7 @@ steps:
     command: "python3 -m unittest discover -s .buildkite -p 'test_*.py' && bash .buildkite/report_gpu_benchmarks.sh"
   - label: "GPU benchmark summary (metal)"
     key: gpu-benchmark-report-metal
-    if: build.message !~ /\[skip tests\]/ && build.message !~ /\[skip benchmarks\]/ && (build.pull_request.id != null || build.message =~ /\[run benchmarks\]/)
+    if: build.message !~ /\[skip tests\]/ && build.message !~ /\[skip benchmarks\]/ && (build.pull_request.labels includes "benchmarks" || build.message =~ /\[run benchmarks\]/)
     depends_on: [bench-metal-gpu, bench-metal-gpu-distributed]
     allow_dependency_failure: true
     timeout_in_minutes: 10
