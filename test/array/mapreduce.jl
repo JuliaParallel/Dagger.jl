@@ -51,3 +51,36 @@ end
 @testset "mean" test_mapreduce(mean, rand; zero_init=nothing, types=(Float32, Float64))
 @testset "var" test_mapreduce(var, rand; zero_init=nothing, types=(Float32, Float64))
 @testset "std" test_mapreduce(std, rand; zero_init=nothing, types=(Float32, Float64))
+
+# The result type follows `f`, not only the input eltype
+function test_mapreduce_type(f, A; cmp=isapprox)
+    X = distribute(A, Blocks(10, 10))
+    @testset "dims=$dims" for dims in (Colon(), 1, 2)
+        expected = f(A; dims)
+        if dims == Colon()
+            actual = f(X; dims)
+            @test typeof(actual) == typeof(expected)
+            @test cmp(actual, expected)
+        else
+            actual = f(X; dims)
+            @test eltype(actual) == eltype(expected)
+            @test cmp(collect(actual), expected)
+        end
+    end
+end
+@testset "result type follows f" begin
+    A = rand(20, 20)
+    C = rand(ComplexF64, 20, 20)
+    @testset "sum (Bool)" test_mapreduce_type((X; dims)->sum(x->x>0.5, X; dims), A)
+    @testset "sum (real of complex)" test_mapreduce_type((X; dims)->sum(abs2, X; dims), C)
+    @testset "sum (complex of real)" test_mapreduce_type((X; dims)->sum(x->complex(x, 1.0), X; dims), A)
+    @testset "prod (Float32)" test_mapreduce_type((X; dims)->prod(x->Float32(x)+1, X; dims), A)
+    @testset "mapreduce" test_mapreduce_type((X; dims)->mapreduce(abs2, +, X; dims), C)
+    @testset "maximum" test_mapreduce_type((X; dims)->maximum(abs, X; dims), C)
+    @testset "count" test_mapreduce_type((X; dims)->count(x->x>0.5, X; dims), A)
+    @testset "sum (Bool, Float64 init)" test_mapreduce_type((X; dims)->sum(x->x>0.5, X; dims, init=0.0), A)
+    @testset "sum (Int, Float64 init)" test_mapreduce_type((X; dims)->sum(X; dims, init=0.0), rand(1:9, 20, 20))
+    @testset "mean" test_mapreduce_type(mean, A)
+    @testset "var" test_mapreduce_type(var, A)
+    @testset "std" test_mapreduce_type(std, A)
+end
