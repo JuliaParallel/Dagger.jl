@@ -700,6 +700,7 @@ From `Statistics`:
 
 From `LinearAlgebra`:
 - `norm`
+- `diag`/`tr`
 - `transpose`/`adjoint` (Out-of-place transpose)
 - `*` (Out-of-place Matrix-(Matrix/Vector) multiply)
 - `mul!` (In-place Matrix-Matrix and Matrix-Vector multiply)
