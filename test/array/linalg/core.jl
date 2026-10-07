@@ -77,3 +77,30 @@ end
         @test collect(Dy3) ≈ a .* x .+ b .* y
     end
 end
+
+@testset "diag/tr" begin
+    @testset "$T $(sz) part=$(part.blocksize)" for T in (Float64, ComplexF64),
+            (sz, part) in (((16, 16), Blocks(4, 4)),    # diagonal follows the partition grid
+                           ((16, 16), Blocks(16, 16)),  # single partition
+                           ((16, 16), Blocks(5, 3)),    # diagonal cuts through partitions
+                           ((12, 20), Blocks(4, 5)),    # wide
+                           ((20, 12), Blocks(7, 4)))    # tall
+        A = rand(T, sz...)
+        DA = distribute(A, part)
+        # A `k` outside of the matrix gives an empty diagonal, as for a `Matrix`
+        @testset "k=$k" for k in (-sz[1]-2):(sz[2]+2)
+            Dd = diag(DA, k)
+            @test Dd isa DVector{T}
+            @test collect(Dd) == diag(A, k)
+        end
+        @test collect(diag(DA)) == diag(A)
+        @testset "k::$(typeof(k))" for k in (UInt(1), Int8(-1), Int8(-128), big(2), true, typemax(Int))
+            @test collect(diag(DA, k)) == diag(A, k)
+        end
+        if sz[1] == sz[2]
+            @test tr(DA) ≈ tr(A)
+        else
+            @test_throws DimensionMismatch tr(DA)
+        end
+    end
+end

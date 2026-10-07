@@ -5,6 +5,56 @@ function LinearAlgebra.norm2(A::DArray{T,N}) where {T,N}
     return sqrt(sum(map(norm->fetch(norm)::real(T), norms); init=zeroRT))
 end
 
+function _diag_chunk!(Bpart, Brange, Apart, row, col)
+    Ainds = range(LinearIndices(Apart)[row, col]; step=size(Apart, 1)+1, length=length(Brange))
+    view(Bpart, Brange) .= view(Apart, Ainds)
+    return
+end
+
+# `Base`'s fallback indexes with `diagind`, a stepped range of `CartesianIndex`,
+# which `getindex(::DArray, ...)` cannot split across partitions. Copy each
+# partition's stretch of the diagonal instead, so only the partitions that the
+# diagonal crosses are read.
+function LinearAlgebra.diag(A::DMatrix{T}, k::Integer=0) where T
+    m, n = size(A)
+    bs = min(A.partitioning.blocksize...)
+    # Like `diag(::Matrix, k)`, a `k` outside of the matrix gives an empty
+    # diagonal. Compare before converting: `n - k` wraps for an unsigned `k`.
+    -m <= k <= n || return DArray{T}(undef, Blocks(bs), 0)
+    k = Int(k)
+
+    # The k-th diagonal holds the entries (i, i+k)
+    rows = max(1, 1-k):min(m, n-k)
+    B = DArray{T}(undef, Blocks(bs), length(rows))
+    isempty(rows) && return B
+
+    Asd = A.subdomains
+    Bsd = B.subdomains
+    Dagger.spawn_datadeps() do
+        for Aidx in CartesianIndices(A.chunks)
+            Arows, Acols = indexes(Asd[Aidx])
+            # Rows of this partition whose diagonal entry is also in its columns
+            r = intersect(Arows, Acols .- k)
+            isempty(r) && continue
+            Apart = A.chunks[Aidx]
+
+            # Where those entries land in the result
+            p = r .- (first(rows) - 1)
+            for Bidx in fld1(first(p), bs):fld1(last(p), bs)
+                Bpos = only(indexes(Bsd[Bidx]))
+                q = intersect(p, Bpos)
+                Brange = q .- (first(Bpos) - 1)
+                row = first(q) + (first(rows) - 1)
+                Dagger.@spawn _diag_chunk!(InOut(B.chunks[Bidx]), Brange, In(Apart),
+                                           row - (first(Arows) - 1),
+                                           row + k - (first(Acols) - 1))
+            end
+        end
+    end
+
+    return B
+end
+
 # --- BLAS-1 vector operations ---------------------------------------------
 # Efficient, distributed level-1 operations needed by iterative (Krylov)
 # solvers. These run one BLAS-1 kernel per chunk (avoiding the generic
