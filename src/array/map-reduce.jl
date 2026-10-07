@@ -90,7 +90,7 @@ function stage(ctx::Context, r::MapReduce{T,N}) where {T,N}
         A[1] = x
         return A
     end
-    to_array(x::Array, N) = x
+    to_array(x::AbstractArray, N) = x
     function treered_f(op, x, y, N)
         value = op.(x, y)
         return to_array(value, N)
