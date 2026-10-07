@@ -54,7 +54,14 @@ struct MapReduce{T,N} <: ArrayOp{T,N}
     init
 end
 function MapReduce(f, op_inner, op_outer, input::DArray{T,N}, dims, init) where {T,N}
-    T_new = Base._return_type(op_outer, Tuple{T, T})
+    # `op_outer` combines the values `f` produces, not the input elements
+    T_f = Base._return_type(f, Tuple{T})
+    if !(init isa Base._InitialValue)
+        # ... starting from `init`, which may widen them
+        T_init = Base._return_type(op_outer, Tuple{typeof(init), T_f})
+        T_init === Union{} || (T_f = T_init)
+    end
+    T_new = Base._return_type(op_outer, Tuple{T_f, T_f})
     if T_new === Union{}
         T_new = Any
     end
@@ -184,9 +191,9 @@ end
 _extrema_outer(x::Extrema, y::Extrema) =
     Extrema(min(x.min, y.min), max(x.max, y.max))
 
-function _onlinestats_mapreduce(f, x::DArray{T}, stat; dims=nothing) where T
-    _f(x) = fit!(stat(T), f(x))
-    init = stat(T)
+function _onlinestats_mapreduce(f, x::DArray{T}, ::Type{S}; dims=nothing) where {T,S}
+    _f(x) = fit!(S(T), f(x))
+    init = S(T)
     return _onlinestats_finish(mapreduce(_f, merge, x; dims, init), dims)
 end
 _onlinestats_finish(result, ::Union{Nothing,Colon}) = OnlineStats.value(result)
