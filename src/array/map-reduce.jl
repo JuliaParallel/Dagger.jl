@@ -55,7 +55,7 @@ struct MapReduce{T,N} <: ArrayOp{T,N}
 end
 function MapReduce(f, op_inner, op_outer, input::DArray{T,N}, dims, init) where {T,N}
     # `op_outer` combines the values `f` produces, not the input elements
-    T_f = Base._return_type(f, Tuple{T})
+    T_f = _mapped_type(f, op_inner, T)
     if !(init isa Base._InitialValue)
         # ... starting from `init`, which may widen them
         T_init = Base._return_type(op_outer, Tuple{typeof(init), T_f})
@@ -69,6 +69,8 @@ function MapReduce(f, op_inner, op_outer, input::DArray{T,N}, dims, init) where 
     N_new = N - length(_dims)
     return MapReduce{T_new,N_new}(f, op_inner, op_outer, input, dims, init)
 end
+
+_mapped_type(f, op_inner, ::Type{T}) where T = Base._return_type(f, Tuple{T})
 
 function stage(ctx::Context, r::MapReduce{T,N}) where {T,N}
     inp = stage(ctx, r.input)
@@ -190,6 +192,8 @@ function _extrema_inner(f, X; dims, init)
 end
 _extrema_outer(x::Extrema, y::Extrema) =
     Extrema(min(x.min, y.min), max(x.max, y.max))
+_mapped_type(f, ::typeof(_extrema_inner), ::Type{T}) where T =
+    Extrema{Base._return_type(f, Tuple{T})}
 
 function _onlinestats_mapreduce(f, x::DArray{T}, ::Type{S}; dims=nothing) where {T,S}
     _f(x) = fit!(S(T), f(x))
