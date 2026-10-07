@@ -190,7 +190,11 @@ function _onlinestats_mapreduce(f, x::DArray{T}, stat; dims=nothing) where T
     return _onlinestats_finish(mapreduce(_f, merge, x; dims, init), dims)
 end
 _onlinestats_finish(result, ::Union{Nothing,Colon}) = OnlineStats.value(result)
-_onlinestats_finish(result, ::Union{Int,Dims}) = map(OnlineStats.value, result)
+_onlinestats_finish(result, ::Union{Int,Dims}) = map(_onlinestats_value, result)
+_onlinestats_value(o) = OnlineStats.value(o)
+# `value(::Variance)` multiplies by a `Float64` `NaN` when it has no finite
+# mean, so it infers as `Union{S,Float64}` for any other precision
+_onlinestats_value(o::OnlineStats.Variance{T,S}) where {T,S} = convert(S, OnlineStats.value(o))
 
 mean(x::DArray; dims=nothing) = mean(identity, x; dims)
 mean(f::Function, x::DArray; dims=nothing) =
