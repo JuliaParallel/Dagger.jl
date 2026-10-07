@@ -84,3 +84,12 @@ end
     @testset "var" test_mapreduce_type(var, A)
     @testset "std" test_mapreduce_type(std, A)
 end
+
+# Reducing `Bool`s across partitions broadcasts into a `BitArray`
+@testset "Bool results" begin
+    A = rand(20, 20)
+    @testset "all" test_mapreduce_type((X; dims)->all(x->x>0.05, X; dims), A; cmp=Base.:(==))
+    @testset "any" test_mapreduce_type((X; dims)->any(x->x>0.95, X; dims), A; cmp=Base.:(==))
+    @testset "prod" test_mapreduce_type((X; dims)->prod(x->x>0.05, X; dims), A; cmp=Base.:(==))
+    @testset "maximum" test_mapreduce_type((X; dims)->maximum(x->x>0.95, X; dims), A; cmp=Base.:(==))
+end
