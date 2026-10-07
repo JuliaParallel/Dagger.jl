@@ -83,6 +83,8 @@ end
     @testset "mean" test_mapreduce_type(mean, A)
     @testset "var" test_mapreduce_type(var, A)
     @testset "std" test_mapreduce_type(std, A)
+    @testset "extrema" test_mapreduce_type(extrema, A; cmp=Base.:(==))
+    @testset "extrema (real of complex)" test_mapreduce_type((X; dims)->extrema(abs, X; dims), C; cmp=Base.:(==))
 end
 
 # Reducing `Bool`s across partitions broadcasts into a `BitArray`
