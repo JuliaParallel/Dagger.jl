@@ -346,7 +346,6 @@ function set_failed!(state, origin::Thunk, thunk::Thunk=origin; ex=nothing)
 
     fill_registered_futures!(state, thunk, true)
     thunk.sch_accessible = false
-    delete_unused_task!(state, thunk)
 
     # Seal the dependents list and propagate failure transitively.
     # schedule_dependents! with failed=true immediately calls set_failed! for
@@ -358,6 +357,9 @@ function set_failed!(state, origin::Thunk, thunk::Thunk=origin; ex=nothing)
     failed_ready = Thunk[]
     schedule_dependents!(state, thunk, true, failed_ready)
     @assert isempty(failed_ready) "set_failed! produced ready thunks on the failure path"
+
+    # Only now: each dependent above read this thunk's error with load_result
+    delete_unused_task!(state, thunk)
 end
 
 "Internal utility, useful for debugging scheduler state."

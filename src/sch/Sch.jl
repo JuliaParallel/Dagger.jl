@@ -1162,8 +1162,10 @@ function finish_task!(ctx, state, node, thunk_failed, ready::Vector{Thunk})
         # permanently unresolved.  Handle the three steps directly instead.
         fill_registered_futures!(state, node, true)
         node.sch_accessible = false
-        delete_unused_task!(state, node)
+        # Dependents read this error with load_result, so propagate before
+        # the result can be deleted
         schedule_dependents!(state, node, true, ready)
+        delete_unused_task!(state, node)
     else
         # Success path: seal dependents (collecting newly-ready ones into
         # `ready` for the caller to schedule outside state.lock), fulfill
@@ -1197,9 +1199,8 @@ function delete_unused_task!(state, thunk; recycle::Bool=false)
 end
 # `recycle=true` returns the Thunk to the global pool. Only callers for whom
 # the futures AND dependents Treiber lists are already sealed-and-drained may
-# pass it (success-path finish_task! and unref_thunk!): the failure paths run
-# schedule_dependents! AFTER deletion, and a recycled thunk's re-SEALED
-# dependents head would silently skip failure propagation.
+# pass it (success-path finish_task! and unref_thunk!): a recycled thunk's
+# re-SEALED dependents head would silently skip failure propagation.
 function task_delete!(state, thunk; recycle::Bool=false)
     clear_result!(state, thunk)
     @atomic thunk.valid = false
