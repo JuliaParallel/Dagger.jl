@@ -271,6 +271,18 @@ end
             c = @spawn b+2
             @test_throws_unwrap (Dagger.DTaskFailedException, ErrorException) fetch(c)
         end
+        @testset "dependent chain, only the last task referenced" begin
+            # The upstream tasks can be deleted as soon as they fail
+            function chain()
+                s = @spawn sleep(1)
+                a = @spawn (s->error("Test"))(s)
+                b = @spawn a+1
+                return @spawn b+2
+            end
+            c = chain()
+            GC.gc(); GC.gc()
+            @test_throws_unwrap (Dagger.DTaskFailedException, ErrorException) fetch(c)
+        end
         @testset "single input" begin
             a = @spawn 1+1
             b = @spawn (a->error("Test"))(a)
