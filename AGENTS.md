@@ -753,3 +753,15 @@ lesson.
    `is_local(current_acceleration(), chunk.handle)` before inspecting storage.
    The existing cross-rank GPU dataflow tests exercise both endpoints; a
    Distributed-only suite cannot catch this mistake.
+
+81. **Reduce apparent GPU ordering failures below Julia before adding fences.**
+   This host's Ryzen 9600X `gfx1036` GPU with HIP 7.2 returns zeros after an
+   asynchronous kernel or device copy followed by a short pause, even when
+   the same stream is synchronized before reading. A native HIP C++ program
+   reproduces it without Julia, KernelAbstractions, or Dagger; synchronous
+   allocations and disabling SDMA do not fix it. Setting
+   `AMD_SERIALIZE_KERNEL=3 AMD_SERIALIZE_COPY=3` makes that reproducer pass.
+   Per-halo synchronization happened to hide the failure, but would impose
+   a production cost for a host runtime problem. Use the serialization flags
+   only for local correctness validation and report them with the results;
+   they are not a valid configuration for performance measurements.
