@@ -382,7 +382,7 @@ _maybe_device_memory(x) =
 
 _local_value(x) = x
 # A remote chunk is in no allocation of this process
-_local_value(x::Chunk) = Dagger.root_worker_id(x) == myid() ? unwrap(x) : nothing
+_local_value(x::Chunk) = Dagger.is_local(Dagger.current_acceleration(), x.handle) ? unwrap(x) : nothing
 
 # Caller holds `BUFFER_EVENTS_LOCK`
 function _note_use!(dev::Int, ev::HIPEvent, x, written::Bool, copy_task::UInt64=UInt64(0))
