@@ -186,6 +186,10 @@ function move!(dep_mod, to_space::MemorySpace, from_space::MemorySpace, to::Chun
     return
 end
 
+# Device backends track copy tasks separately from user kernels so a completed
+# transfer does not acquire dependencies on unrelated compute-stream work.
+is_move_task(f) = f === move!
+
 fetch_copy_source(from::Chunk, to::Chunk) =
     remotecall_fetch(unwrap, root_worker_id(from), from)
 # GPU allocations must travel through the backend's transport, which stages
