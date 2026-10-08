@@ -98,21 +98,19 @@ steps:
       julia --project=test/rocmenv -e 'using Pkg; Pkg.develop([PackageSpec(path=pwd()), PackageSpec(path="lib/TimespanLogging")]); Pkg.instantiate()'
       julia --project=test/rocmenv test/mpi/run.jl 2 2 test/mpi/rocm.jl
 
-  # Disabled: has failed on every build since at least 2026-09-16, including on master (e.g.
-  # ZE_RESULT_ERROR_INVALID_ARGUMENT and "Non-uniform value" errors in the dense matvec tests).
-  # Re-enable once test/mpi/oneapi.jl passes.
-  #
-  # - label: Julia 1.11 (oneAPI, MPI)
-  #   key: test-oneapi-mpi
-  #   <<: *mpigputest
-  #   plugins:
-  #     - JuliaCI/julia#v1:
-  #         version: "1.11"
-  #   agents:
-  #     queue: "oneapi"
-  #   command: |
-  #     julia --project=test/oneapienv -e 'using Pkg; Pkg.develop([PackageSpec(path=pwd()), PackageSpec(path="lib/TimespanLogging")]); Pkg.instantiate()'
-  #     julia --project=test/oneapienv test/mpi/run.jl 2 2 test/mpi/oneapi.jl
+  - label: Julia 1.11 (oneAPI, MPI)
+    key: test-oneapi-mpi
+    <<: *mpigputest
+    plugins:
+      - JuliaCI/julia#v1:
+          version: "1.11"
+    agents:
+      queue: "oneapi"
+    env:
+      SYCL_UR_USE_LEVEL_ZERO_V2: "0"
+    command: |
+      julia --project=test/oneapienv -e 'using Pkg; Pkg.develop([PackageSpec(path=pwd()), PackageSpec(path="lib/TimespanLogging")]); Pkg.instantiate()'
+      julia --project=test/oneapienv test/mpi/run.jl 2 2 test/mpi/oneapi.jl
 
   # Disabled: has failed on every build since at least 2026-09-16, including on master (the
   # process aborts with Metal's "commit command buffer with uncommitted encoder" assertion).
@@ -398,7 +396,7 @@ steps:
     artifacts:
       - "benchmark-results-*/**/*"
 
-  # Disabled along with the "Julia 1.11 (oneAPI, MPI)" step it depends on.
+  # Disabled pending validation of the oneAPI MPI benchmark suites.
   #
   # - label: "Benchmarks (oneAPI, gpu-mpi, {{matrix}})"
   #   key: "bench-oneapi-gpu-mpi"
