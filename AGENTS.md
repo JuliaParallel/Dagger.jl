@@ -1079,3 +1079,104 @@ lesson.
     YAML but passes `{{array}}` to the benchmark worker, which rejects the suite
     before sampling. Check the expanded command arguments and artifact paths
     for every pipeline; parser and dependency checks do not catch this error.
+
+61. **A Distributed GPU transfer must preserve the source's ownership.**
+   Sending a raw device array in a slot-creation RPC deserializes it on the
+   receiver while `from_proc` still names the sender. The subsequent GPU
+   `move` then activates a remote worker's context locally and asserts; some
+   backends cannot serialize the array in the first place. Send an owner-side
+   `Chunk` and use the backend's Chunk transport instead. The same rule
+   applies when fetching a remote source for in-place copies. Pin regression
+   inputs and consumers to different workers selecting device 1: a GPU scope
+   alone does not guarantee that a transfer actually happens.
+
+62. **CUDA IPC must export staging memory and return an owned copy.**
+   CUDA's pooled allocations cannot be exported with `cuIpcGetMemHandle`, and
+   returning an imported mapping makes the receiver alias the sender's data
+   and depend on its lifetime. Use the shared `ipc_export`/`ipc_materialize`
+   hooks, keep the staging token on the sender until the receiver finishes,
+   and release it in `finally`. Use `CUDADRV` for closing handles too: CUDA 6
+   moved the driver API into CUDACore. Test repeated transfers in both
+   directions and mutate the destination to verify source independence.
+
+63. **Two GPUs of one process are not one device, and may not even be
+   peers.** Several paths assumed "same worker" meant "one kernel may touch
+   both buffers": the same-worker device remainder copy, `collect`'s
+   in-process `cat`, and CUDA `pointer()` (which takes ownership for the
+   *active* device and throws without P2P). `CUDA.pin` is also only deduped
+   per context while host registration is process-wide. Key direct device
+   paths on equal memory spaces, not equal workers, read addresses without
+   ownership side effects, and test with tiles on two devices of one
+   process: the one-GPU-per-worker suites cannot see any of this.
+
+64. **Reading a GPU task's result needs Dagger's stream, not the caller's.**
+   GPU `execute!` returns without synchronizing: the kernels are still queued
+   on Dagger's per-device stream. A plain `fetch` + `Array(x)` from the
+   caller copies on the caller's own task-local stream, and is correct only
+   if the array library synchronizes the previous owner when another stream
+   touches a buffer. CUDA, AMDGPU and OpenCL do; oneAPI does not, and it also
+   copies on the *calling task's* device. A green CUDA run therefore does not
+   prove the wait exists. Before reading a tile on the host, call
+   `gpu_synchronize(chunk.processor)` and copy under `with_context`, on the
+   chunk's owner (as `collect` does via `_collect_host_tile`). Note that
+   IntelExt's hooks sync only the calling task's stream, and each oneAPI
+   `execute!` runs on a fresh task, so oneAPI's own hook is not sufficient yet.
+
+74. **Never unregister host memory from a finalizer that can block.**
+   `CUDA.pin` unregisters in a GC finalizer that takes a `ReentrantLock`
+   (as does `AMDGPU.Mem.unpin`, which ROCExt's finalizer used to call). When
+   that lock is contended the finalizer throws "task switch not allowed from
+   inside gc finalizer", the unregistration is lost, and GC frees the memory
+   anyway: the range stays registered with the driver, and a later
+   allocation at that address fails to register or is DMA'd through stale
+   pages. Multi-GPU GEMM segfaulted a few iterations in, with a backtrace
+   that blew the stack while printing (`jl_static_show` recursion) and showed
+   nothing of the cause; the "error in running finalizer" lines before it
+   were the only clue. (On ROCm, 2-GPU Datadeps tests segfaulted the same
+   way, inside `hipMemcpyWithStream`.) CUDAExt's and ROCExt's `pin_buffer!`
+   now register buffers themselves, and their finalizers only `trylock`,
+   re-arming themselves on contention (which keeps the buffer alive until a
+   later GC can unregister it). Anything that must run before
+   memory is freed has to be finalizer-safe: no blocking locks, no yields.
+
+75. **Two GPUs without peer access: never let CUDA.jl stage the copy.**
+   Without P2P, `copyto!` between devices goes through a fresh *pageable*
+   `Vector` with a synchronous DtoH: 1.4 GB/s on PCIe-attached L40S, where
+   `cuMemcpyPeerAsync` (which works without peer access; the driver pipelines
+   it through its own pinned buffers) reached 22 GB/s. A 4-GPU GEMM spent
+   27 s per call in copies. Check `can_access_peer` before assuming a copy
+   path is cheap, and measure the copy primitive in isolation first -- it
+   took one 30-line script to find a 15x. (HIP does not stage this way:
+   between two RX 6900 XTs without peer access, AMDGPU's `copyto!` and
+   `hipMemcpyPeerAsync` both reached ~5.5 GB/s, vs 1.4 GB/s through a
+   pageable host buffer, and `copyto!` blocks until the copy is done.)
+
+76. **One stream per device serializes every transfer with that device's
+   compute.** Copies enqueued on the device stream wait behind its kernels,
+   and an event recorded on the *source's* stream waits for kernels that
+   merely read the data being sent (a GEMM's panel owner is busy reading the
+   panel it is asked to send). Peer copies now run on a per-device copy stream
+   ordered only against the allocations they touch (`BUFFER_EVENTS`, fed by
+   Datadeps' `writes` option), and are host-synced so every existing
+   synchronization point stays valid; 4-GPU GEMM went from ~3.9 s to ~3.1 s.
+   (ROCExt does the same with HIP events and `hipMemcpyPeerAsync`.)
+   Bookkeeping keyed by address outlives the allocation: a peer copy's
+   "already complete, skip the next write" flag, left on short-lived packing
+   buffers, swallowed the first write to the next allocation at that address,
+   and a later copy out of it read stale data. Name the task the skip is for
+   (`filled_by`), or keep entries to plain events.
+   Two traps found on the way: Datadeps spawns copy tasks `meta`, so
+   `execute!` sees `Chunk`s, not arrays (unwrap before classifying, or every
+   copy looks like an opaque argument and falls back to whole-stream waits);
+   and `unsafe_free!` tasks hand you a freed array (check `data.freed`).
+
+77. **Resolve optional GPU packages before loading test dependencies or starting
+   workers.** `Pkg.add` of a GPU backend can change shared packages such as
+   LLVM, Atomix and GPUArraysCore. If Dagger or its test imports have already
+   loaded them, Julia keeps the old modules while GPUCompiler expects the new
+   APIs; the symptom is missing-cache warnings followed by remote LoadErrors
+   on every GPU vendor. `Pkg.test` also uses a temporary environment, so giving
+   workers the repository's project can select different dependency versions.
+   Install optional packages first, then start workers with
+   `Base.active_project()` so every process uses the same resolved environment.
+
