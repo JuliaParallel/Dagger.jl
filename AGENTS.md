@@ -775,3 +775,13 @@ lesson.
    `execute!` sees `Chunk`s, not arrays (unwrap before classifying, or every
    copy looks like an opaque argument and falls back to whole-stream waits);
    and `unsafe_free!` tasks hand you a freed array (check `data.freed`).
+
+79. **ROCm Distributed tests need a spare Julia thread for host calls.**
+   AMDGPU's persistent host-call tasks poll HSA signals with
+   `Libc.systemsleep` and `yield`, which can monopolize a sticky task's only
+   thread (lesson 12). With one default thread the GPU suite stopped making
+   progress in `hostcall_host_wait`, without an exception; with two threads
+   the host-call task remained alive while the other thread continued into
+   the stencil suite. Give both the driver and Distributed workers two
+   default threads in ROCm CI. Increasing only the driver's thread count
+   leaves remote workers exposed to the same starvation.
