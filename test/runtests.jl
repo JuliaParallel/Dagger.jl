@@ -90,15 +90,23 @@ optin_test_names = USE_FINCH ? String[] : String[
 additional_workers::Int = 3
 worker_threads::Int = 1
 
-if PROGRAM_FILE != "" && realpath(PROGRAM_FILE) == @__FILE__
-    pushfirst!(LOAD_PATH, @__DIR__)
-    pushfirst!(LOAD_PATH, joinpath(@__DIR__, ".."))
+direct_test_run = PROGRAM_FILE != "" && realpath(PROGRAM_FILE) == @__FILE__
+if direct_test_run
     using Pkg
     Pkg.activate(@__DIR__)
+    # Resolve direct invocations in one project, as Pkg.test does.
+    # A repository project ahead of it in LOAD_PATH can shadow backend versions.
+    Pkg.develop([PackageSpec(path=joinpath(@__DIR__, "..")),
+                 PackageSpec(path=joinpath(@__DIR__, "..", "lib", "TimespanLogging"))])
     try
         Pkg.instantiate()
     catch
     end
+end
+
+# Pkg.test supplies test_args through ARGS without setting PROGRAM_FILE.
+if direct_test_run || !isempty(ARGS)
+    using Pkg
     using ArgParse
     s = ArgParseSettings(description = "Dagger Testsuite")
     @eval begin
