@@ -30,5 +30,6 @@ run_mpi_gpu_suite((;
         make_space = () -> IntelExt.IntelVRAMMemorySpace(1, 1),
         device_field = :device_id,
         kind = :oneAPI,
+        test_ipc = true,
     ),
 ))
