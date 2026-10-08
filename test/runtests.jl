@@ -88,7 +88,8 @@ optin_test_names = USE_FINCH ? String[] : String[
 ]
 
 additional_workers::Int = 3
-worker_threads::Int = 1
+# AMDGPU's persistent host-call tasks can monopolize a worker's only thread.
+worker_threads::Int = USE_ROCM ? 2 : 1
 
 direct_test_run = PROGRAM_FILE != "" && realpath(PROGRAM_FILE) == @__FILE__
 if direct_test_run
@@ -135,7 +136,7 @@ if direct_test_run || !isempty(ARGS)
                 help = "How many additional workers to launch"
             "-t", "--threads"
                 arg_type = Int
-                default = 1
+                default = worker_threads
                 help = "How many threads to give each additional worker"
             "-v", "--verbose"
                 action = :store_true

@@ -41,6 +41,7 @@ steps:
       queue: "rocm"
     env:
       CI_USE_ROCM: "1"
+      JULIA_NUM_THREADS: "2"
 
   - label: Julia 1.11 (oneAPI)
     key: test-oneapi
