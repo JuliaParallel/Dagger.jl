@@ -785,3 +785,12 @@ lesson.
    EOF errors are its aftermath. `SYCL_UR_USE_LEVEL_ZERO_V2=0` selects the
    legacy adapter and passes that reproducer. Diagnose native BLAS failures
    separately from Dagger scheduling and record the adapter used in validation.
+
+
+83. **A passing GPU suite does not certify dependency finalizers.**
+   Julia logs finalizer exceptions without failing the suite or its exit code.
+   AMDGPU 2.8.0's `src/cache.jl` `library_state` accepts a `destroy_handle`
+   callback but its task finalizer calls undefined `destroy_handle!`, producing
+   an `UndefVarError` while the two-rank numerical suite passes all assertions.
+   Check stderr as well as test counts, and attribute the callback to its
+   owning package before changing Dagger's task or GPU resource lifecycle.
