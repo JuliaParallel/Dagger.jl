@@ -205,6 +205,8 @@ else
     to_test = filter(!in(optin_test_names), all_test_names)
     @info "Running all tests"
 end
+flush(stdout)
+flush(stderr)
 
 # Resolve optional dependencies before loading Dagger (and its dependencies) or
 # starting workers. Adding a GPU backend can downgrade LLVM/Atomix; a process
@@ -255,7 +257,11 @@ try
         test_name = all_test_names[findfirst(x->x==test, all_test_names)]
         println()
         @info "Testing $test_title ($test_name)"
+        flush(stdout)
+        flush(stderr)
         @testset "$test_title" include(test * ".jl")
+        flush(stdout)
+        flush(stderr)
     end
 catch
     printstyled(stderr, "Tests Failed!\n"; color=:red)
