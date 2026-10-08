@@ -734,6 +734,16 @@ lesson.
    Install optional packages first, then start workers with
    `Base.active_project()` so every process uses the same resolved environment.
 
+78. **Level Zero IPC handles cannot be serialized between processes.** Intel's
+   opaque `ze_ipc_mem_handle_t` includes a process-local file descriptor.
+   MPI's serialized metadata copies the descriptor number, not its underlying
+   resource, so `zeMemOpenIpcHandle` fails with `ZE_RESULT_ERROR_INVALID_ARGUMENT`
+   on the receiving rank. A usable import needs descriptor passing, such as
+   Unix-domain `SCM_RIGHTS`, before reconstructing the handle. Keep Intel MPI
+   on host-staged transport until that exists; a same-node/device check or
+   `DAGGER_IPC=1` cannot supply the missing descriptor. See
+   https://github.com/intel/compute-runtime/issues/448.
+
 79. **ROCm Distributed tests need a spare Julia thread for host calls.**
    AMDGPU's persistent host-call tasks poll HSA signals with
    `Libc.systemsleep` and `yield`, which can monopolize a sticky task's only

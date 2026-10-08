@@ -453,18 +453,13 @@ Dagger.mpi_device_direct(x::oneAPI.oneStridedArray) = mpi_gpu_direct_enabled()
 Dagger.mpi_device_sync(x::oneArray) = oneAPI.synchronize()
 Dagger.mpi_device_sync(::IntelVRAMMemorySpace) = oneAPI.synchronize()
 
-# Same-node device IPC via Level Zero zeMem*IpcHandle. Stage into a dedicated
-# device_alloc (not the array pool) so the handle stays valid across processes.
-# DAGGER_IPC=0 disables the path.
-const GPU_IPC = Ref{Union{Nothing,Bool}}(nothing)
-function ipc_enabled()
-    v = GPU_IPC[]
-    v !== nothing && return v
-    v = something(tryparse(Bool, get(ENV, "DAGGER_IPC", "true")), true)
-    GPU_IPC[] = v
-    return v
-end
-Dagger.ipc_eligible(::IntelVRAMMemorySpace, ::IntelVRAMMemorySpace) = ipc_enabled()
+# Level Zero export/import primitives. Stage into a dedicated device allocation
+# so an imported mapping does not depend on the original array's lifetime.
+# Level Zero's opaque handle contains a process-local file descriptor. MPI's
+# serialized metadata transports the integer, not the descriptor (SCM_RIGHTS),
+# so zeMemOpenIpcHandle on the receiver cannot import it. Use host staging until
+# the transport supports descriptor passing; DAGGER_IPC cannot make this safe.
+Dagger.ipc_eligible(::IntelVRAMMemorySpace, ::IntelVRAMMemorySpace) = false
 
 const oneL0 = oneAPI.oneL0
 
