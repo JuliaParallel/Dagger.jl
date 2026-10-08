@@ -743,3 +743,13 @@ lesson.
    the stencil suite. Give both the driver and Distributed workers two
    default threads in ROCm CI. Increasing only the driver's thread count
    leaves remote workers exposed to the same starvation.
+
+80. **GPU event tracking must check a chunk's acceleration ownership.**
+   `root_worker_id(::MPIRef)` and MPI processors intentionally return `myid()`
+   on every rank; Distributed's worker-id test therefore calls every MPI chunk
+   local. A GPU copy task executes on both endpoint ranks, and recording its
+   arguments then tries to unwrap the remote endpoint's placeholder and throws
+   "MPIRef is not owned by this rank". Check the handle with
+   `is_local(current_acceleration(), chunk.handle)` before inspecting storage.
+   The existing cross-rank GPU dataflow tests exercise both endpoints; a
+   Distributed-only suite cannot catch this mistake.
