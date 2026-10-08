@@ -723,3 +723,14 @@ lesson.
    `execute!` sees `Chunk`s, not arrays (unwrap before classifying, or every
    copy looks like an opaque argument and falls back to whole-stream waits);
    and `unsafe_free!` tasks hand you a freed array (check `data.freed`).
+
+77. **Resolve optional GPU packages before loading test dependencies or starting
+   workers.** `Pkg.add` of a GPU backend can change shared packages such as
+   LLVM, Atomix and GPUArraysCore. If Dagger or its test imports have already
+   loaded them, Julia keeps the old modules while GPUCompiler expects the new
+   APIs; the symptom is missing-cache warnings followed by remote LoadErrors
+   on every GPU vendor. `Pkg.test` also uses a temporary environment, so giving
+   workers the repository's project can select different dependency versions.
+   Install optional packages first, then start workers with
+   `Base.active_project()` so every process uses the same resolved environment.
+
