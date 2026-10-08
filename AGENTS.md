@@ -765,3 +765,13 @@ lesson.
    a production cost for a host runtime problem. Use the serialization flags
    only for local correctness validation and report them with the results;
    they are not a valid configuration for performance measurements.
+
+
+82. **oneMKL queue interop can fail below Dagger on Intel Xe2 GPUs.**
+   With oneAPI.jl 2.9.2 and its 2025.3 support libraries, this Arc Pro B60's
+   default Level Zero v2 adapter aborts with
+   `UR_RESULT_ERROR_UNSUPPORTED_FEATURE` when SYCL wraps a native Level Zero
+   queue for GEMM. A standalone `oneArray` `mul!` reproduces the abort; worker
+   EOF errors are its aftermath. `SYCL_UR_USE_LEVEL_ZERO_V2=0` selects the
+   legacy adapter and passes that reproducer. Diagnose native BLAS failures
+   separately from Dagger scheduling and record the adapter used in validation.

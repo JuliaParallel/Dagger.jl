@@ -56,6 +56,8 @@ steps:
       queue: "oneapi"
     env:
       CI_USE_ONEAPI: "1"
+      # oneMKL native-queue interop aborts with the v2 adapter on Xe2.
+      SYCL_UR_USE_LEVEL_ZERO_V2: "0"
 
   - label: Julia 1.11 (Metal)
     key: test-metal
@@ -350,6 +352,7 @@ steps:
     command: "bash .buildkite/run_gpu_benchmarks.sh {{matrix}}"
     env:
       BENCHMARK_GPU: "oneapi"
+      SYCL_UR_USE_LEVEL_ZERO_V2: "0"
       BENCHMARK_VARIANT: "gpu"
       BENCHMARK_TEST_STEPS: "test-oneapi"
       BENCHMARK_CI_THREADS: "2"
@@ -380,6 +383,7 @@ steps:
     command: "bash .buildkite/run_gpu_benchmarks.sh {{matrix}}"
     env:
       BENCHMARK_GPU: "oneapi"
+      SYCL_UR_USE_LEVEL_ZERO_V2: "0"
       BENCHMARK_VARIANT: "gpu-distributed"
       BENCHMARK_TEST_STEPS: "test-oneapi"
       BENCHMARK_CI_THREADS: "2"
