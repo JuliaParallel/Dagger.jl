@@ -380,7 +380,7 @@ lesson.
    the last task depend on every earlier copy repairs that owner invariant,
    but couples disjoint copies unnecessarily and puts the last one on the
    critical path. Represent the logical write as a batch producer instead
-   (lesson 38). Registering every exact destination span is correct too, but
+   (lesson 37). Registering every exact destination span is correct too, but
    is a performance cliff for halo exchange: a 64-tile stencil produced
    hundreds of megabytes of interval-tree/overlap bookkeeping and regressed
    by 7–8x.
@@ -513,7 +513,7 @@ lesson.
    Compare exact cache contents and frequencies against the old algorithm
    after mixed hits/misses, including zero capacity. Ten thousand repeated
    evictions fell from 10,000 allocations / 320,000 bytes to zero; cache-hit
-   behavior is unchanged. Together with lesson 46, cold default population
+   behavior is unchanged. Together with lesson 45, cold default population
    is 25 allocations / 1,024 bytes rather than 217 / 9,088.
 
 47. **Hierarchical Datadeps has two dispatch branches, and `-p 0` only
@@ -571,9 +571,9 @@ lesson.
    The general trap: a verification step that cannot observe the failure it is
    meant to catch will report success forever. The same shape produced two
    other false "verified"s in the same session — a suite run at `-p 0` that
-   never enters the branch under test (lesson 48), and a lookup benchmarked
+   never enters the branch under test (lesson 47), and a lookup benchmarked
    against an empty cache that measures the early return rather than the scan
-   behind it (lesson 51). When a check passes, ask what it would have done had
+   behind it (lesson 50). When a check passes, ask what it would have done had
    the thing been broken.
 
 52. **Wrapping a function that other code recognizes by identity silently
@@ -972,7 +972,7 @@ lesson.
    and nonzero beta across several tiles; CPU-only multiplication tests
    cannot catch this dispatch error.
 
-49. **A distributed view needs both broadcast style and bulk staging.**
+79. **A distributed view needs both broadcast style and bulk staging.**
    `SubArray` does not inherit `DArray`'s broadcast style. Adding that style
    alone still leaves `Distribute` slicing the wrapper through scalar
    parent indexing. Materialize the selected region with bulk DArray
@@ -982,7 +982,7 @@ lesson.
    Use nonuniform values and offset views crossing tile boundaries, with
    scalar indexing disabled, to check placement as well as dispatch.
 
-50. **Uniform scheduling must preserve Datadeps' chosen thread.** The
+80. **Uniform scheduling must preserve Datadeps' chosen thread.** The
    planner already chooses a rank-uniform processor, but widening its scope
    to every processor in that memory space discards the thread choice. MPI
    ignores rank-local capacity and uses a deterministic processor order, so
@@ -993,7 +993,7 @@ lesson.
    hierarchical planners with several rounds of tasks, checking actual thread
    IDs as well as uniform processor metadata and restricted user scopes.
 
-51. **Asynchronous benchmark workers need explicit output streams.** Julia's
+81. **Asynchronous benchmark workers need explicit output streams.** Julia's
    `run(cmd; wait=false)` redirects stdout and stderr to `devnull`; it does
    not inherit them as synchronous `run` does. The benchmark orchestrator
    consequently hid all worker progress and errors while CI appeared stuck
@@ -1001,7 +1001,7 @@ lesson.
    workers through `pipeline(...; stdout=stdout, stderr=stderr)` so the last
    active benchmark and any failure are visible in the job log.
 
-52. **A missing benchmark spread is not evidence of a repeatable change.**
+82. **A missing benchmark spread is not evidence of a repeatable change.**
    AirspeedVelocity omits quartiles when a trial has one timed sample. The
    three-second CI budget included setup, teardown and GC, so even sub-ms
    kernels often produced only one sample. Treating either missing spread as
@@ -1013,7 +1013,7 @@ lesson.
    structured results for aggregation; do not infer significance by parsing
    rendered Markdown.
 
-53. **Performance workers must not silently enable correctness diagnostics.**
+83. **Performance workers must not silently enable correctness diagnostics.**
     The MPI benchmark worker copied `check_uniformity!(true)` from the test
     bootstrap. That hashes and compares planning values across ranks for every
     task and argument, so short kernels mostly measured diagnostic traffic.
@@ -1024,7 +1024,7 @@ lesson.
     option. Keep uniformity checking enabled in functional MPI tests. Repeat
     comparisons before attributing a few noisy samples to a scheduling change.
 
-54. **Timing verdicts need actual sample counts and independent confirmation.**
+84. **Timing verdicts need actual sample counts and independent confirmation.**
     AirspeedVelocity's flattened statistics omit the sample count, and
     BenchmarkTools' `params.samples` is a limit rather than a measurement.
     Recover counts from raw `times` arrays. A tight spread within one process
@@ -1032,7 +1032,7 @@ lesson.
     per revision and confirm timing regressions in fresh processes with the
     revision order reversed before counting them.
 
-55. **CPU-only scope checks must account for MPI processor wrappers.**
+85. **CPU-only scope checks must account for MPI processor wrappers.**
     `compatible_processors` under MPI includes `MPIProcessor{ThreadProc}`, so
     `all(proc isa ThreadProc for proc in ...)` rejects an all-CPU scope.
     LU's former `use_lapack_panel` check selected the per-row task
@@ -1040,13 +1040,13 @@ lesson.
     or forwarding predicate rather than the outer processor type. Increasing
     matrix size also increases that fallback's scheduling work.
 
-56. **MPI callers must read mutable scalar status through the dependency graph.**
+86. **MPI callers must read mutable scalar status through the dependency graph.**
     A plain `Ref` used as a Datadeps argument is updated on its owning rank;
     reading the caller's original `Ref` on other ranks can return stale status.
     Submit a final scalar read with `In(ref)` inside the region, then fetch its
     uniform task result for error checks and returned factorization status.
 
-57. **GPU benchmark scope must cover setup, probes, and the timed run.**
+87. **GPU benchmark scope must cover setup, probes, and the timed run.**
     Loading a GPU extension does not enable its processors by default. Apply
     the explicit device scope around both suite construction and BenchmarkTools
     execution, so fixtures and capability probes use the same backend as the
@@ -1056,7 +1056,7 @@ lesson.
     backend per worker: a mixed CPU/GPU specification would otherwise measure
     GPU fixtures under the CPU method label.
 
-58. **A reused benchmark workdir must discard old response IDs.** The plain
+88. **A reused benchmark workdir must discard old response IDs.** The plain
     worker protocol starts request IDs at one for each orchestration run.
     Reusing `BENCHMARK_WORKDIR` without removing old `response_*.json` and
     `result_*.json` lets the orchestrator accept a previous run's response
@@ -1064,7 +1064,7 @@ lesson.
     protocol outputs when starting a worker; already-loaded trials remain in
     the orchestrator's result dictionary.
 
-59. **Buildkite dependencies do not require an actual passing test.** A test
+89. **Buildkite dependencies do not require an actual passing test.** A test
     skipped by its condition satisfies `depends_on`, so benchmark jobs that
     require successful tests need both matching skip conditions and an outcome
     check (`buildkite-agent step get outcome`). Keep GPU+MPI dependent on the
@@ -1074,103 +1074,13 @@ lesson.
     each vendor completes, with a shared writer concurrency group: an offline
     vendor queue must not withhold another vendor's finished results.
 
-60. **Validate Buildkite matrix expansion, not just YAML syntax.** Buildkite
+90. **Validate Buildkite matrix expansion, not just YAML syntax.** Buildkite
     replaces `{{matrix}}` once. A command containing `{{{{matrix}}}}` is valid
     YAML but passes `{{array}}` to the benchmark worker, which rejects the suite
     before sampling. Check the expanded command arguments and artifact paths
     for every pipeline; parser and dependency checks do not catch this error.
 
-61. **A Distributed GPU transfer must preserve the source's ownership.**
-   Sending a raw device array in a slot-creation RPC deserializes it on the
-   receiver while `from_proc` still names the sender. The subsequent GPU
-   `move` then activates a remote worker's context locally and asserts; some
-   backends cannot serialize the array in the first place. Send an owner-side
-   `Chunk` and use the backend's Chunk transport instead. The same rule
-   applies when fetching a remote source for in-place copies. Pin regression
-   inputs and consumers to different workers selecting device 1: a GPU scope
-   alone does not guarantee that a transfer actually happens.
-
-62. **CUDA IPC must export staging memory and return an owned copy.**
-   CUDA's pooled allocations cannot be exported with `cuIpcGetMemHandle`, and
-   returning an imported mapping makes the receiver alias the sender's data
-   and depend on its lifetime. Use the shared `ipc_export`/`ipc_materialize`
-   hooks, keep the staging token on the sender until the receiver finishes,
-   and release it in `finally`. Use `CUDADRV` for closing handles too: CUDA 6
-   moved the driver API into CUDACore. Test repeated transfers in both
-   directions and mutate the destination to verify source independence.
-
-63. **Two GPUs of one process are not one device, and may not even be
-   peers.** Several paths assumed "same worker" meant "one kernel may touch
-   both buffers": the same-worker device remainder copy, `collect`'s
-   in-process `cat`, and CUDA `pointer()` (which takes ownership for the
-   *active* device and throws without P2P). `CUDA.pin` is also only deduped
-   per context while host registration is process-wide. Key direct device
-   paths on equal memory spaces, not equal workers, read addresses without
-   ownership side effects, and test with tiles on two devices of one
-   process: the one-GPU-per-worker suites cannot see any of this.
-
-64. **Reading a GPU task's result needs Dagger's stream, not the caller's.**
-   GPU `execute!` returns without synchronizing: the kernels are still queued
-   on Dagger's per-device stream. A plain `fetch` + `Array(x)` from the
-   caller copies on the caller's own task-local stream, and is correct only
-   if the array library synchronizes the previous owner when another stream
-   touches a buffer. CUDA, AMDGPU and OpenCL do; oneAPI does not, and it also
-   copies on the *calling task's* device. A green CUDA run therefore does not
-   prove the wait exists. Before reading a tile on the host, call
-   `gpu_synchronize(chunk.processor)` and copy under `with_context`, on the
-   chunk's owner (as `collect` does via `_collect_host_tile`). Note that
-   IntelExt's hooks sync only the calling task's stream, and each oneAPI
-   `execute!` runs on a fresh task, so oneAPI's own hook is not sufficient yet.
-
-74. **Never unregister host memory from a finalizer that can block.**
-   `CUDA.pin` unregisters in a GC finalizer that takes a `ReentrantLock`
-   (as does `AMDGPU.Mem.unpin`, which ROCExt's finalizer used to call). When
-   that lock is contended the finalizer throws "task switch not allowed from
-   inside gc finalizer", the unregistration is lost, and GC frees the memory
-   anyway: the range stays registered with the driver, and a later
-   allocation at that address fails to register or is DMA'd through stale
-   pages. Multi-GPU GEMM segfaulted a few iterations in, with a backtrace
-   that blew the stack while printing (`jl_static_show` recursion) and showed
-   nothing of the cause; the "error in running finalizer" lines before it
-   were the only clue. (On ROCm, 2-GPU Datadeps tests segfaulted the same
-   way, inside `hipMemcpyWithStream`.) CUDAExt's and ROCExt's `pin_buffer!`
-   now register buffers themselves, and their finalizers only `trylock`,
-   re-arming themselves on contention (which keeps the buffer alive until a
-   later GC can unregister it). Anything that must run before
-   memory is freed has to be finalizer-safe: no blocking locks, no yields.
-
-75. **Two GPUs without peer access: never let CUDA.jl stage the copy.**
-   Without P2P, `copyto!` between devices goes through a fresh *pageable*
-   `Vector` with a synchronous DtoH: 1.4 GB/s on PCIe-attached L40S, where
-   `cuMemcpyPeerAsync` (which works without peer access; the driver pipelines
-   it through its own pinned buffers) reached 22 GB/s. A 4-GPU GEMM spent
-   27 s per call in copies. Check `can_access_peer` before assuming a copy
-   path is cheap, and measure the copy primitive in isolation first -- it
-   took one 30-line script to find a 15x. (HIP does not stage this way:
-   between two RX 6900 XTs without peer access, AMDGPU's `copyto!` and
-   `hipMemcpyPeerAsync` both reached ~5.5 GB/s, vs 1.4 GB/s through a
-   pageable host buffer, and `copyto!` blocks until the copy is done.)
-
-76. **One stream per device serializes every transfer with that device's
-   compute.** Copies enqueued on the device stream wait behind its kernels,
-   and an event recorded on the *source's* stream waits for kernels that
-   merely read the data being sent (a GEMM's panel owner is busy reading the
-   panel it is asked to send). Peer copies now run on a per-device copy stream
-   ordered only against the allocations they touch (`BUFFER_EVENTS`, fed by
-   Datadeps' `writes` option), and are host-synced so every existing
-   synchronization point stays valid; 4-GPU GEMM went from ~3.9 s to ~3.1 s.
-   (ROCExt does the same with HIP events and `hipMemcpyPeerAsync`.)
-   Bookkeeping keyed by address outlives the allocation: a peer copy's
-   "already complete, skip the next write" flag, left on short-lived packing
-   buffers, swallowed the first write to the next allocation at that address,
-   and a later copy out of it read stale data. Name the task the skip is for
-   (`filled_by`), or keep entries to plain events.
-   Two traps found on the way: Datadeps spawns copy tasks `meta`, so
-   `execute!` sees `Chunk`s, not arrays (unwrap before classifying, or every
-   copy looks like an opaque argument and falls back to whole-stream waits);
-   and `unsafe_free!` tasks hand you a freed array (check `data.freed`).
-
-77. **Resolve optional GPU packages before loading test dependencies or starting
+91. **Resolve optional GPU packages before loading test dependencies or starting
    workers.** `Pkg.add` of a GPU backend can change shared packages such as
    LLVM, Atomix and GPUArraysCore. If Dagger or its test imports have already
    loaded them, Julia keeps the old modules while GPUCompiler expects the new
@@ -1180,7 +1090,7 @@ lesson.
    Install optional packages first, then start workers with
    `Base.active_project()` so every process uses the same resolved environment.
 
-78. **Level Zero IPC handles cannot be serialized between processes.** Intel's
+92. **Level Zero IPC handles cannot be serialized between processes.** Intel's
    opaque `ze_ipc_mem_handle_t` includes a process-local file descriptor.
    MPI's serialized metadata copies the descriptor number, not its underlying
    resource, so `zeMemOpenIpcHandle` fails with `ZE_RESULT_ERROR_INVALID_ARGUMENT`
@@ -1190,7 +1100,7 @@ lesson.
    `DAGGER_IPC=1` cannot supply the missing descriptor. See
    https://github.com/intel/compute-runtime/issues/448.
 
-79. **ROCm Distributed tests need a spare Julia thread for host calls.**
+93. **ROCm Distributed tests need a spare Julia thread for host calls.**
    AMDGPU's persistent host-call tasks poll HSA signals with
    `Libc.systemsleep` and `yield`, which can monopolize a sticky task's only
    thread (lesson 12). With one default thread the GPU suite stopped making
@@ -1200,7 +1110,7 @@ lesson.
    default threads in ROCm CI. Increasing only the driver's thread count
    leaves remote workers exposed to the same starvation.
 
-80. **GPU event tracking must check a chunk's acceleration ownership.**
+94. **GPU event tracking must check a chunk's acceleration ownership.**
    `root_worker_id(::MPIRef)` and MPI processors intentionally return `myid()`
    on every rank; Distributed's worker-id test therefore calls every MPI chunk
    local. A GPU copy task executes on both endpoint ranks, and recording its
@@ -1210,7 +1120,7 @@ lesson.
    The existing cross-rank GPU dataflow tests exercise both endpoints; a
    Distributed-only suite cannot catch this mistake.
 
-81. **Reduce apparent GPU ordering failures below Julia before adding fences.**
+95. **Reduce apparent GPU ordering failures below Julia before adding fences.**
    This host's Ryzen 9600X `gfx1036` GPU with HIP 7.2 returns zeros after an
    asynchronous kernel or device copy followed by a short pause, even when
    the same stream is synchronized before reading. A native HIP C++ program
@@ -1223,7 +1133,7 @@ lesson.
    they are not a valid configuration for performance measurements.
 
 
-82. **oneMKL queue interop can fail below Dagger on Intel Xe2 GPUs.**
+96. **oneMKL queue interop can fail below Dagger on Intel Xe2 GPUs.**
    With oneAPI.jl 2.9.2 and its 2025.3 support libraries, this Arc Pro B60's
    default Level Zero v2 adapter aborts with
    `UR_RESULT_ERROR_UNSUPPORTED_FEATURE` when SYCL wraps a native Level Zero
@@ -1233,7 +1143,7 @@ lesson.
    separately from Dagger scheduling and record the adapter used in validation.
 
 
-83. **A passing GPU suite does not certify dependency finalizers.**
+97. **A passing GPU suite does not certify dependency finalizers.**
    Julia logs finalizer exceptions without failing the suite or its exit code.
    AMDGPU 2.8.0's `src/cache.jl` `library_state` accepts a `destroy_handle`
    callback but its task finalizer calls undefined `destroy_handle!`, producing
@@ -1242,7 +1152,7 @@ lesson.
    owning package before changing Dagger's task or GPU resource lifecycle.
 
 
-84. **Installing an external GPU compiler is not the same as selecting it.**
+98. **Installing an external GPU compiler is not the same as selecting it.**
    GPUCompiler 1.23 defaults `GCNCompilerTarget.backend` to `:external` only
    when `AMDGPU_LLVM_Backend_jll` is already loaded, not merely installed.
    AMDGPU 2.1 on Julia 1.11 otherwise uses the embedded LLVM backend, which
@@ -1252,7 +1162,7 @@ lesson.
    Load it on every ROCm test/benchmark worker before kernel compilation;
    adding it only to the driver's environment leaves remote codegen unchanged.
    Keep both comparison revisions on the same backend.
-12. **Never evaluate a scheduling change on a workload dominated by serial
+99. **Never evaluate a scheduling change on a workload dominated by serial
    submission.** Dagger's per-task submission cost is ~70-130us and the
    `add_thunk` path is largely *serial*, so a fine-grained workload measures
    submission overhead and nothing else — a scheduling or pipelining change
@@ -1266,7 +1176,7 @@ lesson.
    before locks are taken). This exact trap produced, and then reversed, a
    "asynchronous regions are slower" conclusion.
 
-13. **A per-dimension block divisor is exponential in the split dimensions.**
+100. **A per-dimension block divisor is exponential in the split dimensions.**
    `Blocks(N, cld(N,np), cld(N,np))` has `np^2` chunks, and a transpose
    between two such arrays costs `np^3` copy tasks. Sizing `np` by the
    processor count (correct only for a 1-D split) made one 3-D `fft()` submit
@@ -1277,10 +1187,50 @@ lesson.
    decomposition parameter is applied per-dimension, work out the total chunk
    count before assuming it scales the way you meant.
 
-14. **Allocate scratch arrays with `undef` when they are provably overwritten.**
+101. **Allocate scratch arrays with `undef` when they are provably overwritten.**
    `zeros(Blocks(...), T, dims)` costs a full write pass plus one task per
    chunk. For an intermediate that is fully covered by a later whole-array
    `copyto!` there is nothing to zero — but "fully covered" must be checked,
    not assumed: it holds when the destination's dims equal the source's
    exactly, so no `cld`-rounded edge block is left partially written. Doing
    this for the FFT's three pencil arrays cut RSS ~50% and wall time ~20%.
+
+102. **An interop hook must cover the actual submission entry points.**
+   Individual spawns resolve their queue in `_spawn` and call
+   `enqueue!(queue, pair)` directly; only bulk submissions reach
+   `enqueue!(pair)` / `enqueue!(pairs)`. Installing an interop hook solely
+   on the latter silently leaves individual spawns unordered against deferred
+   Datadeps work. A gated same-processor test can pass because the kernel
+   queue serializes both operations by coincidence. Restore disjoint views
+   from different workers, then read the original array in a plain spawn:
+   without the hook the sum was 0 or 12 instead of 40. Queue wrappers must
+   forward `datadeps_managed_queue` to avoid injecting interop dependencies
+   while Datadeps is already planning its own copies.
+
+103. **Structural AOT placement has no live replica state.**
+   `LayeredScheduler` calls `datadeps_schedule_task` with `state=nothing`
+   while building its structural schedule. RoundRobin's locality bias must
+   skip this case instead of calling `datadeps_locality_weights`, which
+   requires `DataDepsState`. One-process tests hide the bug because the
+   single-memory-space bypass skips locality too; a multi-process AOT suite
+   catches it immediately.
+
+104. **Connect the worker mesh before threaded peer RPCs on Julia 1.11.**
+   Distributed's lazy `wait_for_conn` waits on `Worker.c_state`, a plain
+   `Base.Condition` whose `AlwaysLockedST` belongs to its creation thread.
+   A first peer RPC from a Dagger copy on another Julia thread therefore
+   raises `ConcurrencyViolationError("lock must be held")` in Distributed,
+   even though no Dagger lock was dropped. Use `addprocs(...; lazy=false)`
+   for validation and benchmark fixtures so transport bootstrap is completed
+   before kernels execute; keep the active project and worker thread count
+   explicit too.
+
+105. **Testset RNG restoration makes random filenames repeat.**
+   `File` and `tofile` each generated their first absolute path with
+   `rand('a':'z', 8)` inside sibling testsets. Julia's Test restores RNG
+   state, so those paths were identical: both suites passed, then one exit
+   hook deleted the other's retained file and the second hook asserted.
+   Use `tempname(dir; cleanup=false)` for fixtures whose retention is checked
+   by an explicit exit hook; it provides unique paths independently of the
+   task RNG. Include the path in exit assertions so duplicate cleanup is
+   distinguishable from a storage-lifecycle failure.
