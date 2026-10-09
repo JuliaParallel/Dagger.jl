@@ -53,12 +53,12 @@ end
 
 const worker_exeflags = `--project=$(Base.active_project()) -t $nt`
 if np > 0
-    addprocs(np; exeflags=worker_exeflags)
+    addprocs(np; lazy=false, exeflags=worker_exeflags)
 end
 if haskey(ENV, "BENCHMARK_REMOTES")
     const remotes = split(ENV["BENCHMARK_REMOTES"], ":")
     if !isempty(remotes)
-        addprocs(remotes; exeflags=worker_exeflags)
+        addprocs(remotes; lazy=false, exeflags=worker_exeflags)
     end
 end
 
