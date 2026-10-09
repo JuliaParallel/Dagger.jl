@@ -1282,3 +1282,14 @@ lesson.
    fresh processes when necessary, and apply any driver mode equally to both
    benchmark revisions. Do not turn such an OOM into a Dagger allocation claim
    or lower compute-unit counts merely to under-allocate scratch.
+
+110. **A zero test exit status does not mean GPU handle finalizers succeeded.**
+   AMDGPU 2.1.0's `library_state` receives a `destroy_handle` callback, but its
+   task finalizer calls `destroy_handle!` in the AMDGPU module instead. That
+   binding does not exist. The full MPI GPU suite passed 459 assertions and
+   exited zero while stderr contained six finalizer `UndefVarError`s. A bounded
+   native probe without Dagger created three fake library handles with a
+   capacity-zero cache and explicitly finalized their tasks: both expected
+   destruction callbacks were lost to the same error. Audit finalizer output
+   separately, preserve the native reproducer, and classify this dependency
+   failure explicitly rather than treating assertion counts as a clean run.
