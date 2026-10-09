@@ -1556,11 +1556,50 @@ end
 end
 
 @testset "Dagger.synchronize" begin
-    # `sync=false` is only allowed to genuinely defer on the flat,
-    # non-uniform-execution path -- `hierarchical=true` (the default) and
-    # MPI/SPMD both force a synchronous trailing drain regardless (see the
-    # N.B. in `spawn_datadeps`). Every test below is written against that
-    # flat path explicitly.
+    # These scenarios select the flat path explicitly. Hierarchical and MPI
+    # deferred execution have additional coverage in their own test suites.
+
+    @testset "Empty regions preserve barriers" for hierarchical in (false, true), launch_wait in (false, true)
+        source = rand(16)
+        destination = zeros(16)
+        try
+            Dagger.spawn_datadeps(; hierarchical=false, sync=false) do
+                Dagger.@spawn copyto!(Out(destination), In(source))
+            end
+            @test !Dagger.issynchronized()
+            result = Dagger.spawn_datadeps(; hierarchical, launch_wait) do
+                :empty
+            end
+            @test result === :empty
+            @test Dagger.issynchronized()
+            @test destination == source
+        finally
+            Dagger.synchronize()
+        end
+    end
+
+    @testset "Empty regions report preceding failures" for hierarchical in (false, true), launch_wait in (false, true)
+        try
+            Dagger.spawn_datadeps(; hierarchical=false, sync=false) do
+                Dagger.@spawn error("empty region failure")
+            end
+            failure = try
+                Dagger.spawn_datadeps(() -> :empty; hierarchical, launch_wait)
+            catch err
+                err
+            end
+            @test failure isa Exception
+            if failure isa Exception
+                @test occursin("empty region failure", sprint(showerror, failure))
+            end
+            @test Dagger.issynchronized()
+        finally
+            try
+                Dagger.synchronize()
+            catch
+            end
+        end
+    end
 
     @testset "Pipelining across regions" begin
         # Three consecutive regions, none synchronized in between: region N+1's

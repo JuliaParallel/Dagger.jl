@@ -1293,3 +1293,15 @@ lesson.
    destruction callbacks were lost to the same error. Audit finalizer output
    separately, preserve the native reproducer, and classify this dependency
    failure explicitly rather than treating assertion counts as a clean run.
+
+111. **An empty region can skip planning, but it is still a barrier.**
+   Flat planning constructed a full state, object cache, and processor scopes
+   even when its task queue was empty. Skipping that work reduced a warmed
+   empty region from 322 allocations / 17,760 bytes to 90 / 4,688 after
+   removing the unrelated captured-result box. Keep the normal trailing drain:
+   an earlier deferred region can still own write-backs or failures that this
+   empty synchronous region must retire and report. Preserve MPI's uniform
+   planning collectives as well; a rank-local empty queue is not permission to
+   skip a collective that another rank might enter. Test prior writes and
+   errors across both hierarchy and bulk-launch settings, rather than only
+   checking that a standalone empty body returns.

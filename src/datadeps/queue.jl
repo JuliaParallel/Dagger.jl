@@ -200,6 +200,11 @@ function _spawn_datadeps(ddctx::DataDepsContext, f::Base.Callable, scheduler, la
             # local) so it shows up by name in stacktraces and profiles, which is
             # the boundary between region setup and the whole planning pipeline.
             function run_distribute(queue)
+                # An empty region has no DAG to plan, but the normal trailing
+                # drain below must still retire earlier deferred work. Keep
+                # MPI's uniform planning collectives even for empty regions.
+                isempty(queue.seen_tasks::Vector{DTaskPair}) &&
+                    !uniform_execution() && return nothing
                 # One aliasing memo per region: planning asks for the same chunks'
                 # aliasing info from Phase 1, from every slot, and from the write-back
                 # epilogue, and each answer costs a round-trip to the owner.
