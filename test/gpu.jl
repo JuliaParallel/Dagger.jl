@@ -22,6 +22,9 @@ include(joinpath(@__DIR__, "array", "linalg", "matvec_defs.jl"))
 end
 
 @everywhere begin
+    gpu_fixture_increment(x) = x + 1
+    gpu_fixture_sum(xs...) = [sum(xs)]
+
     function isongpu(X)
         return !(X isa Array)
     end
@@ -50,8 +53,8 @@ end
 end
 
 function generate_thunks()
-    as = [Dagger.spawn(x->x+1, 1) for i in 1:10]
-    Dagger.spawn((xs...)->[sum(xs)], as...)
+    as = [Dagger.spawn(gpu_fixture_increment, 1) for i in 1:10]
+    Dagger.spawn(gpu_fixture_sum, as...)
 end
 
 @test (!USE_CUDA || Dagger.gpu_can_compute(:CUDA)) &&
