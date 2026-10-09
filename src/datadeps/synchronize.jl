@@ -139,8 +139,8 @@ function flush_pending_writeback!(ddctx::DataDepsContext;
             sch_ctx = Sch.eager_context()
             if !(sch_ctx.log_sink isa TimespanLogging.NoOpLog)
                 id = rand(UInt)
-                timespan_start(sch_ctx, :datadeps_copy_skip, (;id), (;))
-                timespan_finish(sch_ctx, :datadeps_copy_skip, (;id), (;thunk_id=0, from_space=origin_space, to_space=origin_space, arg_w, from_arg=arg, to_arg=arg))
+                @logstart sch_ctx LogDatadepsCopySkip LogDatadepsCopySkipId(id) nothing
+                @logfinish sch_ctx LogDatadepsCopySkip LogDatadepsCopySkipId(id) (;thunk_id=0, from_space=origin_space, to_space=origin_space, arg_w, from_arg=arg, to_arg=arg)
             end
         end
     end
@@ -197,7 +197,8 @@ function flush_pending_frees!(ddctx::DataDepsContext)
             haskey(freed, remote_arg) && continue
             freed[remote_arg] = nothing
             free_syncdeps = Set{ThunkSyncdep}()
-            gather_free_syncdeps!(state, remote_space, ainfo, remote_arg, write_num, chunk_to_ainfos, free_syncdeps)
+            buf_ainfo = stored_value_ainfo(obj_cache, remote_space, ainfo)
+            gather_free_syncdeps!(state, remote_space, buf_ainfo, remote_arg, write_num, chunk_to_ainfos, free_syncdeps)
             Dagger.@spawn scope=free_scope syncdeps=free_syncdeps tag=datadeps_task_tag() Dagger.unsafe_free!(remote_arg)
         end
     end
