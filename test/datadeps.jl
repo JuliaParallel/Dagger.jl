@@ -1841,7 +1841,7 @@ end
             count_moves(logs) = count(
                 logs[w][:core][idx].category == :add_thunk &&
                 logs[w][:core][idx].kind == :start &&
-                logs[w][:taskfuncnames][idx] == "move!"
+                logs[w][:taskfuncnames][idx] in ("move!", "move_toplevel!")
                 for w in keys(logs) for idx in 1:length(logs[w][:core])
             )
 
