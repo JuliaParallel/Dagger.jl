@@ -228,7 +228,10 @@ if additional_workers > 0
     # complete even if doing nothing, which is annoying.
     # Pkg.test runs in a temporary environment. Workers must use that same
     # resolved environment, including GPU packages installed above.
-    addprocs(additional_workers; exeflags=`--project=$(Base.active_project()) -t $worker_threads`)
+    # Julia 1.11's lazy peer connection waits on a thread-local Condition.
+    # Connect the mesh before kernels start making RPCs from other threads.
+    addprocs(additional_workers; lazy=false,
+             exeflags=`--project=$(Base.active_project()) -t $worker_threads`)
 end
 
 include("imports.jl")

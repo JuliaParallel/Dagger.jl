@@ -21,7 +21,7 @@ import Dagger: DataDepsState, ArgumentWrapper, DTaskSpec, Argument,
     if nprocs() < 4
         @test_skip "Needs 4 processes (-p 3) for a 4-memory-space scenario"
     else
-        all_procs = [only(Dagger.get_processors(Dagger.OSProc(pid))) for pid in 1:4]
+        all_procs = [first(filter(p -> p isa Dagger.ThreadProc, collect(Dagger.get_processors(Dagger.OSProc(pid))))) for pid in 1:4]
         all_scope = UnionScope(map(ExactScope, all_procs))
         task_scope = all_scope
 
