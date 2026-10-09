@@ -794,3 +794,15 @@ lesson.
    an `UndefVarError` while the two-rank numerical suite passes all assertions.
    Check stderr as well as test counts, and attribute the callback to its
    owning package before changing Dagger's task or GPU resource lifecycle.
+
+
+84. **Installing an external GPU compiler is not the same as selecting it.**
+   GPUCompiler 1.23 defaults `GCNCompilerTarget.backend` to `:external` only
+   when `AMDGPU_LLVM_Backend_jll` is already loaded, not merely installed.
+   AMDGPU 2.1 on Julia 1.11 otherwise uses the embedded LLVM backend, which
+   computes wrong mixed-boundary indices on this `gfx1036` host despite
+   correct scalar arguments and valid-looking LLVM IR. Loading the external
+   LLVM 22 backend makes the unmodified kernel compute the correct indices.
+   Load it on every ROCm test/benchmark worker before kernel compilation;
+   adding it only to the driver's environment leaves remote codegen unchanged.
+   Keep both comparison revisions on the same backend.
