@@ -580,9 +580,9 @@ mutable struct RoundRobinScheduler <: DataDepsScheduler
     RoundRobinScheduler() = new(1, nothing, false)
 end
 Base.similar(::RoundRobinScheduler) = RoundRobinScheduler()
-# N.B. `state` is accepted but unused, and may be `nothing`: AOT planners
+# N.B. `state` may be `nothing`: structural AOT planners
 # (e.g. `LayeredScheduler`) reuse this to round-robin within a layer, and at
-# planning time no `DataDepsState` exists yet.
+# planning time no `DataDepsState` exists yet, so locality is skipped.
 function datadeps_schedule_task(sched::RoundRobinScheduler, state::Union{DataDepsState,Nothing}, all_procs, all_scope, task_scope, spec::DTaskSpec, task::DTask)
     # The rotation may have been advanced over a longer processor list than
     # this one: the AOT JIT fallback is one instance shared by every partition
@@ -632,7 +632,9 @@ function datadeps_schedule_task(sched::RoundRobinScheduler, state::Union{DataDep
     # as `locality_single_space`, not once per task) since `check_uniform` is
     # a collective under `CHECK_UNIFORMITY[]`.
     bias = DATADEPS_LOCALITY_BIAS[]
-    if bias > 0 && length(all_procs) > 1
+    # Structural AOT callers (LayeredScheduler) have no live replica state.
+    # Preserve their round-robin ordering rather than consulting locality.
+    if state !== nothing && bias > 0 && length(all_procs) > 1
         if sched.locality_procs !== all_procs
             sched.locality_procs = all_procs
             check_uniform(bias)
