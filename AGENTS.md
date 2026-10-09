@@ -1246,3 +1246,15 @@ lesson.
    functions instead of repeatedly shipping driver-only anonymous types. A
    missing deserialized method is not sufficient evidence of a Dagger scheduling
    bug; reduce it to the transport before changing execution ordering.
+
+107. **Intel's native page-fault handler can fail during Julia safepoints.**
+   On this Arc Pro B60 with oneAPI 2.9.2, NEO 26.18.38308 and Julia 1.11.9,
+   concurrent oneAPI GEMM/kernel compilation plus GC segfaulted without Dagger.
+   Full-suite backtraces entered `NEO::PageFaultManagerLinux` while Julia was
+   waiting at a JIT/GC safepoint, including a call to an invalid previous-handler
+   pointer. The exact native race is not established by that stack alone.
+   `NEOReadDebugKeys=1 AllocateSharedAllocationsWithCpuAndGpuStorage=0` passed
+   the standalone concurrent reproducer in two separate processes on this host.
+   Record that shared-allocation mode when using it for validation, apply it to
+   both comparison revisions, and keep it distinct from a production fix.
+   Do not introduce global Dagger fences to hide a crash reproducible below it.
