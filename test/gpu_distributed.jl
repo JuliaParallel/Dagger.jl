@@ -21,6 +21,39 @@ using Distributed, Dagger, LinearAlgebra, Test
     end
 end
 
+function test_gpu_deferred(s1, s2)
+    for hierarchical in (false, true)
+        A = reshape(Float32.(1:64), 8, 8)
+        reference = (A .+ 1f0) .* 2f0 .+ 1f0
+        Dagger.with_options(; scope=Dagger.UnionScope(s1, s2)) do
+            try
+                Dagger.spawn_datadeps(; hierarchical, sync=false) do
+                    Dagger.@spawn scope=s1 distributed_gpu_add!(Dagger.InOut(A))
+                end
+                Dagger.spawn_datadeps(; hierarchical, sync=false) do
+                    Dagger.@spawn scope=s2 distributed_gpu_scale!(Dagger.InOut(A))
+                end
+                Dagger.spawn_datadeps(; hierarchical, sync=false) do
+                    Dagger.@spawn scope=s1 distributed_gpu_add!(Dagger.InOut(A))
+                end
+                # The single-space hierarchical strategy drains eagerly.
+                if !hierarchical || s1 != s2
+                    @test !Dagger.issynchronized()
+                end
+                Dagger.synchronize(A)
+                @test A == reference
+            finally
+                Dagger.synchronize()
+            end
+            @test Dagger.issynchronized()
+        end
+    end
+end
+
+@testset "Deferred regions on one GPU ($kind)" for (kind, scope) in GPU_SCOPES
+    test_gpu_deferred(scope, scope)
+end
+
 function test_distributed_gpu(kind, gpu_key)
     ws = filter(!=(myid()), workers())
     @test length(ws) >= 2
@@ -35,6 +68,10 @@ function test_distributed_gpu(kind, gpu_key)
     @test p1 isa Dagger.gpu_processor(kind)
     @test p2 isa Dagger.gpu_processor(kind)
     scope = Dagger.UnionScope(s1, s2)
+
+    @testset "Deferred regions across workers" begin
+        test_gpu_deferred(s1, s2)
+    end
 
     @testset "GPU chunk transfers" begin
         # Include a size above the IPC threshold as well as small arrays.
@@ -138,7 +175,11 @@ end
     ((:CUDA, :cuda_gpu), (:ROC, :rocm_gpu), (:oneAPI, :intel_gpu),
      (:Metal, :metal_gpu), (:OpenCL, :cl_device))
     if Dagger.gpu_can_compute(kind)
-        test_distributed_gpu(kind, key)
+        if nprocs() >= 3
+            test_distributed_gpu(kind, key)
+        else
+            @test_skip "needs two Distributed workers"
+        end
     end
 end
 
