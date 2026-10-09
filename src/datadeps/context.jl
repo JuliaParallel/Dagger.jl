@@ -451,8 +451,9 @@ Drop the calling task's context if it has fully drained (see
 
 The common one-region-and-done caller (`sync=true`, the default) always ends
 up here with a drained context -- `_spawn_datadeps` runs the full drain
-trailing every region -- so it allocates no more than it did before this
-container existed: the context it briefly held is dropped again immediately.
+trailing every region -- and drops the context it briefly held immediately.
+Creating this container still costs allocations; dropping it bounds retention,
+not construction overhead.
 Under `sync=false`, a context can now outlive any single region, and this
 check is what stops it from being dropped (and re-registered from scratch)
 while there's still deferred work hanging off it.

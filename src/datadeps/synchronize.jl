@@ -468,10 +468,10 @@ function _do_synchronize!(ddctx::DataDepsContext;
     err_region = 0
     resolved_bt = nothing
     @lock ddctx.lock begin
-        # Steps 1-2. Hierarchical leaves `ddctx.state` undef and always runs
-        # its own write-back/free epilogue synchronously before
-        # `spawn_datadeps` returns (it forces `sync=true`), so there is
-        # nothing deferred to flush on that path.
+        # Steps 1-2. Flat and hierarchical shared-state planning publish
+        # deferred write-back/free work through `ddctx.state`. The hierarchical
+        # single-memory-space strategy can leave that field undef because it
+        # completes its own epilogue synchronously.
         #
         # `flush_pending_writeback!`/`flush_pending_frees!` allocate tags
         # (`datadeps_task_tag()` -> `to_tag()`) and issue `check_uniform`
@@ -492,13 +492,10 @@ function _do_synchronize!(ddctx::DataDepsContext;
             end
         end
 
-        # Step 3: quiesce planning queues. Nothing in this phase persists a
-        # `BatchedEnqueueQueue`/`AsyncEnqueueQueue` past its own
-        # `distribute_tasks_hierarchical!` call -- hierarchical always
-        # finishes its own epilogue before `_spawn_datadeps` returns, since it
-        # forces `sync=true` -- so there is nothing to quiesce here yet. This
-        # becomes real once hierarchical planning is allowed to outlive a
-        # region.
+        # Step 3: planning queues have already published their tasks before
+        # `distribute_tasks_hierarchical!` returns. Deferred execution and
+        # epilogues are represented by `inflight` and the pending work above;
+        # no submission queue persists for this drain to quiesce.
 
         # Step 4: wait for everything in flight. Only the *first* failure is
         # recorded, attributed via `task_region` to the region that actually

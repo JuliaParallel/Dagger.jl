@@ -266,8 +266,9 @@ const DATADEPS_HIERARCHICAL = ScopedValue{Union{Bool,Nothing}}(nothing)
 Default for `spawn_datadeps`'s `sync` keyword: `true` reproduces today's full
 per-region barrier; `false` lets consecutive regions pipeline, deferring
 write-back, frees, and waiting to a later `Dagger.synchronize`-family call.
-Overridable per-call via the `sync` keyword; both are overridden to `true`
-under `hierarchical=true` or MPI/SPMD execution regardless (see
+Overridable per-call via the `sync` keyword, including hierarchical and
+MPI/SPMD execution. The hierarchical single-memory-space strategy still drains
+synchronously; its shared-state strategy can defer the epilogue (see
 `spawn_datadeps`).
 """
 const DATADEPS_SYNC = ScopedValue{Union{Bool,Nothing}}(nothing)
