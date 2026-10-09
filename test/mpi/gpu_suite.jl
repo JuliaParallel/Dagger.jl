@@ -193,6 +193,33 @@ end
     end
 end
 
+@testset "Deferred GPU regions, hierarchical=$hierarchical" for hierarchical in (false, true)
+    A = reshape(elt.(1:64), 8, 8)
+    reference = (A .+ 1) .* 2 .+ 1
+    r1 = min(1, nranks-1)
+    Dagger.with_options(; scope=mixed_scope()) do
+        try
+            Dagger.spawn_datadeps(; hierarchical, sync=false) do
+                Dagger.@spawn scope=gpu_scope(r1) add1!(InOut(A))
+            end
+            Dagger.spawn_datadeps(; hierarchical, sync=false) do
+                Dagger.@spawn scope=gpu_scope(0) scale2!(InOut(A))
+            end
+            Dagger.spawn_datadeps(; hierarchical, sync=false) do
+                Dagger.@spawn scope=gpu_scope(r1) add1!(InOut(A))
+            end
+            @test !Dagger.issynchronized()
+            Dagger.synchronize(A)
+            if rank == 0
+                @test A == reference
+            end
+        finally
+            Dagger.synchronize()
+        end
+        @test Dagger.issynchronized()
+    end
+end
+
 if get(cfg, :subarray_depmod, false)
     @testset "GPU SubArray + dep_mod dataflow" begin
         # View remainders and non-identity dep_mods exercise multi-span KA pack
