@@ -4,6 +4,7 @@
 # Run (env must provide Dagger, MPI, AMDGPU; see test/rocmenv):
 #   mpiexec -n 2 julia --project=test/rocmenv --threads=2 test/mpi/rocm.jl
 
+using AMDGPU_LLVM_Backend_jll
 using Dagger, MPI, AMDGPU, LinearAlgebra, Random, Test
 using Dagger: In, Out, InOut, Deps
 

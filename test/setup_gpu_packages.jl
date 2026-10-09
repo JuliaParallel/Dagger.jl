@@ -6,7 +6,7 @@ if USE_CUDA
 end
 if USE_ROCM
     using Pkg
-    Pkg.add("AMDGPU")
+    Pkg.add(["AMDGPU", "AMDGPU_LLVM_Backend_jll"])
 end
 if USE_ONEAPI
     using Pkg

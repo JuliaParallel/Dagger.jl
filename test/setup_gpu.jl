@@ -7,6 +7,8 @@
     end
 
     if $USE_ROCM
+        # Use modern AMD codegen even when the environment resolves AMDGPU 2.1.
+        using AMDGPU_LLVM_Backend_jll
         using AMDGPU
     elseif !$IN_CI
         try using AMDGPU
