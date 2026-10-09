@@ -7,9 +7,11 @@ using Serialization
         dir_abs = tempdir()
         dir_rel = splitpath(mktempdir(pwd()))[end]
         for dir in [dir_abs, dir_rel]
-            data_path = joinpath(dir, "jl_" * join(rand('a':'z', 8)) * ".jls")
+            # Testsets restore RNG state, so random names can collide between
+            # File and tofile. Leave cleanup to the retention assertion below.
+            data_path = tempname(dir; cleanup=false)
             atexit() do
-                @assert isfile(data_path)
+                @assert isfile(data_path) "Retained File disappeared: $(abspath(data_path))"
                 rm(data_path)
             end
             serialize(data_path, data)
@@ -27,9 +29,9 @@ using Serialization
         dir_abs = tempdir()
         dir_rel = splitpath(mktempdir(pwd()))[end]
         for dir in [dir_abs, dir_rel]
-            data_path = joinpath(dir, "jl_" * join(rand('a':'z', 8)) * ".jls")
+            data_path = tempname(dir; cleanup=false)
             atexit() do
-                @assert isfile(data_path)
+                @assert isfile(data_path) "Retained tofile disappeared: $(abspath(data_path))"
                 rm(data_path)
             end
 
