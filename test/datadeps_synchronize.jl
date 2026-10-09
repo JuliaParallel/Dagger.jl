@@ -65,6 +65,44 @@ sync_fail!(X) = error("deliberate failure")
 
 @testset "Targeted synchronize" begin
 
+@testset "Overlap lookup expands a logical copy writer" begin
+    A = zeros(Int, 8)
+    state = Dagger.DataDepsState()
+    ainfo = Dagger.AliasingWrapper(Dagger.aliasing(A))
+    push!(state.ainfos_lookup, ainfo)
+    copies = Dagger.DTask[Dagger.@spawn(identity(i)) for i in 1:2]
+    foreach(wait, copies)
+    state.ainfos_owner[ainfo] = Dagger.CopyBatchOwner(copies) => 1
+    # No reader entries: they must not hide an omitted physical writer.
+    out = IdDict{Dagger.DTask,Nothing}()
+    Dagger.gather_overlap_tasks!(state, ainfo, out)
+    @test length(out) == 2
+    @test all(task -> haskey(out, task), copies)
+    empty!(out)
+    state.ainfos_owner[ainfo] = first(copies) => 2
+    Dagger.gather_overlap_tasks!(state, ainfo, out)
+    @test collect(keys(out)) == [first(copies)]
+end
+
+@testset "Targeted synchronize waits for a multi-source remainder" begin
+    if length(procs()) >= 3
+        A = zeros(Int, 8)
+        left, right = view(A, 1:4), view(A, 5:8)
+        Dagger.spawn_datadeps(; hierarchical=false, sync=false) do
+            Dagger.@spawn scope=Dagger.scope(worker=2) fill!(Out(left), 3)
+            Dagger.@spawn scope=Dagger.scope(worker=3) fill!(Out(right), 7)
+            Dagger.@spawn scope=LOCAL_SCOPE sum(In(A))
+        end
+        state = Dagger.DATADEPS_CONTEXT[].state
+        @test any(owner -> owner !== nothing && owner[1] isa Dagger.CopyBatchOwner,
+                  values(state.ainfos_owner))
+        Dagger.synchronize(A)
+        @test A == [fill(3, 4); fill(7, 4)]
+        Dagger.synchronize()
+        @test A == [fill(3, 4); fill(7, 4)]
+    end
+end
+
 @testset "Bare synchronize with no context is a no-op" begin
     # Precondition for everything below: a stray context from another testset
     # would make "still in flight" checks meaningless.
