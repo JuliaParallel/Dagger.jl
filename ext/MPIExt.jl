@@ -1105,8 +1105,22 @@ function recv_yield_inplace!(array::DenseArray, comm, my_rank, their_rank, tag)
 end
 recv_yield_inplace!(array::Array, comm, my_rank, their_rank, tag) =
     _recv_yield_inplace_raw!(array, comm, my_rank, their_rank, tag)
+const MPI_POLL_SPIN_ITERS = 256
+
+# A sticky task's yield() only revisits its local queue. Eventually park it
+# so spawned producers and GPU synchronization callbacks can run as well.
+@inline function mpi_poll_pause(polls::Int)
+    if polls == MPI_POLL_SPIN_ITERS - 1
+        sleep(0.0001)
+        return 0
+    end
+    yield()
+    return polls + 1
+end
+
 function _recv_yield_inplace_raw!(array, comm, my_rank, their_rank, tag)
     timer = DeadlockTimer()
+    polls = 0
 
     while true
         (got, msg, stat) = MPI.Improbe(their_rank, tag, comm, MPI.Status)
@@ -1122,7 +1136,7 @@ function _recv_yield_inplace_raw!(array, comm, my_rank, their_rank, tag)
             return array
         end
         timer = mpi_deadlock_detect(timer, my_rank, tag, "recv", their_rank)
-        yield()
+        polls = mpi_poll_pause(polls)
     end
 end
 
@@ -1135,6 +1149,7 @@ end
 
 function recv_yield_serialized(comm, my_rank, their_rank, tag)
     timer = DeadlockTimer()
+    polls = 0
 
     while true
         (got, msg, stat) = MPI.Improbe(their_rank, tag, comm, MPI.Status)
@@ -1149,7 +1164,7 @@ function recv_yield_serialized(comm, my_rank, their_rank, tag)
             return MPI.deserialize(buf)
         end
         timer = mpi_deadlock_detect(timer, my_rank, tag, "recv", their_rank)
-        yield()
+        polls = mpi_poll_pause(polls)
     end
 end
 
@@ -1230,6 +1245,7 @@ end
 
 function __wait_for_request(req, comm, my_rank, their_rank, tag, fn::String, kind::String)
     timer = DeadlockTimer()
+    polls = 0
     while true
         finish, status = MPI.Test(req, MPI.Status)
         if finish
@@ -1242,7 +1258,7 @@ function __wait_for_request(req, comm, my_rank, their_rank, tag, fn::String, kin
             return
         end
         timer = mpi_deadlock_detect(timer, my_rank, tag, kind, their_rank)
-        yield()
+        polls = mpi_poll_pause(polls)
     end
 end
 
@@ -1514,8 +1530,8 @@ end
 # message of the next one.
 const BCAST_RELAY_SPIN_ITERS = 4096
 const BCAST_RELAY_IDLE_SLEEP = 1e-4
-# Heartbeat cadence once idle, counted in backoff iterations: at ~150us apiece
-# this wakes blocked consumers roughly every 150ms, which is fine granularity
+# Heartbeat cadence once idle, counted in backoff iterations: at Julia's 1ms
+# timer resolution this wakes blocked consumers roughly every second, enough
 # for a 10s warn / 120s error timer and costs nothing when nobody is waiting.
 const BCAST_RELAY_HEARTBEAT_ITERS = 1000
 
@@ -1528,30 +1544,19 @@ function bcast_relay_loop(state::BcastState)
     rank = MPI.Comm_rank(comm)
     sz = MPI.Comm_size(comm)
     idle = 0
-    # Backing off means blocking the OS thread, which only gives time back to
-    # anyone else if this rank has another thread to run them on. On a
-    # single-threaded rank it would instead starve the very tasks the relay
-    # exists to serve, so there we keep the pure `yield()` loop.
-    may_backoff = Threads.nthreads() > 1
+    # Park the task, including on one-thread ranks. Sleeping the OS thread
+    # followed by yield() leaves a sticky relay in its local queue forever,
+    # so neither spawned work nor libuv callbacks get a chance to run.
     while state.running[]
         try
             MPI.Finalized() && break
             got, msg, stat = MPI.Improbe(MPI.ANY_SOURCE, MPI.ANY_TAG, comm, MPI.Status)
             if !got
                 idle += 1
-                if idle <= BCAST_RELAY_SPIN_ITERS || !may_backoff
+                if idle <= BCAST_RELAY_SPIN_ITERS
                     yield()
                 else
-                    # N.B. `Libc.systemsleep`, not `sleep`: `sleep` parks the
-                    # task on a libuv timer, which only fires when some thread
-                    # reaches the scheduler's idle loop. A rank whose other
-                    # thread is inside a blocking `ccall` has no such thread, so
-                    # the relay could stay asleep exactly when it is needed
-                    # most. Sleeping the thread outright cannot be starved that
-                    # way, and 100us is short enough that the GC-unsafe window
-                    # it opens is irrelevant.
-                    Libc.systemsleep(BCAST_RELAY_IDLE_SLEEP)
-                    yield()
+                    sleep(BCAST_RELAY_IDLE_SLEEP)
                 end
                 # Nothing is arriving, which is exactly when a stalled consumer
                 # needs its deadlock timer re-checked -- and the relay is the

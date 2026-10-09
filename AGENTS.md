@@ -1317,3 +1317,17 @@ lesson.
    exits. Reject the incomplete result plan as well: this run returned 41 of 46
    leaves after restart. Fresh per-suite/per-tile jobs must keep all requested
    leaves, warmups, samples, and placements while reducing accumulated memory.
+
+113. **Sleeping an OS thread does not park a sticky polling task.**
+   MPI's receive/request loops used unbounded `yield()`, and the broadcast
+   relay backed off with `Libc.systemsleep` followed by `yield()`. Both leave
+   a sticky task in its thread-local queue, starving spawned producers even
+   though the relay appears to sleep (lesson 12). An isolated `COMM_SELF`
+   probe pinned a receive to every default thread: a spawned sender never
+   started until the interactive coordinator manually released the receivers.
+   Bounded yielding followed by Julia `sleep` lets it start before release;
+   the same rule applies on one-thread ranks. Test serialized receives, raw
+   receives, pending requests, and idle relays with the coordinator on an
+   interactive thread, and observe progress before freeing a default thread.
+   The test sender must also wait cooperatively: blocking `MPI.Waitall` can
+   occupy the very thread its pinned receiver needs to complete the request.

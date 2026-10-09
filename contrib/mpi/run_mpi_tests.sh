@@ -71,6 +71,14 @@ else
     fail "mpi"
 fi
 
+# A separate interactive coordinator observes progress while sticky polling
+# tasks occupy every default thread. Keep the normal suites' thread layout.
+if THREADS="${THREADS%%,*},1" run_mpi "mpi_polling" "${N}" "${DAGGER_DIR}" "${DAGGER_DIR}/test/mpi/polling.jl"; then
+    pass "mpi_polling"
+else
+    fail "mpi_polling"
+fi
+
 # Deferred regions use separate Julia processes so their context and tag state
 # cannot leak between suites.
 for suite in async hierarchical_async; do
