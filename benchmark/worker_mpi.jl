@@ -129,8 +129,10 @@ function run_mpi_benchmark(bench::BenchmarkTools.Benchmark)
         end
     end
 
-    wait(MPI.Ibarrier(comm))
-    sample!(BenchmarkTools.Parameters(params; evals=1))
+    for _ in 1:bench_warmups
+        wait(MPI.Ibarrier(comm))
+        sample!(BenchmarkTools.Parameters(params; evals=1))
+    end
 
     trial = BenchmarkTools.Trial(params)
     params.gctrial && BenchmarkTools.gcscrub()

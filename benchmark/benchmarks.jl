@@ -103,6 +103,8 @@
 #   Defaults to "0" (disabled; plain subprocess, worker.jl).
 # - BENCHMARK_SECONDS: Time budget (seconds) per benchmark. Defaults to "30".
 # - BENCHMARK_SAMPLES: Max samples per benchmark. Defaults to "7".
+# - BENCHMARK_WARMUPS: Untimed calls before sampling, with setup/teardown on
+#   each call. Defaults to "1"; use "10" for steady-state allocation checks.
 # - BENCHMARK_PROC_TIMEOUT: Wall-clock seconds to wait for a single benchmark
 #   before assuming the worker is wedged, killing it, and treating it like an
 #   OOM (skip this and larger scales, restart). Defaults to "3600".

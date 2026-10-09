@@ -128,6 +128,8 @@ end
 
 const bench_seconds = parse(Float64, get(ENV, "BENCHMARK_SECONDS", "30"))
 const bench_samples = parse(Int, get(ENV, "BENCHMARK_SAMPLES", "7"))
+const bench_warmups = parse(Int, get(ENV, "BENCHMARK_WARMUPS", "1"))
+bench_warmups >= 1 || error("BENCHMARK_WARMUPS must be at least 1")
 
 # Uniformity checks hash and compare planning values across MPI ranks. Keep the
 # production default for performance measurements; functional MPI tests enable

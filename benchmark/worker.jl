@@ -166,7 +166,16 @@ function serve(bench_by_path, workdir)
         bench = bench_by_path[kp]
         @info "[worker] Running: $(join(kp, " / "))"
         try
-            trial = with_benchmark_scope(() -> BenchmarkTools.run(bench))
+            trial = with_benchmark_scope() do
+                if bench_warmups > 1
+                    # The measured run adds the final warmup itself. Discard
+                    # this trial so cache population stays outside samples.
+                    for _ in 1:(bench_warmups - 1)
+                        BenchmarkTools.run(bench; warmup=false, samples=1)
+                    end
+                end
+                BenchmarkTools.run(bench)
+            end
             BenchmarkTools.save(joinpath(workdir, "result_$(id).json"), trial)
             atomic_write(resppath, JSON3.write((; status="ok")))
         catch err
