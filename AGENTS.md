@@ -1258,3 +1258,14 @@ lesson.
    Record that shared-allocation mode when using it for validation, apply it to
    both comparison revisions, and keep it distinct from a production fix.
    Do not introduce global Dagger fences to hide a crash reproducible below it.
+
+108. **MPI launchers can change which C++ runtime ROCm loads.**
+   AMDGPU loaded on the driver, but MPI-launched ranks failed before any tests:
+   `/opt/rocm/lib/libhsa-runtime64.so.1` required `CXXABI_1.3.15`, while the
+   selected Julia 1.11.9 bundled `libstdc++.so.6` lacked it. Loading the external
+   AMD compiler did not resolve this separate loader failure. On this host,
+   `LD_PRELOAD=/usr/lib/libstdc++.so.6` selected the newer system runtime and
+   passed both a two-rank native allocation/copy probe and the full ROCm MPI
+   suite (232/227 assertions). Validate through the actual MPI launcher,
+   record the selected library, and apply the same loader setting to both
+   benchmark revisions rather than changing Dagger's communication paths.
