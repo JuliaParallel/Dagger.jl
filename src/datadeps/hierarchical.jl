@@ -447,6 +447,7 @@ function report_hier_stats(ntasks::Int, nargs::Int, npartitions::Int)
     slot_ns = UInt64(0); slot_count = 0
     moved_ns = UInt64(0); moved_count = 0
     samespace_ns = UInt64(0); samespace_count = 0
+    reused_ns = UInt64(0); reused_count = 0
     # Per-event durations (ns), for distribution rather than just totals.
     slot_samples = Dict{Symbol,Vector{UInt64}}()
     for ev in TimespanLogging.steal_typed(LogHierSlot)
@@ -458,6 +459,8 @@ function report_hier_stats(ntasks::Int, nargs::Int, npartitions::Int)
             moved_ns += d; moved_count += 1
         elseif kind === :samespace
             samespace_ns += d; samespace_count += 1
+        elseif kind === :reused
+            reused_ns += d; reused_count += 1
         end
     end
 
@@ -474,6 +477,7 @@ function report_hier_stats(ntasks::Int, nargs::Int, npartitions::Int)
              prescan_ns=ns(:prescan), aliasing_ns=ns(:aliasing), dag_ns=ns(:dag),
              partition_ns=ns(:partition), schedule_ns=ns(:schedule), epilogue_ns=ns(:epilogue),
              slot_ns, slot_count, moved_ns, moved_count, samespace_ns, samespace_count,
+             reused_ns, reused_count,
              ainfo_ns, ainfo_count, samples=slot_samples)
     LAST_HIER_STATS[] = stats
     HIER_TIMING_REPORT[] && _print_hier_stats(stats)
@@ -490,7 +494,7 @@ function _print_hier_stats(stats)
       phase 1 aliasing  $(ms(stats.aliasing_ns)) ms  ($(stats.ainfo_count) ainfos, $(ms(stats.ainfo_ns)) ms in aliasing())
       phase 2 dag       $(ms(stats.dag_ns)) ms
       phase 3 partition $(ms(stats.partition_ns)) ms
-      phase 4 schedule  $(ms(stats.schedule_ns)) ms  ($(stats.slot_count) slots, $(ms(stats.slot_ns)) ms, of which $(stats.moved_count) moved data in $(ms(stats.moved_ns)) ms, $(stats.samespace_count) of those within one space in $(ms(stats.samespace_ns)) ms)
+      phase 4 schedule  $(ms(stats.schedule_ns)) ms  ($(stats.slot_count) slots, $(ms(stats.slot_ns)) ms, of which $(stats.moved_count) moved data in $(ms(stats.moved_ns)) ms, $(stats.samespace_count) of those within one space in $(ms(stats.samespace_ns)) ms; $(stats.reused_count) reused in $(ms(stats.reused_ns)) ms)
       epilogue          $(ms(stats.epilogue_ns)) ms"""
     return nothing
 end

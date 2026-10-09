@@ -719,7 +719,7 @@ region's own decisions should feed back into the next one.
 
 !!! warning "Not usable under uniform (SPMD/MPI) execution"
     `estimate_task_costs` ranks processors using per-rank measurements
-    (`signature_time_cost`, `worker_transfer_rate`, chunk `datasize`) and
+    (runtime estimates, `worker_transfer_rate`, chunk `datasize`) and
     breaks ties with `randperm!`. Under uniform execution every rank must
     reach an *identical* placement decision or the emitted transfers -- and
     hence the MPI tag sequence -- diverge, which deadlocks rather than
@@ -848,7 +848,7 @@ end
 # Nanoseconds of predicted delay per byte that `UltraScheduler` would have to
 # move into a candidate memory space. `Sch.DEFAULT_TRANSFER_RATE` is documented
 # (and populated, from `metadata.transfer_rate`) as bytes per *second*, so
-# converting to the nanoseconds `signature_time_cost` speaks costs a factor of
+# converting to the nanoseconds the runtime estimates use costs a factor of
 # 1e9.
 #
 # That factor is the whole fix. The original `UltraScheduler` wrote
@@ -916,8 +916,8 @@ coming, and also why it is the only one of the three carrying per-region
 mutable state (hence the `Base.similar` specialization: hierarchical
 partitions must each get their own shard, see `hierarchical.jl`).
 
-Runtimes come from the main scheduler's `signature_time_cost` table, which is
-empty until a signature has actually executed once. Every task in a cold
+Runtimes come from the shared `CostSummary`, which retains per-signature
+estimates independently of the bounded metrics sample cache. Every task in a cold
 region therefore costs the same placeholder and placement degenerates to
 "balance the task counts, prefer whoever already holds the data" -- which is
 the best available answer at that point, not a failure mode.
@@ -996,7 +996,7 @@ Builds the signature from the *raw* argument values rather than
 argument through `chunktype`, and `chunktype(c::Chunk) = c.chunktype` -- the
 type of what the chunk *holds* -- so a raw `Vector{Float64}` and a `Chunk`
 wrapping one produce the identical `Signature`, and hence hit the identical
-entry in `signature_time_cost` that the real (chunk-argument) execution
+entry in the cost summary that the real (chunk-argument) execution
 populates. The wrapping was therefore pure cost: one `tochunk` per argument
 per task, each allocating a `DRef` in MemPool that nothing ever reads.
 
@@ -1100,7 +1100,7 @@ function datadeps_schedule_task(sched::UltraScheduler, state::DataDepsState, all
     end
 
     # N.B. Under uniform (SPMD/MPI) execution every task is costed at the
-    # placeholder instead of its measured runtime. `signature_time_cost` is
+    # placeholder instead of its measured runtime. The cost summary is
     # filled from each rank's *own* completed tasks, so it is the one input
     # here that genuinely differs per rank -- `datadeps_tracked_args` already
     # returns nothing under uniform execution, and every remaining tie-break
