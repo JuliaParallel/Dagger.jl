@@ -212,7 +212,7 @@ end
             @testset "Add new workers" begin
                 ps = []
                 try
-                    ps1 = addprocs(2, exeflags=`--project=$(Base.active_project())`)
+                    ps1 = addprocs(2; lazy=false, exeflags=`--project=$(Base.active_project())`)
                     append!(ps, ps1)
 
                     @everywhere vcat(ps1, myid()) $setup
@@ -227,10 +227,10 @@ end
                     end
 
                     # Will not be added, so they should never appear in output
-                    ps2 = addprocs(2, exeflags=`--project=$(Base.active_project())`)
+                    ps2 = addprocs(2; lazy=false, exeflags=`--project=$(Base.active_project())`)
                     append!(ps, ps2)
 
-                    ps3 = addprocs(2, exeflags=`--project=$(Base.active_project())`)
+                    ps3 = addprocs(2; lazy=false, exeflags=`--project=$(Base.active_project())`)
                     append!(ps, ps3)
                     @everywhere ps3 $setup
                     addprocs!(ctx, ps3)
@@ -254,7 +254,7 @@ end
             #=@testset "Remove workers" begin
                 ps = []
                 try
-                    ps1 = addprocs(4, exeflags=`--project=$(Base.active_project())`)
+                    ps1 = addprocs(4; lazy=false, exeflags=`--project=$(Base.active_project())`)
                     append!(ps, ps1)
 
                     @everywhere vcat(ps1, myid()) $setup
@@ -313,7 +313,7 @@ end
             @testset "Remove all workers throws" begin
                 ps = []
                 try
-                    ps1 = addprocs(2, exeflags=`--project=$(Base.active_project())`)
+                    ps1 = addprocs(2; lazy=false, exeflags=`--project=$(Base.active_project())`)
                     append!(ps, ps1)
 
                     @everywhere vcat(ps1, myid()) $setup

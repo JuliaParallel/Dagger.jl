@@ -1,5 +1,5 @@
 @testset "Chunk Scopes" begin
-    wid1, wid2 = addprocs(2, exeflags=["-t2", "--project=$(Base.active_project())"])
+    wid1, wid2 = addprocs(2; lazy=false, exeflags=["-t2", "--project=$(Base.active_project())"])
     @everywhere [wid1,wid2] using Dagger
     Dagger.addprocs!(Dagger.Sch.eager_context(), [wid1,wid2])
     fetch(Dagger.@spawn 1+1) # Force scheduler to pick up new workers
