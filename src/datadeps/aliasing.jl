@@ -1204,6 +1204,14 @@ function gather_overlap_syncdeps!(state::DataDepsState, ainfo::AliasingWrapper, 
     end
 end
 
+@inline append_producer_tasks!(out::IdDict{DTask,Nothing}, task::DTask) = (out[task] = nothing)
+function append_producer_tasks!(out::IdDict{DTask,Nothing}, batch::CopyBatchOwner)
+    for task in batch.tasks
+        out[task] = nothing
+    end
+    return
+end
+
 """
     gather_overlap_tasks!(state::DataDepsState, ainfo::AliasingWrapper, out::IdDict{DTask,Nothing})
 
@@ -1228,14 +1236,6 @@ Collecting *readers* as well as the writer is load-bearing, not conservatism:
 after `synchronize(A)` returns, plain code may write `A`, and a still-running
 reader of any replica of `A` would race that write.
 """
-@inline append_producer_tasks!(out::IdDict{DTask,Nothing}, task::DTask) = (out[task] = nothing)
-function append_producer_tasks!(out::IdDict{DTask,Nothing}, batch::CopyBatchOwner)
-    for task in batch.tasks
-        out[task] = nothing
-    end
-    return
-end
-
 function gather_overlap_tasks!(state::DataDepsState, ainfo::AliasingWrapper, out::IdDict{DTask,Nothing})
     ainfo.inner isa NoAliasing && return
     for other_ainfo in intersect_ad_hoc(state.ainfos_lookup, ainfo)
