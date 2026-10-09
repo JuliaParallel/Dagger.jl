@@ -130,6 +130,7 @@ end
 BatchedEnqueueQueue(inner::AbstractTaskQueue, lock::ReentrantLock;
                     limit::Int=DATADEPS_BATCH_LIMIT[]) =
     BatchedEnqueueQueue(inner, lock, DTaskPair[], limit)
+datadeps_managed_queue(q::BatchedEnqueueQueue) = datadeps_managed_queue(q.inner)
 function enqueue!(beq::BatchedEnqueueQueue, pair::DTaskPair)
     push!(beq.pending, pair)
     length(beq.pending) >= beq.limit && flush_batch!(beq)
@@ -183,6 +184,7 @@ struct ConcurrentEnqueueQueue <: AbstractTaskQueue
     inner::AbstractTaskQueue
     lock::ReentrantLock
 end
+datadeps_managed_queue(q::ConcurrentEnqueueQueue) = datadeps_managed_queue(q.inner)
 enqueue!(ceq::ConcurrentEnqueueQueue, pair::DTaskPair) =
     _enqueue_concurrent!(ceq.inner, ceq.lock, pair)
 enqueue!(ceq::ConcurrentEnqueueQueue, pairs::Vector{DTaskPair}) =
@@ -272,6 +274,7 @@ mutable struct AsyncEnqueueQueue <: AbstractTaskQueue
     # failure surfaces as the region's error rather than a silent hang.
     failure::Any
 end
+datadeps_managed_queue(q::AsyncEnqueueQueue) = datadeps_managed_queue(q.inner)
 function AsyncEnqueueQueue(inner::AbstractTaskQueue, lock::ReentrantLock;
                            limit::Int=DATADEPS_ASYNC_BATCH_LIMIT[])
     chan = Channel{Union{Vector{DTaskPair},Base.Event}}(Inf)
@@ -1738,6 +1741,7 @@ struct LockedEnqueueQueue <: AbstractTaskQueue
     inner::AbstractTaskQueue
     lock::ReentrantLock
 end
+datadeps_managed_queue(q::LockedEnqueueQueue) = datadeps_managed_queue(q.inner)
 function enqueue!(leq::LockedEnqueueQueue, pair::DTaskPair)
     @lock leq.lock enqueue!(leq.inner, pair)
 end

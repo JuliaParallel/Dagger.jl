@@ -827,6 +827,7 @@ function _spawn(args_kwargs, task_options)
 
     # Construct task spec and handle
     spec = DTaskSpec(args_kwargs, task_options)
+    maybe_add_interop_deps!(task_queue, spec)
     task = eager_spawn(spec)
 
     # Enqueue the task into the task queue

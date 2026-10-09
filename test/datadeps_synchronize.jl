@@ -295,6 +295,21 @@ end
 end
 
 @testset "Interop: plain @spawn sees tracked data" begin
+    @testset "Multi-source remainder is visible to an individual spawn" begin
+        if length(procs()) >= 3
+            A = zeros(Int, 8)
+            left, right = view(A, 1:4), view(A, 5:8)
+            Dagger.spawn_datadeps(; hierarchical=false, sync=false) do
+                Dagger.@spawn scope=Dagger.scope(worker=2) fill!(Out(left), 3)
+                Dagger.@spawn scope=Dagger.scope(worker=3) fill!(Out(right), 7)
+                Dagger.@spawn scope=LOCAL_SCOPE sum(In(A))
+            end
+            @test fetch(Dagger.@spawn scope=LOCAL_SCOPE sum(A)) == 40
+            Dagger.synchronize()
+            @test A == [fill(3, 4); fill(7, 4)]
+        end
+    end
+
     # The documented `sync=false` hazard: a region returns before its work has
     # run or been written back, and a plain `Dagger.@spawn` downstream knows
     # nothing about it. `maybe_add_interop_deps!` closes this for plain *Dagger

@@ -83,9 +83,9 @@ enqueue!(::DefaultTaskQueue, pair::DTaskPair) =
 enqueue!(::DefaultTaskQueue, pairs::Vector{DTaskPair}) =
     eager_launch!(pairs)
 
-# N.B. These two are the single choke point every `Dagger.@spawn` passes
-# through, which is why the Datadeps interop check hangs off them rather than
-# off a queue type: a plain task submitted from a task that owns a
+# Bulk submission enters here; individual spawns check interop in `_spawn`
+# before forwarding to their already-resolved queue. A plain task from a
+# task that owns a
 # `DataDepsContext` needs checking no matter which queue happens to be
 # ambient. See `maybe_add_interop_deps!` (datadeps/interop.jl) -- it is two
 # loads and a return for any program with no live context.
