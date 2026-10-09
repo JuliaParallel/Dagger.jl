@@ -46,7 +46,7 @@ using Dagger: In, Out, InOut
     if nprocs() < 4
         @test_skip "Needs 4 processes (-p 3) for the shared-state hierarchical path"
     else
-        all_procs = [only(Dagger.get_processors(Dagger.OSProc(pid))) for pid in 1:4]
+        all_procs = [first(filter(p -> p isa Dagger.ThreadProc, collect(Dagger.get_processors(Dagger.OSProc(pid))))) for pid in 1:4]
         rank_scope(i) = Dagger.ExactScope(all_procs[i])
 
         Random.seed!(6100)
@@ -86,7 +86,7 @@ end
     if nprocs() < 4
         @test_skip "Needs 4 processes (-p 3) for the shared-state hierarchical path"
     else
-        all_procs = [only(Dagger.get_processors(Dagger.OSProc(pid))) for pid in 1:4]
+        all_procs = [first(filter(p -> p isa Dagger.ThreadProc, collect(Dagger.get_processors(Dagger.OSProc(pid))))) for pid in 1:4]
         rank_scope(i) = Dagger.ExactScope(all_procs[i])
 
         Random.seed!(6200)
