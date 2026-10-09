@@ -215,7 +215,7 @@ if USE_GPU || USE_FINCH || "extlang/python" in to_test
     using Pkg
     optional_packages = String[]
     USE_CUDA && push!(optional_packages, "CUDA")
-    USE_ROCM && push!(optional_packages, "AMDGPU")
+    USE_ROCM && append!(optional_packages, ["AMDGPU", "AMDGPU_LLVM_Backend_jll"])
     USE_ONEAPI && push!(optional_packages, "oneAPI")
     USE_METAL && push!(optional_packages, "Metal")
     USE_OPENCL && append!(optional_packages, ["OpenCL", "pocl_jll"])
