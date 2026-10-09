@@ -177,7 +177,7 @@ part in a copy, since the source rank does the send, so a copy that is not
 recognized as one runs on its destination rank alone and blocks forever in a
 receive nobody answers.
 """
-is_move_task(f) = f === move! || f === move_toplevel!
+is_move_task(::typeof(move_toplevel!)) = true
 
 """
     records_metrics(proc::Processor, f, args) -> Bool

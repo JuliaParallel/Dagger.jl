@@ -60,6 +60,9 @@
     end
 
     @testset "Kernel Lock Processor" begin
+        @test Dagger.is_move_task(Dagger.move!)
+        @test Dagger.is_move_task(Dagger.move_toplevel!)
+        @test !Dagger.is_move_task(identity)
         # `multi_span_copy!` needs a processor to pick the backend's
         # kernel-launch lock, but it also runs outside any DTask: the
         # source-side gather in `move!(::RemainderAliasing, ...)` is handed to
