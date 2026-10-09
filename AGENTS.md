@@ -1269,3 +1269,16 @@ lesson.
    suite (232/227 assertions). Validate through the actual MPI launcher,
    record the selected library, and apply the same loader setting to both
    benchmark revisions rather than changing Dagger's communication paths.
+
+109. **Native GPU allocations can exhaust host RAM outside Julia's RSS.**
+   With Intel's shared-allocation workaround, the Arc Pro B60 validation suite
+   retained roughly 8 GiB in `/proc/meminfo`'s `GPUActive` while the Julia
+   driver reported only 2–3 GiB RSS. A three-process Distributed suite therefore
+   OOMed on this 14 GiB host even when individual heaps looked modest. The SYCL
+   UR pool-size setting did not cap this usage. NEO's hardware minimum scratch
+   mode (`ForceScratchAndMTPBufferSizeMode=1`, with `NEOReadDebugKeys=1`) helped
+   plain/MPI suites complete, but does not establish a memory bound. Monitor
+   total available RAM and native device allocations, split validation into
+   fresh processes when necessary, and apply any driver mode equally to both
+   benchmark revisions. Do not turn such an OOM into a Dagger allocation claim
+   or lower compute-unit counts merely to under-allocate scratch.
