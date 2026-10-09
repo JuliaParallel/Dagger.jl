@@ -19,8 +19,8 @@
 # deadlocks, since the cross-rank compare that would catch it is normally off
 # by default.
 #
-# Run: mpiexec -n 4 julia --project test/mpi_async.jl
-# (or via test/run_mpi.jl, see test/mpi.jl's header)
+# Run: mpiexec -n 4 julia --project test/mpi/async.jl
+# (or via julia --project=test/mpi/env test/mpi/run.jl 4 2 <script>)
 
 using Dagger, MPI, Random, Test
 using Dagger: In, Out, InOut
@@ -28,7 +28,7 @@ using Dagger: In, Out, InOut
 # This suite only means something against the checked-out dev tree -- a stale
 # registered Dagger would silently "pass" by exercising old, still-forced-sync
 # behavior instead of the code under test.
-let repo_root = realpath(joinpath(@__DIR__, ".."))
+let repo_root = realpath(joinpath(@__DIR__, "..", ".."))
     @assert startswith(realpath(pathof(Dagger)), repo_root) "pathof(Dagger) = $(pathof(Dagger)) does not resolve to this checkout ($repo_root)"
 end
 

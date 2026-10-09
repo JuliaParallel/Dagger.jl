@@ -1,7 +1,7 @@
 # MPI coverage for Phase 7b: lifting the `hierarchical` half of
 # `spawn_datadeps`'s `sync` forcing (src/datadeps/queue.jl), so consecutive
 # `sync=false` regions pipeline under `hierarchical=true` -- the *default* --
-# under MPI. test/mpi_async.jl already covers the `hierarchical=false` (flat)
+# under MPI. test/mpi/async.jl already covers the `hierarchical=false` (flat)
 # path from Phase 7a; this file is its hierarchical counterpart and never
 # passes `hierarchical=false` anywhere.
 #
@@ -15,16 +15,16 @@
 # immediately every region.
 #
 # `Dagger.check_uniformity!(true)` is on throughout, same reasoning as
-# mpi_async.jl: under deferral a tag/MPIRefID desync would otherwise stay
+# async.jl: under deferral a tag/MPIRefID desync would otherwise stay
 # silent right up until it deadlocks.
 #
-# Run: mpiexec -n 4 julia --project test/mpi_hierarchical_async.jl
-# (or via test/run_mpi.jl, see test/mpi.jl's header)
+# Run: mpiexec -n 4 julia --project test/mpi/hierarchical_async.jl
+# (or via julia --project=test/mpi/env test/mpi/run.jl 4 2 <script>)
 
 using Dagger, MPI, Random, Test
 using Dagger: In, Out, InOut
 
-let repo_root = realpath(joinpath(@__DIR__, ".."))
+let repo_root = realpath(joinpath(@__DIR__, "..", ".."))
     @assert startswith(realpath(pathof(Dagger)), repo_root) "pathof(Dagger) = $(pathof(Dagger)) does not resolve to this checkout ($repo_root)"
 end
 

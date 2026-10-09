@@ -71,6 +71,16 @@ else
     fail "mpi"
 fi
 
+# Deferred regions use separate Julia processes so their context and tag state
+# cannot leak between suites.
+for suite in async hierarchical_async; do
+    if run_mpi "mpi_${suite}" "${N}" "${DAGGER_DIR}" "${DAGGER_DIR}/test/mpi/${suite}.jl"; then
+        pass "mpi_${suite}"
+    else
+        fail "mpi_${suite}"
+    fi
+done
+
 # --- MPI GPU (CUDA, optional) ---
 if [[ "${SKIP_GPU:-0}" == "1" || "${SKIP_CUDA:-0}" == "1" ]]; then
     echo ""

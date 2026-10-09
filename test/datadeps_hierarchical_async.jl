@@ -1,7 +1,7 @@
 # Non-MPI coverage for Phase 7b: lifting `spawn_datadeps`'s `hierarchical`-half
 # of the `sync` forcing (src/datadeps/queue.jl), so consecutive `sync=false`
 # regions pipeline under `hierarchical=true` -- the *default* -- and not just
-# under the explicit `hierarchical=false` opt-out that test/mpi_async.jl and
+# under the explicit `hierarchical=false` opt-out that test/mpi/async.jl and
 # test/array/fft_async.jl cover.
 #
 # Two scheduling strategies live inside `distribute_tasks_hierarchical!`
