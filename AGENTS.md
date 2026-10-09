@@ -1305,3 +1305,15 @@ lesson.
    skip a collective that another rank might enter. Test prior writes and
    errors across both hierarchy and bulk-launch settings, rather than only
    checking that a standalone empty body returns.
+
+112. **A Distributed worker tree can span several process groups.**
+   The N1024 benchmark's master was OOM-killed during SVD with about 6.3 GiB
+   RSS; two child workers survived under PID1 in their own process groups,
+   retaining over 3 GiB while the orchestrator launched a replacement master.
+   Killing the master's process group is therefore insufficient. Record child
+   group IDs while the master is alive (after reparenting, its ancestry is
+   gone), and retire that whole tree before replacing a failed worker. The
+   validation harness retains these IDs and cleans them when the outer run
+   exits. Reject the incomplete result plan as well: this run returned 41 of 46
+   leaves after restart. Fresh per-suite/per-tile jobs must keep all requested
+   leaves, warmups, samples, and placements while reducing accumulated memory.
