@@ -633,3 +633,176 @@ lesson.
     YAML but passes `{{array}}` to the benchmark worker, which rejects the suite
     before sampling. Check the expanded command arguments and artifact paths
     for every pipeline; parser and dependency checks do not catch this error.
+
+61. **A Distributed GPU transfer must preserve the source's ownership.**
+   Sending a raw device array in a slot-creation RPC deserializes it on the
+   receiver while `from_proc` still names the sender. The subsequent GPU
+   `move` then activates a remote worker's context locally and asserts; some
+   backends cannot serialize the array in the first place. Send an owner-side
+   `Chunk` and use the backend's Chunk transport instead. The same rule
+   applies when fetching a remote source for in-place copies. Pin regression
+   inputs and consumers to different workers selecting device 1: a GPU scope
+   alone does not guarantee that a transfer actually happens.
+
+62. **CUDA IPC must export staging memory and return an owned copy.**
+   CUDA's pooled allocations cannot be exported with `cuIpcGetMemHandle`, and
+   returning an imported mapping makes the receiver alias the sender's data
+   and depend on its lifetime. Use the shared `ipc_export`/`ipc_materialize`
+   hooks, keep the staging token on the sender until the receiver finishes,
+   and release it in `finally`. Use `CUDADRV` for closing handles too: CUDA 6
+   moved the driver API into CUDACore. Test repeated transfers in both
+   directions and mutate the destination to verify source independence.
+
+63. **Two GPUs of one process are not one device, and may not even be
+   peers.** Several paths assumed "same worker" meant "one kernel may touch
+   both buffers": the same-worker device remainder copy, `collect`'s
+   in-process `cat`, and CUDA `pointer()` (which takes ownership for the
+   *active* device and throws without P2P). `CUDA.pin` is also only deduped
+   per context while host registration is process-wide. Key direct device
+   paths on equal memory spaces, not equal workers, read addresses without
+   ownership side effects, and test with tiles on two devices of one
+   process: the one-GPU-per-worker suites cannot see any of this.
+
+64. **Reading a GPU task's result needs Dagger's stream, not the caller's.**
+   GPU `execute!` returns without synchronizing: the kernels are still queued
+   on Dagger's per-device stream. A plain `fetch` + `Array(x)` from the
+   caller copies on the caller's own task-local stream, and is correct only
+   if the array library synchronizes the previous owner when another stream
+   touches a buffer. CUDA, AMDGPU and OpenCL do; oneAPI does not, and it also
+   copies on the *calling task's* device. A green CUDA run therefore does not
+   prove the wait exists. Before reading a tile on the host, call
+   `gpu_synchronize(chunk.processor)` and copy under `with_context`, on the
+   chunk's owner (as `collect` does via `_collect_host_tile`). Note that
+   IntelExt's hooks sync only the calling task's stream, and each oneAPI
+   `execute!` runs on a fresh task, so oneAPI's own hook is not sufficient yet.
+
+74. **Never unregister host memory from a finalizer that can block.**
+   `CUDA.pin` unregisters in a GC finalizer that takes a `ReentrantLock`
+   (as does `AMDGPU.Mem.unpin`, which ROCExt's finalizer used to call). When
+   that lock is contended the finalizer throws "task switch not allowed from
+   inside gc finalizer", the unregistration is lost, and GC frees the memory
+   anyway: the range stays registered with the driver, and a later
+   allocation at that address fails to register or is DMA'd through stale
+   pages. Multi-GPU GEMM segfaulted a few iterations in, with a backtrace
+   that blew the stack while printing (`jl_static_show` recursion) and showed
+   nothing of the cause; the "error in running finalizer" lines before it
+   were the only clue. (On ROCm, 2-GPU Datadeps tests segfaulted the same
+   way, inside `hipMemcpyWithStream`.) CUDAExt's and ROCExt's `pin_buffer!`
+   now register buffers themselves, and their finalizers only `trylock`,
+   re-arming themselves on contention (which keeps the buffer alive until a
+   later GC can unregister it). Anything that must run before
+   memory is freed has to be finalizer-safe: no blocking locks, no yields.
+
+75. **Two GPUs without peer access: never let CUDA.jl stage the copy.**
+   Without P2P, `copyto!` between devices goes through a fresh *pageable*
+   `Vector` with a synchronous DtoH: 1.4 GB/s on PCIe-attached L40S, where
+   `cuMemcpyPeerAsync` (which works without peer access; the driver pipelines
+   it through its own pinned buffers) reached 22 GB/s. A 4-GPU GEMM spent
+   27 s per call in copies. Check `can_access_peer` before assuming a copy
+   path is cheap, and measure the copy primitive in isolation first -- it
+   took one 30-line script to find a 15x. (HIP does not stage this way:
+   between two RX 6900 XTs without peer access, AMDGPU's `copyto!` and
+   `hipMemcpyPeerAsync` both reached ~5.5 GB/s, vs 1.4 GB/s through a
+   pageable host buffer, and `copyto!` blocks until the copy is done.)
+
+76. **One stream per device serializes every transfer with that device's
+   compute.** Copies enqueued on the device stream wait behind its kernels,
+   and an event recorded on the *source's* stream waits for kernels that
+   merely read the data being sent (a GEMM's panel owner is busy reading the
+   panel it is asked to send). Peer copies now run on a per-device copy stream
+   ordered only against the allocations they touch (`BUFFER_EVENTS`, fed by
+   Datadeps' `writes` option), and are host-synced so every existing
+   synchronization point stays valid; 4-GPU GEMM went from ~3.9 s to ~3.1 s.
+   (ROCExt does the same with HIP events and `hipMemcpyPeerAsync`.)
+   Bookkeeping keyed by address outlives the allocation: a peer copy's
+   "already complete, skip the next write" flag, left on short-lived packing
+   buffers, swallowed the first write to the next allocation at that address,
+   and a later copy out of it read stale data. Name the task the skip is for
+   (`filled_by`), or keep entries to plain events.
+   Two traps found on the way: Datadeps spawns copy tasks `meta`, so
+   `execute!` sees `Chunk`s, not arrays (unwrap before classifying, or every
+   copy looks like an opaque argument and falls back to whole-stream waits);
+   and `unsafe_free!` tasks hand you a freed array (check `data.freed`).
+
+77. **Resolve optional GPU packages before loading test dependencies or starting
+   workers.** `Pkg.add` of a GPU backend can change shared packages such as
+   LLVM, Atomix and GPUArraysCore. If Dagger or its test imports have already
+   loaded them, Julia keeps the old modules while GPUCompiler expects the new
+   APIs; the symptom is missing-cache warnings followed by remote LoadErrors
+   on every GPU vendor. `Pkg.test` also uses a temporary environment, so giving
+   workers the repository's project can select different dependency versions.
+   Install optional packages first, then start workers with
+   `Base.active_project()` so every process uses the same resolved environment.
+
+78. **Level Zero IPC handles cannot be serialized between processes.** Intel's
+   opaque `ze_ipc_mem_handle_t` includes a process-local file descriptor.
+   MPI's serialized metadata copies the descriptor number, not its underlying
+   resource, so `zeMemOpenIpcHandle` fails with `ZE_RESULT_ERROR_INVALID_ARGUMENT`
+   on the receiving rank. A usable import needs descriptor passing, such as
+   Unix-domain `SCM_RIGHTS`, before reconstructing the handle. Keep Intel MPI
+   on host-staged transport until that exists; a same-node/device check or
+   `DAGGER_IPC=1` cannot supply the missing descriptor. See
+   https://github.com/intel/compute-runtime/issues/448.
+
+79. **ROCm Distributed tests need a spare Julia thread for host calls.**
+   AMDGPU's persistent host-call tasks poll HSA signals with
+   `Libc.systemsleep` and `yield`, which can monopolize a sticky task's only
+   thread (lesson 12). With one default thread the GPU suite stopped making
+   progress in `hostcall_host_wait`, without an exception; with two threads
+   the host-call task remained alive while the other thread continued into
+   the stencil suite. Give both the driver and Distributed workers two
+   default threads in ROCm CI. Increasing only the driver's thread count
+   leaves remote workers exposed to the same starvation.
+
+80. **GPU event tracking must check a chunk's acceleration ownership.**
+   `root_worker_id(::MPIRef)` and MPI processors intentionally return `myid()`
+   on every rank; Distributed's worker-id test therefore calls every MPI chunk
+   local. A GPU copy task executes on both endpoint ranks, and recording its
+   arguments then tries to unwrap the remote endpoint's placeholder and throws
+   "MPIRef is not owned by this rank". Check the handle with
+   `is_local(current_acceleration(), chunk.handle)` before inspecting storage.
+   The existing cross-rank GPU dataflow tests exercise both endpoints; a
+   Distributed-only suite cannot catch this mistake.
+
+81. **Reduce apparent GPU ordering failures below Julia before adding fences.**
+   This host's Ryzen 9600X `gfx1036` GPU with HIP 7.2 returns zeros after an
+   asynchronous kernel or device copy followed by a short pause, even when
+   the same stream is synchronized before reading. A native HIP C++ program
+   reproduces it without Julia, KernelAbstractions, or Dagger; synchronous
+   allocations and disabling SDMA do not fix it. Setting
+   `AMD_SERIALIZE_KERNEL=3 AMD_SERIALIZE_COPY=3` makes that reproducer pass.
+   Per-halo synchronization happened to hide the failure, but would impose
+   a production cost for a host runtime problem. Use the serialization flags
+   only for local correctness validation and report them with the results;
+   they are not a valid configuration for performance measurements.
+
+
+82. **oneMKL queue interop can fail below Dagger on Intel Xe2 GPUs.**
+   With oneAPI.jl 2.9.2 and its 2025.3 support libraries, this Arc Pro B60's
+   default Level Zero v2 adapter aborts with
+   `UR_RESULT_ERROR_UNSUPPORTED_FEATURE` when SYCL wraps a native Level Zero
+   queue for GEMM. A standalone `oneArray` `mul!` reproduces the abort; worker
+   EOF errors are its aftermath. `SYCL_UR_USE_LEVEL_ZERO_V2=0` selects the
+   legacy adapter and passes that reproducer. Diagnose native BLAS failures
+   separately from Dagger scheduling and record the adapter used in validation.
+
+
+83. **A passing GPU suite does not certify dependency finalizers.**
+   Julia logs finalizer exceptions without failing the suite or its exit code.
+   AMDGPU 2.8.0's `src/cache.jl` `library_state` accepts a `destroy_handle`
+   callback but its task finalizer calls undefined `destroy_handle!`, producing
+   an `UndefVarError` while the two-rank numerical suite passes all assertions.
+   Check stderr as well as test counts, and attribute the callback to its
+   owning package before changing Dagger's task or GPU resource lifecycle.
+
+
+84. **Installing an external GPU compiler is not the same as selecting it.**
+   GPUCompiler 1.23 defaults `GCNCompilerTarget.backend` to `:external` only
+   when `AMDGPU_LLVM_Backend_jll` is already loaded, not merely installed.
+   AMDGPU 2.1 on Julia 1.11 otherwise uses the embedded LLVM backend, which
+   computes wrong mixed-boundary indices on this `gfx1036` host despite
+   correct scalar arguments and valid-looking LLVM IR. Loading the external
+   LLVM 22 backend makes the unmodified kernel compute the correct indices.
+   Load it on every ROCm test/benchmark worker before kernel compilation;
+   adding it only to the driver's environment leaves remote codegen unchanged.
+   Keep both comparison revisions on the same backend.

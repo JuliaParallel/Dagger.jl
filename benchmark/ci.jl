@@ -69,6 +69,7 @@ const gpu_packages = Dict("cuda" => "CUDA", "amdgpu" => "AMDGPU",
 for spec in split(get(ENV, "BENCHMARK", ""), ';'), method in split(last(split(spec, ':')), ',')
     for accel in split(method, '+')[2:end]
         push!(EXTRA_PKGS, gpu_packages[accel])
+        accel == "amdgpu" && push!(EXTRA_PKGS, "AMDGPU_LLVM_Backend_jll")
     end
 end
 if get(ENV, "BENCHMARK_OPENCL_SOFTWARE", "false") == "true"

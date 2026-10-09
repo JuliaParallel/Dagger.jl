@@ -88,13 +88,18 @@ optin_test_names = USE_FINCH ? String[] : String[
 ]
 
 additional_workers::Int = 3
-worker_threads::Int = 1
+# AMDGPU's persistent host-call tasks can monopolize a worker's only thread.
+worker_threads::Int = USE_ROCM ? 2 : 1
 
-if PROGRAM_FILE != "" && realpath(PROGRAM_FILE) == @__FILE__
-    pushfirst!(LOAD_PATH, @__DIR__)
-    pushfirst!(LOAD_PATH, joinpath(@__DIR__, ".."))
+direct_test_run = PROGRAM_FILE != "" && realpath(PROGRAM_FILE) == @__FILE__
+if direct_test_run
     using Pkg
     Pkg.activate(@__DIR__)
+    # Keep direct invocations, like Pkg.test, in one resolved environment.
+    # A repository environment ahead of this one in LOAD_PATH can shadow the
+    # dependency versions chosen for optional GPU backends.
+    Pkg.develop([PackageSpec(path=joinpath(@__DIR__, "..")),
+                 PackageSpec(path=joinpath(@__DIR__, "..", "lib", "TimespanLogging"))])
     try
         Pkg.instantiate()
     catch
@@ -103,7 +108,11 @@ if PROGRAM_FILE != "" && realpath(PROGRAM_FILE) == @__FILE__
         # Finch is not a default test dependency; add it on demand when signaled.
         Pkg.add("Finch")
     end
+end
 
+# Pkg.test supplies test_args through ARGS without setting PROGRAM_FILE.
+if direct_test_run || !isempty(ARGS)
+    using Pkg
     using ArgParse
     s = ArgParseSettings(description = "Dagger Testsuite")
     @eval begin
@@ -127,7 +136,7 @@ if PROGRAM_FILE != "" && realpath(PROGRAM_FILE) == @__FILE__
                 help = "How many additional workers to launch"
             "-t", "--threads"
                 arg_type = Int
-                default = 1
+                default = worker_threads
                 help = "How many threads to give each additional worker"
             "-v", "--verbose"
                 action = :store_true
@@ -201,12 +210,20 @@ else
     to_test = filter(!in(optin_test_names), all_test_names)
     @info "Running all tests"
 end
+flush(stdout)
+flush(stderr)
+
+if USE_GPU
+    include("setup_gpu_packages.jl")
+end
 
 using Distributed
 if additional_workers > 0
     # We put this inside a branch because addprocs() takes a minimum of 1s to
     # complete even if doing nothing, which is annoying.
-    addprocs(additional_workers; exeflags=`--project=$(joinpath(@__DIR__, "..")) -t $worker_threads`)
+    # Pkg.test runs in a temporary environment. Workers must use that same
+    # resolved environment, including GPU packages installed above.
+    addprocs(additional_workers; exeflags=`--project=$(Base.active_project()) -t $worker_threads`)
 end
 
 include("imports.jl")
@@ -231,7 +248,11 @@ try
         test_name = all_test_names[findfirst(x->x==test, all_test_names)]
         println()
         @info "Testing $test_title ($test_name)"
+        flush(stdout)
+        flush(stderr)
         @testset "$test_title" include(test * ".jl")
+        flush(stdout)
+        flush(stderr)
     end
 catch
     printstyled(stderr, "Tests Failed!\n"; color=:red)
