@@ -1234,3 +1234,15 @@ lesson.
    by an explicit exit hook; it provides unique paths independently of the
    task RNG. Include the path in exit assertions so duplicate cleanup is
    distinguishable from a storage-lifecycle failure.
+
+106. **Julia 1.11's anonymous-function IDs can collide across serializers.**
+   `Distributed.object_number(::ClusterSerializer, ...)` shares an unlocked
+   `Ref` counter across connections. A four-thread probe assigned 400 distinct
+   closure type names only 397 distinct IDs; subsequent sequential RPCs returned
+   three wrong values, without loading Dagger. The ordinary Serialization
+   serializer has the same shape. This can alias an anonymous function to a
+   different function or leave its deserialized type without the expected
+   method. Define validation fixture kernels with `@everywhere` and send named
+   functions instead of repeatedly shipping driver-only anonymous types. A
+   missing deserialized method is not sufficient evidence of a Dagger scheduling
+   bug; reduce it to the transport before changing execution ordering.
