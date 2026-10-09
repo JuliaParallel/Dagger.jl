@@ -40,11 +40,8 @@ end
 @testset "Disk caching setup on multiple processes (single machine)" begin
     script = joinpath(@__DIR__, "cache_setup_test.jl")
     for p in 0:3
-        j = if p == 0
-            Cmd(`julia --startup-file=no`)
-        else
-            Cmd(`julia --startup-file=no -p $p`)
-        end
+        j = `$(Base.julia_cmd()) --startup-file=no --project=$(Base.active_project())`
+        p == 0 || (j = `$j -p $p`)
         result = withenv("JULIA_MEMPOOL_EXPERIMENTAL_FANCY_ALLOCATOR"=>nothing,
                          "JULIA_MEMPOOL_EXPERIMENTAL_MEMORY_BOUND"=>nothing,
                          "JULIA_MEMPOOL_EXPERIMENTAL_DISK_CACHE"=>nothing,
