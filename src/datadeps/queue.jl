@@ -192,7 +192,7 @@ function _spawn_datadeps(ddctx::DataDepsContext, f::Base.Callable, scheduler, la
     # `ContextQueue` replaces `WaitAllQueue` as the region's `:task_queue`,
     # collecting into `ddctx.inflight` instead of a queue-local `Vector{DTask}`.
     queue_outer = ContextQueue(get_options(:task_queue, DefaultTaskQueue()), ddctx)
-    result = try
+    region_result = try
         with_options(; task_queue=queue_outer) do
             scheduler = something(scheduler, DATADEPS_SCHEDULER[], RoundRobinScheduler())
             launch_wait = something(launch_wait, DATADEPS_LAUNCH_WAIT[], false)::Bool
@@ -221,8 +221,9 @@ function _spawn_datadeps(ddctx::DataDepsContext, f::Base.Callable, scheduler, la
             if launch_wait
                 result = spawn_bulk() do
                     queue = DataDepsTaskQueue(get_options(:task_queue); scheduler)
-                    with_options(f; task_queue=queue)
+                    body_result = with_options(f; task_queue=queue)
                     run_distribute(queue)
+                    body_result
                 end
             else
                 queue = DataDepsTaskQueue(get_options(:task_queue); scheduler)
@@ -256,7 +257,7 @@ function _spawn_datadeps(ddctx::DataDepsContext, f::Base.Callable, scheduler, la
         _do_synchronize!(ddctx; write_back=true, free=true, gpu_sync=:fence,
                           check_errors=true, wrap_errors=false, from_owner=true)
     end
-    return result
+    return region_result
 end
 const DATADEPS_SCHEDULER = ScopedValue{Union{DataDepsScheduler,Nothing}}(nothing)
 const DATADEPS_LAUNCH_WAIT = ScopedValue{Union{Bool,Nothing}}(nothing)

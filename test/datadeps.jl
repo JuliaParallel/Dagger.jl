@@ -656,6 +656,16 @@ end
 @everywhere do_nothing(Xs...) = nothing
 @everywhere mut_ref!(R) = (R[] .= 0;)
 @everywhere mut_V!(V) = (V .= 1;)
+
+@testset "Region body return values" for hierarchical in (false, true), launch_wait in (false, true)
+    @test Dagger.spawn_datadeps(() -> :body_result; hierarchical, launch_wait) === :body_result
+    result = Dagger.spawn_datadeps(; hierarchical, launch_wait) do
+        Dagger.@spawn do_nothing()
+        :body_result
+    end
+    @test result === :body_result
+end
+
 function test_datadeps(;args_chunks::Bool,
                         args_thunks::Bool,
                         args_loc::Int)
