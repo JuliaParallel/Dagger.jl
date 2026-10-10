@@ -1331,3 +1331,19 @@ lesson.
    interactive thread, and observe progress before freeing a default thread.
    The test sender must also wait cooperatively: blocking `MPI.Waitall` can
    occupy the very thread its pinned receiver needs to complete the request.
+
+114. **A remotely failed GPU capability probe can fail to report its own
+   exception.** Baseline Distributed benchmark construction stalled before
+   publishing a plan on both CUDA and oneAPI. After bounded no-progress
+   observation, diagnostic profiles and an interrupt exposed
+   `write(::TCPSocket, ::CuPtr{Float32})` / `write(::TCPSocket, ::ZePtr{Float32})`
+   while serializing a `CapturedException` in `DoTaskSpec` result reporting.
+   An exception can hold a device pointer even when a successful task result
+   would have been transportable; the reusable task logs the reporting failure
+   and the caller keeps waiting (lesson 9). The lost original exception does
+   not establish which operation failed. For a fair benchmark retry, keep
+   only the untimed unsupported-operation probes on the driver GPU in both
+   revisions, preserving measured fixtures, compute scopes and process layout.
+   This is a benchmark capability workaround, not proof that remote error
+   reporting is repaired. Reject the stalled run and do not confirm its
+   performance flags without a complete independent pair.
