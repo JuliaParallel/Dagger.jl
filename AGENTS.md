@@ -1365,3 +1365,13 @@ lesson.
    workloads as well as ready-message receives: the latter kept exactly
    37,946 allocations/1,799,136 bytes per 1000 receives across both policies
    and could not expose this latency regression.
+
+116. **Audit executable CI paths after the last integration replay.** Moving
+   the MPI suites into `test/mpi/` did not cover workflow commands added by
+   the later async branch replay: both async steps still named nonexistent
+   `test/mpi_async.jl` and `test/mpi_hierarchical_async.jl`, despite the local
+   suites passing under their new names. A conflict-free cherry-pick preserves
+   text, not the correctness of its filesystem references. Extract the final
+   workflow commands and check that each script exists. Polling starvation
+   tests also need an explicit interactive coordinator (`2,1` threads in CI),
+   since their proof occupies every default thread before checking progress.
