@@ -1388,3 +1388,17 @@ lesson.
    accepting timings, record failures without retrying until lucky, and keep
    serialized correctness separate from native performance. Do not infer a
    Dagger regression from that host's failed native guard alone.
+
+118. **Completed allocation profiles can consume the RAM a benchmark needs.**
+   On this validation host `/tmp` is tmpfs. Twenty-four completed full
+   allocation profiles occupied 1,071 MiB there while fresh GPU sparse
+   processes were hitting the host-memory limit. Move completed raw profiles
+   to durable disk, verify identical SHA-256 hashes, and leave symlinks when
+   the harness still needs the original paths. Keep this storage correction
+   distinct from changing the problem size or process topology, and preserve
+   the original failed attempts. GPUActive and process RSS may overlap;
+   adding them does not give a reliable total. A two-second memory monitor
+   also missed a sharp Intel stencil memory rise and the kernel OOM-killed
+   its driver; monitor intervals must accommodate burst growth, and classify
+   an observed OOM from the kernel log rather than treating SIGKILL as a
+   numerical or scheduler failure.
