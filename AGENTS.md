@@ -1375,3 +1375,16 @@ lesson.
    workflow commands and check that each script exists. Polling starvation
    tests also need an explicit interactive coordinator (`2,1` threads in CI),
    since their proof occupies every default thread before checking progress.
+
+117. **A successful HIP API call can still produce wrong data on this host.**
+   On the Ryzen 9600X gfx1036/ROCm 7.2 setup, a standalone C++ HIP program
+   (no Julia or Dagger) used one stream for async allocation, HtoD copies,
+   a kernel reading 1, and a DtoD copy reading 3. Input and final stream
+   synchronizations returned success, as did every checked HIP call, but
+   native readback was 0/0. With `AMD_SERIALIZE_KERNEL=3` and
+   `AMD_SERIALIZE_COPY=3` the same program passed all three trials with 1/3.
+   This proves a native-stack correctness limitation for that control, not
+   its precise driver/hardware cause. Keep native numerical guards before
+   accepting timings, record failures without retrying until lucky, and keep
+   serialized correctness separate from native performance. Do not infer a
+   Dagger regression from that host's failed native guard alone.
