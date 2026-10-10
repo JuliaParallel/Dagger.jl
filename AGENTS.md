@@ -1347,3 +1347,21 @@ lesson.
    This is a benchmark capability workaround, not proof that remote error
    reporting is repaired. Reject the stalled run and do not confirm its
    performance flags without a complete independent pair.
+
+115. **A sub-millisecond Julia sleep is a millisecond MPI handshake.**
+   Julia 1.11's `Timer` rounds `sleep(0.0001)` to a 2 ms libuv timeout.
+   Unconditionally parking MPI receivers and the idle relay fixed sticky
+   starvation but made eight Intel MPI synchronous regions take44–47 ms
+   instead of10–11 ms. Runtime controls repeated both policies and verified
+   actual device arguments and every result: increasing the spin budget alone
+   still took40–42 ms; using a short OS sleep plus `yield` for nonsticky tasks
+   and Julia sleep for sticky ones took15–17 ms. A 4096-poll budget reduced
+   the remaining sticky parks, and the standard region test then measured
+   10.4–10.9 ms with the production implementation. Re-check
+   `current_task().sticky` at every backoff, since a library can change it
+   after task creation. Only a nonsticky task's yield consults the multiqueue;
+   sticky tasks still require a real deschedule (lessons 12/113). Keep both
+   multi-thread and one-thread starvation tests, and measure actual waiting
+   workloads as well as ready-message receives: the latter kept exactly
+   37,946 allocations/1,799,136 bytes per 1000 receives across both policies
+   and could not expose this latency regression.

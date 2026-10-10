@@ -1105,13 +1105,26 @@ function recv_yield_inplace!(array::DenseArray, comm, my_rank, their_rank, tag)
 end
 recv_yield_inplace!(array::Array, comm, my_rank, their_rank, tag) =
     _recv_yield_inplace_raw!(array, comm, my_rank, their_rank, tag)
-const MPI_POLL_SPIN_ITERS = 256
+const MPI_POLL_SPIN_ITERS = 4096
 
-# A sticky task's yield() only revisits its local queue. Eventually park it
-# so spawned producers and GPU synchronization callbacks can run as well.
+# Julia's sub-millisecond sleep creates a millisecond-resolution timer. Only
+# sticky tasks need that full deschedule: their yield cannot reach spawned work
+# in the multiqueue. Re-check on each backoff, since library code can make a
+# previously nonsticky task sticky. A nonsticky task can yield fairly after a
+# short OS sleep without paying for a timer on each brief MPI handshake.
+@inline function mpi_poll_backoff(seconds::Float64)
+    if current_task().sticky
+        sleep(seconds)
+    else
+        Libc.systemsleep(seconds)
+        yield()
+    end
+    return nothing
+end
+
 @inline function mpi_poll_pause(polls::Int)
     if polls == MPI_POLL_SPIN_ITERS - 1
-        sleep(0.0001)
+        mpi_poll_backoff(0.0001)
         return 0
     end
     yield()
@@ -1544,9 +1557,9 @@ function bcast_relay_loop(state::BcastState)
     rank = MPI.Comm_rank(comm)
     sz = MPI.Comm_size(comm)
     idle = 0
-    # Park the task, including on one-thread ranks. Sleeping the OS thread
-    # followed by yield() leaves a sticky relay in its local queue forever,
-    # so neither spawned work nor libuv callbacks get a chance to run.
+    # Back off on every rank, including one-thread ranks. Sticky relays must
+    # park their Julia task; nonsticky relays can yield through the multiqueue
+    # after a shorter OS sleep (see mpi_poll_backoff).
     while state.running[]
         try
             MPI.Finalized() && break
@@ -1556,7 +1569,7 @@ function bcast_relay_loop(state::BcastState)
                 if idle <= BCAST_RELAY_SPIN_ITERS
                     yield()
                 else
-                    sleep(BCAST_RELAY_IDLE_SLEEP)
+                    mpi_poll_backoff(BCAST_RELAY_IDLE_SLEEP)
                 end
                 # Nothing is arriving, which is exactly when a stalled consumer
                 # needs its deadlock timer re-checked -- and the relay is the
