@@ -1402,3 +1402,17 @@ lesson.
    its driver; monitor intervals must accommodate burst growth, and classify
    an observed OOM from the kernel log rather than treating SIGKILL as a
    numerical or scheduler failure.
+
+119. **A full allocation profile includes concurrent drain watchers.**
+   CPU Distributed synchronous eight-region minima were 24,665→27,713
+   allocations, but separate full profiles recorded 24,215→31,405. Of the
+   integrated records, 2,591 had their nearest Dagger frame at the task-exit
+   watcher's polling sleep. These are real allocations during the instrumented
+   interval, including background tasks; they are not a paired subtraction of
+   the unprofiled minimum and cannot all be charged to one region's call stack.
+   Keep the ordinary GC measurements, instrumented payload counts, and
+   inclusive CPU samples distinct. The GPU drain also sends RPCs to remote
+   CPU processors whose synchronization hook is a no-op, but an isolated
+   original/skip/original/skip control did not repeat its first timing gain
+   (flat ratios 0.842 then 1.039). A plausible profile frame is a candidate
+   cost, not proof of the dominant latency cause or a validated optimization.
