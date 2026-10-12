@@ -99,11 +99,6 @@ if PROGRAM_FILE != "" && realpath(PROGRAM_FILE) == @__FILE__
         Pkg.instantiate()
     catch
     end
-    if USE_FINCH
-        # Finch is not a default test dependency; add it on demand when signaled.
-        Pkg.add("Finch")
-    end
-
     using ArgParse
     s = ArgParseSettings(description = "Dagger Testsuite")
     @eval begin
@@ -202,11 +197,28 @@ else
     @info "Running all tests"
 end
 
+# Resolve optional dependencies before loading Dagger (and its dependencies) or
+# starting workers. Adding a GPU backend can downgrade LLVM/Atomix; a process
+# that already loaded them cannot switch to the newly resolved versions.
+if USE_GPU || USE_FINCH
+    using Pkg
+    optional_packages = String[]
+    USE_CUDA && push!(optional_packages, "CUDA")
+    USE_ROCM && push!(optional_packages, "AMDGPU")
+    USE_ONEAPI && push!(optional_packages, "oneAPI")
+    USE_METAL && push!(optional_packages, "Metal")
+    USE_OPENCL && append!(optional_packages, ["OpenCL", "pocl_jll"])
+    USE_FINCH && push!(optional_packages, "Finch")
+    Pkg.add(optional_packages)
+end
+
 using Distributed
 if additional_workers > 0
     # We put this inside a branch because addprocs() takes a minimum of 1s to
     # complete even if doing nothing, which is annoying.
-    addprocs(additional_workers; exeflags=`--project=$(joinpath(@__DIR__, "..")) -t $worker_threads`)
+    # Pkg.test runs in a temporary project containing the test-only backends.
+    # Workers must use that same resolution, rather than the repository project.
+    addprocs(additional_workers; exeflags=`--project=$(Base.active_project()) -t $worker_threads`)
 end
 
 include("imports.jl")

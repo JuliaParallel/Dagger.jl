@@ -633,3 +633,11 @@ lesson.
     YAML but passes `{{array}}` to the benchmark worker, which rejects the suite
     before sampling. Check the expanded command arguments and artifact paths
     for every pipeline; parser and dependency checks do not catch this error.
+
+61. **Resolve optional test packages before loading dependencies or starting
+    workers, and share the active test project.** Installing a GPU backend can
+    downgrade LLVM and Atomix after Dagger/KernelAbstractions already loaded
+    them; GPUCompiler then sees the old module with the new package graph and
+    fails before any GPU test runs. `Pkg.test` uses a temporary project, so
+    workers must inherit `Base.active_project()`, not the repository project.
+    Install optional packages in one batch before imports and worker startup.
