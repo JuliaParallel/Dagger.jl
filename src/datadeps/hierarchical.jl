@@ -412,6 +412,10 @@ struct HierarchicalTaskMeta
     # arguments (e.g. `In(t1)`). These cannot be `fetch`'d during the
     # pre-scan because they are not launched yet; they become hard DAG edges.
     value_deps::Vector{Int}
+    # An unresolved mutable result can overlap any argument in the region.
+    # These effects supplement the known spans until distribute_task! resolves it.
+    unresolved_read::Bool
+    unresolved_write::Bool
 end
 
 ### Cross-partition chunk ownership ###
@@ -731,6 +735,8 @@ function _collect_aliased_args_range!(task_metas::Vector{HierarchicalTaskMeta},
 
         all_deps = HierarchicalTaskInfo[]
         value_deps = Int[]
+        unresolved_read = false
+        unresolved_write = false
         first_chunk = nothing
         task_may_alias = false
         task_inplace = false
@@ -747,18 +753,21 @@ function _collect_aliased_args_range!(task_metas::Vector{HierarchicalTaskMeta},
             # dependency, which `build_dependency_dag` turns into a hard edge;
             # aliasing of its result is picked up in `distribute_task!`.
             #
-            # N.B. An unlaunched producer from *outside* the region (`pred_idx ==
-            # 0`, reachable when the region is nested inside a `spawn_bulk` that
-            # has not flushed) is skipped entirely: no value dep and no aliasing
-            # entry. `distribute_task!` still fetches and tracks it, so the task
-            # itself is correct, but it contributes no DAG edges -- so if another
-            # in-region task aliases the same underlying data, the dependency
-            # between them is missed. Handling this needs the pre-scan to be able
-            # to wait on out-of-region producers.
+            # Preserve possible conflicts with other arguments without fetching
+            # the result. Only an isbits return type proves it cannot alias:
+            # abstract types (including Any) and arrays must stay conservative.
+            # This also covers an unlaunched out-of-region producer, although
+            # submitting that producer is still its enclosing queue's job.
             if arg_pre_unwrap isa DTask && !istaskstarted(arg_pre_unwrap)
                 pred_idx = get(task_to_idx, arg_pre_unwrap, 0)
                 if pred_idx != 0 && pred_idx != task_idx
                     push!(value_deps, pred_idx)
+                end
+                if !isbitstype(arg_pre_unwrap.metadata.return_type)
+                    for (_, readdep, writedep) in deps
+                        unresolved_read |= readdep
+                        unresolved_write |= writedep
+                    end
                 end
                 continue
             end
@@ -795,7 +804,8 @@ function _collect_aliased_args_range!(task_metas::Vector{HierarchicalTaskMeta},
         end
 
         task_metas[task_idx] = HierarchicalTaskMeta(
-            pair, first_chunk, task_may_alias, task_inplace, all_deps, value_deps
+            pair, first_chunk, task_may_alias, task_inplace, all_deps, value_deps,
+            unresolved_read, unresolved_write
         )
     end
 end
@@ -1076,7 +1086,130 @@ function build_dependency_dag(task_metas::Vector{HierarchicalTaskMeta},
         write_num += 1
     end
 
+    add_syncdep_edges!(dag, task_metas)
+    add_unresolved_alias_edges!(dag, task_metas)
     return dag
+end
+
+# Explicit synchronization also constrains submission: the eager scheduler
+# resolves its IDs when a task is submitted, so its predecessors must exist.
+function add_syncdep_edges!(dag::SimpleDiGraph, task_metas::Vector{HierarchicalTaskMeta})
+    has_syncdeps = false
+    for meta in task_metas
+        deps = meta.pair.spec.options.syncdeps
+        has_syncdeps |= deps !== nothing && !isempty(deps)
+    end
+    has_syncdeps || return dag
+    uid_to_idx = @reusable_dict :hierarchical_syncdep_vertices UInt Int UInt(0) 0 32
+    for (v, meta) in enumerate(task_metas)
+        uid_to_idx[meta.pair.task.uid] = v
+    end
+    for (v, meta) in enumerate(task_metas)
+        deps = meta.pair.spec.options.syncdeps
+        deps === nothing && continue
+        for dep in deps
+            dep.id === nothing && continue
+            pred = get(uid_to_idx, UInt(dep.id.id), 0)
+            pred != 0 && pred != v && add_edge!(dag, pred, v)
+        end
+    end
+    return dag
+end
+
+# Unknown result spans obey the same RAW/WAR/WAW rules as known spans, but
+# potentially overlap every mutable argument. Read-only branches remain
+# independent. An unknown writer starts a new epoch: it depends on every
+# earlier access, so its successors need only that writer and later accesses.
+function add_unresolved_alias_edges!(dag::SimpleDiGraph,
+                                     task_metas::Vector{HierarchicalTaskMeta})
+    any_unknown = false
+    for meta in task_metas
+        any_unknown |= meta.unresolved_read | meta.unresolved_write
+    end
+    any_unknown || return dag
+
+    readers = @reusable_vector :unresolved_alias_readers Int 0 32
+    writers = @reusable_vector :unresolved_alias_writers Int 0 32
+    unknown_readers = @reusable_vector :unresolved_alias_unknown_readers Int 0 32
+    unknown_writer = 0
+    for (v, meta) in enumerate(task_metas)
+        reads = false
+        writes = false
+        for dep in meta.deps
+            reads |= dep.readdep
+            writes |= dep.writedep
+        end
+        if unknown_writer != 0 &&
+           (reads || writes || meta.unresolved_read || meta.unresolved_write)
+            add_edge!(dag, unknown_writer, v)
+        end
+        if meta.unresolved_write
+            for pred in readers
+                add_edge!(dag, pred, v)
+            end
+            for pred in writers
+                add_edge!(dag, pred, v)
+            end
+            for pred in unknown_readers
+                add_edge!(dag, pred, v)
+            end
+            empty!(readers)
+            empty!(writers)
+            empty!(unknown_readers)
+            unknown_writer = v
+        else
+            if meta.unresolved_read
+                for pred in writers
+                    add_edge!(dag, pred, v)
+                end
+            end
+            if writes
+                for pred in unknown_readers
+                    add_edge!(dag, pred, v)
+                end
+            end
+            reads && push!(readers, v)
+            writes && push!(writers, v)
+            meta.unresolved_read && push!(unknown_readers, v)
+        end
+    end
+    return dag
+end
+
+"""
+    datadeps_launch_order(dag, has_value_deps) -> Vector{Int}
+
+Keep the existing DFS traversal for buffer-only regions. For value-dependent
+regions, use a FIFO topological frontier: independent producers are prepared
+before newly unlocked consumers can block planning by fetching their results.
+This is a submission order, not an execution barrier between graph levels.
+The DAG must include conservative edges for unresolved mutable result aliases.
+Vertex and neighbor order are deterministic so MPI ranks replay the same plan.
+"""
+function datadeps_launch_order(dag::SimpleDiGraph, has_value_deps::Bool)
+    if !has_value_deps
+        return topological_sort_by_dfs(dag)
+    end
+    n = nv(dag)
+    remaining = @reusable_vector :datadeps_launch_indegrees Int 0 32
+    resize!(remaining, n)
+    order = Int[]
+    sizehint!(order, n)
+    for v in vertices(dag)
+        remaining[v] = length(inneighbors(dag, v))
+        remaining[v] == 0 && push!(order, v)
+    end
+    head = 1
+    while head <= length(order)
+        v = order[head]
+        for succ in outneighbors(dag, v)
+            remaining[succ] -= 1
+            remaining[succ] == 0 && push!(order, succ)
+        end
+        head += 1
+    end
+    length(order) == n || throw(ArgumentError("Datadeps dependency graph contains a cycle"))
+    return order
 end
 
 """
@@ -1368,11 +1501,7 @@ function schedule_partition_full!(queue::DataDepsTaskQueue,
     proc_to_scope_lfu = BasicLFUCache{Processor,AbstractScope}(1024)
 
     vert_set = Set{Int}(partition_verts)
-    topo = try
-        topological_sort_by_dfs(dag)
-    catch
-        collect(vertices(dag))
-    end
+    topo = datadeps_launch_order(dag, !isempty(value_dep_verts))
     ordered_verts = filter(v -> v in vert_set, topo)
 
     # N.B. Each partition gets its own fresh scheduler shard via `similar`
@@ -1544,11 +1673,7 @@ function schedule_partitions_sequential!(queue::DataDepsTaskQueue,
         temp_queues[pid] = DataDepsTaskQueue(submit_queue; scheduler=similar(queue.scheduler))
     end
 
-    topo = try
-        topological_sort_by_dfs(dag)
-    catch
-        collect(vertices(dag))
-    end
+    topo = datadeps_launch_order(dag, !isempty(value_dep_verts))
 
     # Copy tasks spawned from within `distribute_task!` go through the same queue
     # as the tasks they serve, so that they are held (or not) alongside them.
