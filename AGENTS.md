@@ -641,3 +641,10 @@ lesson.
     fails before any GPU test runs. `Pkg.test` uses a temporary project, so
     workers must inherit `Base.active_project()`, not the repository project.
     Install optional packages in one batch before imports and worker startup.
+
+62. **Optional language runtimes must not initialize in unrelated test jobs.**
+    Listing PythonCall/CondaPkg as unconditional test dependencies initializes
+    Python during `Pkg.test` precompilation, even in GPU-only jobs. A Python
+    library discovery failure then aborts Metal tests before the runner starts.
+    Install those packages before imports only when the Python suite is selected;
+    default CPU runs still select that suite, and GPU runs do not.

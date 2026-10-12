@@ -200,7 +200,7 @@ end
 # Resolve optional dependencies before loading Dagger (and its dependencies) or
 # starting workers. Adding a GPU backend can downgrade LLVM/Atomix; a process
 # that already loaded them cannot switch to the newly resolved versions.
-if USE_GPU || USE_FINCH
+if USE_GPU || USE_FINCH || "extlang/python" in to_test
     using Pkg
     optional_packages = String[]
     USE_CUDA && push!(optional_packages, "CUDA")
@@ -209,6 +209,9 @@ if USE_GPU || USE_FINCH
     USE_METAL && push!(optional_packages, "Metal")
     USE_OPENCL && append!(optional_packages, ["OpenCL", "pocl_jll"])
     USE_FINCH && push!(optional_packages, "Finch")
+    if "extlang/python" in to_test
+        append!(optional_packages, ["CondaPkg", "PythonCall"])
+    end
     Pkg.add(optional_packages)
 end
 
