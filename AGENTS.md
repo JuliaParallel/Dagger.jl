@@ -686,3 +686,45 @@ lesson.
     running; MPICH had placed each rank in its own process group. After a
     timeout, inspect rank PIDs/PGIDs and stop those groups too. Killing only
     the wrapper's group is not sufficient for this launcher.
+
+67. **A topological planning order can serialize independent execution.**
+    Same-region `DTask` arguments are fetched by `populate_task_info!`, so the
+    hierarchical sequential planner flushes submission before visiting a value
+    consumer. DFS topological order interleaves a reduction tree's leaves and
+    consumers, making each fetch stall planning before the remaining leaves
+    are submitted. The scalar tree in issue #759 is safe to execute with all
+    leaves concurrent: flat submission order submits every leaf before the
+    first consumer fetch. On one MPI rank with four threads, changing only the
+    sequential planner's traversal to submission order restored concurrency
+    from two to four and reduced a warmed run from 0.71 s to 0.32 s, preserving
+    the checked result. MPI requires rank-identical planning order, not DFS;
+    retain producer-before-consumer ordering, flushes, and result aliasing
+    analysis when changing the traversal. This does not justify running MPI
+    planning itself concurrently or skipping fetches for mutable results.
+
+68. **Submission order is not necessarily breadth-first tree order.** MPI
+    `collect(::DArray)` builds a Datadeps concatenation tree through
+    `treereduce_nd`, whose `treereduce` helper recursively emits one subtree
+    before the next. With 16 vector tiles, both submission order and DFS visit
+    concatenation levels `[1, 1, 2, 1, 1, 2, 3, ...]`, although eight bottom
+    concatenations are independent. Merely preserving submission order fixes
+    issue #759's explicitly level-ordered tree, but does not expose all those
+    independent gather tasks before the first consumer fetch. A broader fix
+    needs to prioritize independent producers while preserving dependencies;
+    inspect how an algorithm emits its tasks before assuming a traversal
+    change helps it. Buffer-based factorizations avoid this particular
+    same-region result-fetch stall.
+
+69. **A placement plan is not proof that a launch reordering is safe.**
+    The hierarchical prescan records same-region value edges but skips the
+    unresolved result's aliasing. For `t = @spawn identity(In(A))`, followed
+    by `@spawn sum(In(t))` and `@spawn fill!(Out(A), 0)`, the initial DAG has
+    edges 1→2 and 1→3 but lacks the required 2→3 edge: the result aliases A.
+    A general ready-frontier traversal must conservatively preserve those
+    possible conflicts until aliases are resolved. At
+    `aot-schedulers-rebased` commit 04a8ec2, `dag_add_task!` explicitly stops
+    at same-region result consumers, AOT schedules store placements only,
+    and EFT release times use original task indices. An ordering extension
+    therefore needs symbolic value dependencies, alias-safety rules, and
+    actual launch positions in the cost model; simply re-enabling the
+    commented `DTaskDAGID` handling or swapping DFS for BFS is insufficient.
