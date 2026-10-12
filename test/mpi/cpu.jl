@@ -59,6 +59,7 @@ const accel = Dagger.current_acceleration()
 
 include("broadcast.jl")
 include("receive.jl")
+include(joinpath(@__DIR__, "..", "datadeps", "launch_order.jl"))
 
 mpi_procs() = sort(collect(Dagger.get_processors(MPIExt.MPIClusterProc(comm)));
                    by=p->(p.rank, Dagger.short_name(p)))
