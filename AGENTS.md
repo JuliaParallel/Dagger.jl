@@ -633,3 +633,29 @@ lesson.
     YAML but passes `{{array}}` to the benchmark worker, which rejects the suite
     before sampling. Check the expanded command arguments and artifact paths
     for every pipeline; parser and dependency checks do not catch this error.
+
+61. **Resolve optional test packages before loading dependencies or starting
+    workers, and share the active test project.** Installing a GPU backend can
+    downgrade LLVM and Atomix after Dagger/KernelAbstractions already loaded
+    them; GPUCompiler then sees the old module with the new package graph and
+    fails before any GPU test runs. `Pkg.test` uses a temporary project, so
+    workers must inherit `Base.active_project()`, not the repository project.
+    Install optional packages in one batch before imports and worker startup.
+
+62. **Optional language runtimes must not initialize in unrelated test jobs.**
+    Listing PythonCall/CondaPkg as unconditional test dependencies initializes
+    Python during `Pkg.test` precompilation, even in GPU-only jobs. A Python
+    library discovery failure then aborts Metal tests before the runner starts.
+    Install those packages before imports only when the Python suite is selected;
+    default CPU runs still select that suite, and GPU runs do not.
+
+63. **Python setup failures can come from two independent upstream regressions.**
+    CondaPkg scans every environment in `LOAD_PATH`, including optional global
+    and stdlib environments whose `Project.toml` may not exist. CondaPkg 0.2.37
+    tries to open those files and fails before Python initialization (fixed by
+    JuliaPy/CondaPkg.jl#235). Once resolution succeeds, PythonCall 0.9.36 can
+    still fail library discovery because conda-forge's Python 3.15 separates
+    `libpython` from the interpreter (fixed by JuliaPy/PythonCall.jl#839).
+    Compare unrelated PR logs and check upstream releases before changing the
+    test bootstrap: installing Python only for its suite does not cause either
+    failure. Both fixes together pass Dagger's Python suite on Julia 1.11.
