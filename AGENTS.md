@@ -1475,3 +1475,11 @@ lesson.
     later read of A to see the write must keep the producer on A's owner.
     Derive that scope from the acceleration-aware wrapped chunk's memory
     space so the test exercises actual aliasing under Distributed and MPI.
+
+72. **Gather a DArray before collecting a generic triangular wrapper.**
+    `collect(cholesky(DA).U)` dispatches to LinearAlgebra's generic triangular
+    copy, which scalar-indexes the DArray and fetches a tile for every element.
+    The MPI production-mode smoke consequently spent minutes gathering a
+    256² factor. `UpperTriangular(collect(parent(cholesky(DA).U)))` gathers
+    through the DArray concatenation tree once and preserves the same
+    triangular values for the numerical assertion.

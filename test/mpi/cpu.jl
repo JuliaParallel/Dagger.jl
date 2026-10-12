@@ -855,7 +855,9 @@ end
         local U
         for _ in 1:2
             DA = DArray(A, Blocks(B, B))
-            U = collect(cholesky(DA).U)
+            # Collect the tiled parent once; generic collect of the triangular
+            # wrapper fetches every scalar separately under MPI.
+            U = UpperTriangular(collect(parent(cholesky(DA).U)))
         end
         @test U ≈ cholesky(A).U
     finally
