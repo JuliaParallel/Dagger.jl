@@ -659,3 +659,30 @@ lesson.
     Compare unrelated PR logs and check upstream releases before changing the
     test bootstrap: installing Python only for its suite does not cause either
     failure. Both fixes together pass Dagger's Python suite on Julia 1.11.
+
+64. **Uniform eager placement must vary by task, not by ready-arrival order.**
+    MPI ignores rank-local load and capacity, so sorting every task's candidates
+    identically sends all plain `@spawn` work to rank 0's first thread. Rotate
+    the canonical candidates using the already-uniform thunk ID, rather than
+    a scheduler cursor: ready tasks can arrive in different orders across ranks.
+    With input-owner affinity, rotate only that rank's candidate prefix so
+    locality survives; if a scope excludes the owner, rotate the permitted
+    candidates instead. Calls without a task must retain canonical ordering
+    for Datadeps and processor grids. The issue #760 reproduction changed from
+    16 serial tasks on one processor to four tasks on each of four processors.
+
+65. **A dynamic candidate scan can box even an unused backend argument.**
+    Calling `processor_owner_rank(accel, proc)` from a `Vector{Processor}`
+    loop boxed the isbits `MPIAcceleration` once per candidate: four candidates
+    added four allocations / 64 bytes per eager placement. An out-of-line scan
+    with `@nospecialize(accel)` preserves runtime hook dispatch while passing
+    the already-boxed backend through the loop. Only that scan boundary now
+    boxes (one allocation / 16 bytes), and the no-affinity path stays unchanged.
+    This is a pass-through planning argument; do not erase types needed by
+    execution or arithmetic to achieve the same effect.
+
+66. **An MPI test timeout can leave ranks in separate process groups.**
+    Timing out `test/mpi/run.jl` killed its launcher but left both Julia ranks
+    running; MPICH had placed each rank in its own process group. After a
+    timeout, inspect rank PIDs/PGIDs and stop those groups too. Killing only
+    the wrapper's group is not sufficient for this launcher.
