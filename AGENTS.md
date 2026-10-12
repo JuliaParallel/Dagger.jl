@@ -686,7 +686,8 @@ lesson.
     running; MPICH had placed each rank in its own process group. After a
     timeout, inspect rank PIDs/PGIDs and stop those groups too. Killing only
     the wrapper's group is not sufficient for this launcher.
-61. **A Distributed GPU transfer must preserve the source's ownership.**
+
+67. **A Distributed GPU transfer must preserve the source's ownership.**
    Sending a raw device array in a slot-creation RPC deserializes it on the
    receiver while `from_proc` still names the sender. The subsequent GPU
    `move` then activates a remote worker's context locally and asserts; some
@@ -696,7 +697,7 @@ lesson.
    inputs and consumers to different workers selecting device 1: a GPU scope
    alone does not guarantee that a transfer actually happens.
 
-62. **CUDA IPC must export staging memory and return an owned copy.**
+68. **CUDA IPC must export staging memory and return an owned copy.**
    CUDA's pooled allocations cannot be exported with `cuIpcGetMemHandle`, and
    returning an imported mapping makes the receiver alias the sender's data
    and depend on its lifetime. Use the shared `ipc_export`/`ipc_materialize`
@@ -705,7 +706,7 @@ lesson.
    moved the driver API into CUDACore. Test repeated transfers in both
    directions and mutate the destination to verify source independence.
 
-63. **Two GPUs of one process are not one device, and may not even be
+69. **Two GPUs of one process are not one device, and may not even be
    peers.** Several paths assumed "same worker" meant "one kernel may touch
    both buffers": the same-worker device remainder copy, `collect`'s
    in-process `cat`, and CUDA `pointer()` (which takes ownership for the
@@ -715,7 +716,7 @@ lesson.
    ownership side effects, and test with tiles on two devices of one
    process: the one-GPU-per-worker suites cannot see any of this.
 
-64. **Reading a GPU task's result needs Dagger's stream, not the caller's.**
+70. **Reading a GPU task's result needs Dagger's stream, not the caller's.**
    GPU `execute!` returns without synchronizing: the kernels are still queued
    on Dagger's per-device stream. A plain `fetch` + `Array(x)` from the
    caller copies on the caller's own task-local stream, and is correct only
@@ -728,7 +729,7 @@ lesson.
    IntelExt's hooks sync only the calling task's stream, and each oneAPI
    `execute!` runs on a fresh task, so oneAPI's own hook is not sufficient yet.
 
-74. **Never unregister host memory from a finalizer that can block.**
+71. **Never unregister host memory from a finalizer that can block.**
    `CUDA.pin` unregisters in a GC finalizer that takes a `ReentrantLock`
    (as does `AMDGPU.Mem.unpin`, which ROCExt's finalizer used to call). When
    that lock is contended the finalizer throws "task switch not allowed from
@@ -745,7 +746,7 @@ lesson.
    later GC can unregister it). Anything that must run before
    memory is freed has to be finalizer-safe: no blocking locks, no yields.
 
-75. **Two GPUs without peer access: never let CUDA.jl stage the copy.**
+72. **Two GPUs without peer access: never let CUDA.jl stage the copy.**
    Without P2P, `copyto!` between devices goes through a fresh *pageable*
    `Vector` with a synchronous DtoH: 1.4 GB/s on PCIe-attached L40S, where
    `cuMemcpyPeerAsync` (which works without peer access; the driver pipelines
@@ -757,7 +758,7 @@ lesson.
    `hipMemcpyPeerAsync` both reached ~5.5 GB/s, vs 1.4 GB/s through a
    pageable host buffer, and `copyto!` blocks until the copy is done.)
 
-76. **One stream per device serializes every transfer with that device's
+73. **One stream per device serializes every transfer with that device's
    compute.** Copies enqueued on the device stream wait behind its kernels,
    and an event recorded on the *source's* stream waits for kernels that
    merely read the data being sent (a GEMM's panel owner is busy reading the
@@ -776,7 +777,7 @@ lesson.
    copy looks like an opaque argument and falls back to whole-stream waits);
    and `unsafe_free!` tasks hand you a freed array (check `data.freed`).
 
-78. **Level Zero IPC handles cannot be serialized between processes.** Intel's
+74. **Level Zero IPC handles cannot be serialized between processes.** Intel's
    opaque `ze_ipc_mem_handle_t` includes a process-local file descriptor.
    MPI's serialized metadata copies the descriptor number, not its underlying
    resource, so `zeMemOpenIpcHandle` fails with `ZE_RESULT_ERROR_INVALID_ARGUMENT`
@@ -786,7 +787,7 @@ lesson.
    `DAGGER_IPC=1` cannot supply the missing descriptor. See
    https://github.com/intel/compute-runtime/issues/448.
 
-79. **ROCm Distributed tests need a spare Julia thread for host calls.**
+75. **ROCm Distributed tests need a spare Julia thread for host calls.**
    AMDGPU's persistent host-call tasks poll HSA signals with
    `Libc.systemsleep` and `yield`, which can monopolize a sticky task's only
    thread (lesson 12). With one default thread the GPU suite stopped making
@@ -796,7 +797,7 @@ lesson.
    default threads in ROCm CI. Increasing only the driver's thread count
    leaves remote workers exposed to the same starvation.
 
-80. **GPU event tracking must check a chunk's acceleration ownership.**
+76. **GPU event tracking must check a chunk's acceleration ownership.**
    `root_worker_id(::MPIRef)` and MPI processors intentionally return `myid()`
    on every rank; Distributed's worker-id test therefore calls every MPI chunk
    local. A GPU copy task executes on both endpoint ranks, and recording its
@@ -806,7 +807,7 @@ lesson.
    The existing cross-rank GPU dataflow tests exercise both endpoints; a
    Distributed-only suite cannot catch this mistake.
 
-81. **Reduce apparent GPU ordering failures below Julia before adding fences.**
+77. **Reduce apparent GPU ordering failures below Julia before adding fences.**
    This host's Ryzen 9600X `gfx1036` GPU with HIP 7.2 returns zeros after an
    asynchronous kernel or device copy followed by a short pause, even when
    the same stream is synchronized before reading. A native HIP C++ program
@@ -819,7 +820,7 @@ lesson.
    they are not a valid configuration for performance measurements.
 
 
-82. **oneMKL queue interop can fail below Dagger on Intel Xe2 GPUs.**
+78. **oneMKL queue interop can fail below Dagger on Intel Xe2 GPUs.**
    With oneAPI.jl 2.9.2 and its 2025.3 support libraries, this Arc Pro B60's
    default Level Zero v2 adapter aborts with
    `UR_RESULT_ERROR_UNSUPPORTED_FEATURE` when SYCL wraps a native Level Zero
@@ -829,7 +830,7 @@ lesson.
    separately from Dagger scheduling and record the adapter used in validation.
 
 
-83. **A passing GPU suite does not certify dependency finalizers.**
+79. **A passing GPU suite does not certify dependency finalizers.**
    Julia logs finalizer exceptions without failing the suite or its exit code.
    AMDGPU 2.8.0's `src/cache.jl` `library_state` accepts a `destroy_handle`
    callback but its task finalizer calls undefined `destroy_handle!`, producing
@@ -838,7 +839,7 @@ lesson.
    owning package before changing Dagger's task or GPU resource lifecycle.
 
 
-84. **Installing an external GPU compiler is not the same as selecting it.**
+80. **Installing an external GPU compiler is not the same as selecting it.**
    GPUCompiler 1.23 defaults `GCNCompilerTarget.backend` to `:external` only
    when `AMDGPU_LLVM_Backend_jll` is already loaded, not merely installed.
    AMDGPU 2.1 on Julia 1.11 otherwise uses the embedded LLVM backend, which
