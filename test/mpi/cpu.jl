@@ -145,6 +145,8 @@ end
     MPI.Barrier(comm)
 end
 
+include("spawn.jl")
+
 @testset "Datadeps" begin
 
 include("threads.jl")

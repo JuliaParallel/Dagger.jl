@@ -179,6 +179,18 @@ bind_moved_argument(::Acceleration, original, moved) = moved
 "Logical execution rank of `proc` used for uniform task placement preference."
 processor_owner_rank(accel::Acceleration, proc::Processor) = first(fire_order_key(proc))
 
+# This scan dispatches on abstract Processor elements. Pass the acceleration
+# through unspecialized so an isbits backend is not boxed for every candidate;
+# keep the barrier out of line so inlining does not reintroduce those boxes.
+@noinline function preferred_processor_count(procs, @nospecialize(accel), rank)
+    n = 0
+    for proc in procs
+        processor_owner_rank(accel, proc) == rank || break
+        n += 1
+    end
+    return n
+end
+
 "Deterministic ordering key for `proc` under uniform execution."
 processor_order_key(accel::Acceleration, proc::Processor) =
     (fire_order_key(proc)..., short_name(proc))
@@ -204,6 +216,10 @@ task_processor_preference(accel::Acceleration, task, state) = nothing
 Re-sort `procs` with a deterministic, acceleration-dispatched key when
 `uniform_execution(accel)` so every rank gets the same order (and with a
 `task` the acceleration may prefer the rank owning task argument data).
+Rotate the candidates within that preferred rank (or all candidates when
+there is no eligible preferred rank) using the task ID, so independent tasks
+spread across processors without consulting rank-local load or ready order.
+Calls without a task retain the canonical order used by Datadeps and proc grids.
 When not under uniform execution, leaves `procs` unchanged.
 """
 function select_processors_uniform!(procs, accel::Acceleration,
@@ -214,6 +230,19 @@ function select_processors_uniform!(procs, accel::Acceleration,
         pref !== nothing && processor_owner_rank(accel, p) != pref,
         processor_order_key(accel, p)...,
     ))
+    task === nothing && return procs
+    n = length(procs)
+    if pref !== nothing
+        n = preferred_processor_count(procs, accel, pref)
+        n == 0 && (n = length(procs))
+    end
+    if n > 1
+        offset = mod(task.id - 1, n)
+        # Rotate only the preferred prefix, in place and without scratch.
+        reverse!(procs, 1, offset)
+        reverse!(procs, offset + 1, n)
+        reverse!(procs, 1, n)
+    end
     return procs
 end
 
