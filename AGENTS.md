@@ -849,3 +849,13 @@ lesson.
    Load it on every ROCm test/benchmark worker before kernel compilation;
    adding it only to the driver's environment leaves remote codegen unchanged.
    Keep both comparison revisions on the same backend.
+
+81. **Small Intel MPI smokes do not validate the benchmark workload.** On this
+   Arc Pro B60 with oneAPI 2.9.2, two-rank functional tests pass all 171/174
+   assertions with host staging and the legacy Level Zero adapter, and the
+   MPI array benchmark passes all 28 leaves at sizes 256/1024. The linalg
+   worker nevertheless segfaults on `A*A` at size 1024 with 128-element tiles,
+   inside SYCL's kernel-info lookup called by oneMKL GEMM. That stack identifies
+   the failing native call, not its root cause. Keep Intel MPI functional tests
+   enabled separately from the benchmark jobs; a green small matmul test is
+   insufficient evidence to enable the larger tiled benchmark matrix.

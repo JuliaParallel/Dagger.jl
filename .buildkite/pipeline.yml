@@ -384,7 +384,9 @@ steps:
     artifacts:
       - "benchmark-results-*/**/*"
 
-  # Disabled pending validation of the oneAPI MPI benchmark suites.
+  # Disabled: the two-rank linalg benchmark segfaults in oneMKL/SYCL at
+  # N=1024 with 128-element tiles, including with the legacy Level Zero adapter.
+  # Functional MPI tests pass; re-enable after the benchmark matrix also passes.
   #
   # - label: "Benchmarks (oneAPI, gpu-mpi, {{matrix}})"
   #   key: "bench-oneapi-gpu-mpi"
