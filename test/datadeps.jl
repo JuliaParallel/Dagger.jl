@@ -2,6 +2,8 @@ import Dagger: ChunkView, Chunk, AbstractAliasing, MemorySpace, ArgumentWrapper
 import Dagger: aliasing, memory_space
 using LinearAlgebra, Graphs
 
+include("datadeps/launch_order.jl")
+
 @testset "Hierarchical timing gates" begin
     # Exercise both the identity slot and the general move_rewrap path. Timing
     # must remain available when enabled, independently of scheduler logging.

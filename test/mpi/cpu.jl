@@ -54,6 +54,7 @@ const accel = Dagger.current_acceleration()
 
 include("broadcast.jl")
 include("receive.jl")
+include(joinpath(@__DIR__, "..", "datadeps", "launch_order.jl"))
 
 mpi_procs() = sort(collect(Dagger.get_processors(MPIExt.MPIClusterProc(comm)));
                    by=p->(p.rank, Dagger.short_name(p)))
@@ -799,7 +800,9 @@ end
         local U
         for _ in 1:2
             DA = DArray(A, Blocks(B, B))
-            U = collect(cholesky(DA).U)
+            # Collect the tiled parent once; generic collect of the triangular
+            # wrapper fetches every scalar separately under MPI.
+            U = UpperTriangular(collect(parent(cholesky(DA).U)))
         end
         @test U ≈ cholesky(A).U
     finally
