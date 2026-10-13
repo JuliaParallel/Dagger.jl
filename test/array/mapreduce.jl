@@ -95,3 +95,36 @@ end
     @testset "prod" test_mapreduce_type((X; dims)->prod(x->x>0.05, X; dims), A; cmp=Base.:(==))
     @testset "maximum" test_mapreduce_type((X; dims)->maximum(x->x>0.95, X; dims), A; cmp=Base.:(==))
 end
+
+@testset "accumulate" begin
+    @testset "$(size(A)) in $bs" for (A, bs) in ((rand(1:9, 10), (3,)),
+                                                 (rand(1:9, 10, 9), (3, 4)),
+                                                 (rand(1:9, 5, 6, 7), (2, 3, 4)))
+        DA = distribute(A, Blocks(bs...))
+        @testset "dims=$dims" for dims in 1:ndims(A)+1
+            R = cumsum(DA; dims)
+            @test eltype(R) == eltype(cumsum(A; dims))
+            @test collect(R) == cumsum(A; dims)
+            @test collect(cumprod(DA; dims)) == cumprod(A; dims)
+            @test collect(accumulate(max, DA; dims)) == accumulate(max, A; dims)
+            R = accumulate(+, DA; dims, init=0.5)
+            @test eltype(R) == Float64
+            @test collect(R) == accumulate(+, A; dims, init=0.5)
+        end
+    end
+
+    v = rand(1:9, 10)
+    Dv = distribute(v, Blocks(3))
+    @test collect(cumsum(Dv)) == cumsum(v)
+    @test collect(cumprod(Dv)) == cumprod(v)
+    @test collect(accumulate(+, Dv; init=2)) == accumulate(+, v; init=2)
+    v8 = rand(Int8, 10)
+    @test eltype(cumsum(distribute(v8, Blocks(3)))) == Int
+    @test collect(cumsum(distribute(v8, Blocks(3)))) == cumsum(v8)
+    # An `init` of a wider type widens every partition, not just the first
+    w8 = fill(Int8(100), 10, 4)
+    @test collect(accumulate(+, distribute(w8, Blocks(3, 2)); dims=1, init=0)) == accumulate(+, w8; dims=1, init=0)
+    @test collect(accumulate(+, distribute(w8[:, 1], Blocks(3)); init=0)) == accumulate(+, w8[:, 1]; init=0)
+    @test_throws ArgumentError cumsum(Dv; dims=0)
+    @test_throws ArgumentError accumulate(+, Dv; foo=1)
+end

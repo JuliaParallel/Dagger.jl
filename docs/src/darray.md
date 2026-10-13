@@ -685,6 +685,7 @@ From `Base`:
 - `map`/`reduce`/`mapreduce`
 - `sum`/`prod`
 - `minimum`/`maximum`/`extrema`
+- `accumulate`/`cumsum`/`cumprod`
 - `map!`
 
 From `Random`:

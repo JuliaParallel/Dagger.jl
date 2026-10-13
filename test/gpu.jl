@@ -36,6 +36,20 @@ end
     end
 end
 
+@testset "DArray accumulate ($name)" for (name, scope) in GPU_SCOPES
+    Dagger.with_options(; scope) do
+        DA = rand(Blocks(4, 4), Float32, 16, 16)
+        A = collect(DA)
+        @test collect(cumsum(DA; dims=1)) ≈ cumsum(A; dims=1)
+        @test collect(cumprod(DA; dims=2)) ≈ cumprod(A; dims=2)
+        @test collect(accumulate(max, DA; dims=1)) == accumulate(max, A; dims=1)
+        @test collect(accumulate(+, DA; dims=2, init=1f0)) ≈ accumulate(+, A; dims=2, init=1f0)
+        @test collect(accumulate(+, DA; dims=1, init=0.0)) ≈ accumulate(+, A; dims=1, init=0.0)
+        DV = rand(Blocks(4), Float32, 16)
+        @test collect(cumsum(DV)) ≈ cumsum(collect(DV))
+    end
+end
+
 @everywhere begin
     function isongpu(X)
         return !(X isa Array)

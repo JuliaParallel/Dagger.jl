@@ -223,3 +223,62 @@ var(f::Function, x::DArray; dims=nothing) =
 std(x::DArray; dims=nothing) = std(identity, x; dims)
 std(f::Function, x::DArray; dims=nothing) =
     map(sqrt, var(f, x; dims))
+
+#### Accumulate
+
+# `Base`'s fallback scans element by element, which `getindex(::DArray, ...)`
+# cannot do. Scan each partition on its own instead, then combine the running
+# last slice of the partitions before it along `dims` into it. Like `reduce`,
+# this assumes `op` is associative.
+_accumulate_part(op, x, RT, dims, kw) = accumulate(op, _widen(x, RT); dims, kw...)
+# Only the first partition along `dims` starts from `init`. When `init` widens
+# the eltype, the others would scan in the narrower one and could overflow or
+# lose precision before the carry reaches them, so widen the partitions first.
+function _widen(x, ::Type{RT}) where RT
+    T = eltype(x)
+    widen = T <: Number && T !== RT && isconcretetype(RT) && promote_type(T, RT) === RT
+    return widen ? RT.(x) : x
+end
+_add_carry(op, carry, x) = op.(carry, x)
+function _next_carry(op, carry, x, dims)
+    n = size(x, dims)
+    slice = selectdim(x, dims, n:n)
+    return carry === nothing ? copy(slice) : op.(carry, slice)
+end
+
+function Base.accumulate(op, A::DArray; dims::Union{Nothing,Integer}=nothing, kw...)
+    if dims === nothing
+        # Without `dims`, `Base` scans any other array in linear order
+        ndims(A) == 1 || return invoke(accumulate, Tuple{Any,Any}, op, A; kw...)
+        return accumulate(op, A; dims=1, kw...)
+    end
+    dims > 0 || throw(ArgumentError("dims must be a positive integer"))
+    isempty(kw) || keys(kw) === (:init,) ||
+        throw(ArgumentError("accumulate does not support the keyword arguments $(setdiff(keys(kw), (:init,)))"))
+    return _accumulate(op, A, Int(dims), values(kw))
+end
+
+function _accumulate(op, A::DArray{T,N}, dims::Int, kw::NamedTuple) where {T,N}
+    # The eltype `Base` gives for a plain array
+    RT = eltype(Base.promote_op(x -> accumulate(op, x; dims, kw...), Array{T,N}))
+
+    parts = chunks(A)
+    thunks = similar(parts, DTask)
+    carries = similar(parts, DTask)
+    prev = CartesianIndex(ntuple(d -> Int(d == dims), N))
+    for I in CartesianIndices(parts)
+        k = dims <= N ? I[dims] : 1
+        scanned = Dagger.@spawn _accumulate_part(op, parts[I], RT, dims, k == 1 ? kw : (;))
+        carry = k == 1 ? nothing : carries[I - prev]
+        thunks[I] = k == 1 ? scanned : Dagger.@spawn _add_carry(op, carry, scanned)
+        if k < size(parts, dims)
+            carries[I] = Dagger.@spawn _next_carry(op, carry, scanned, dims)
+        end
+    end
+    return DArray(RT, domain(A), domainchunks(A), thunks, A.partitioning, A.concat)
+end
+
+Base.cumsum(A::DArray; dims::Integer) = accumulate(Base.add_sum, A; dims)
+Base.cumsum(A::DVector) = cumsum(A; dims=1)
+Base.cumprod(A::DArray; dims::Integer) = accumulate(Base.mul_prod, A; dims)
+Base.cumprod(A::DVector) = cumprod(A; dims=1)
