@@ -107,7 +107,11 @@ end
                        Dagger.TypedArgument(3, In(local_chunk)), Dagger.TypedArgument(4, In(unlaunched)))))
     expected = Dict{Tuple{Chunk,Any},AbstractAliasing}((c, dep_mod) => aliasing(c, dep_mod)
                                                        for c in remote for dep_mod in (identity, UpperTriangular))
-    expected[(done_chunk, identity)] = aliasing(done_chunk, identity)
+    # With no other workers (`-p 0`) the finished task ran here, so its result
+    # is local and left alone, like every other chunk
+    if Dagger.root_worker_id(done_chunk.processor) != myid()
+        expected[(done_chunk, identity)] = aliasing(done_chunk, identity)
+    end
     memo = Dagger.ChunkAinfoMemo()
     Dagger.with(Dagger.CHUNK_AINFO_MEMO => memo) do
         Dagger.prefetch_chunk_aliasing!(pairs)
