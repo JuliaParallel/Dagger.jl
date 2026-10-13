@@ -83,6 +83,44 @@ end
     end
 end
 
+@testset "Flat prefetch of chunk aliasing" begin
+    # Every remote chunk the tasks name, directly or as a finished DTask's
+    # result, is resolved in one batch per owner and memoized under the key
+    # `aliasing` itself would look up. Local chunks are left to `aliasing`, and
+    # unfinished DTasks too: fetching one would block. Each remote chunk is
+    # named under two dep_mods, so its owner's batch must carry its `DRef` once
+    # (the same `DRef` twice in one message used to hang the owner).
+    remote = Chunk[remotecall_fetch(Dagger.tochunk, wid, zeros(4, 4))
+                   for wid in procs() if wid != myid()]
+    done = Dagger.@spawn scope=Dagger.scope(worker=last(procs())) zeros(4, 4)
+    wait(done)
+    done_chunk = fetch(done; raw=true)
+    local_chunk = Dagger.tochunk(zeros(4, 4))
+    unlaunched = Dagger.DTask(rand(UInt), Dagger.ThunkFuture(), Dagger.DTaskMetadata(Any))
+    task = Dagger.DTask(rand(UInt), Dagger.ThunkFuture(), Dagger.DTaskMetadata(Any))
+    pair(fargs) = Dagger.DTaskPair(Dagger.DTaskSpec(fargs, Dagger.Options()), task)
+    pairs = [pair(Dagger.Argument[Dagger.Argument(1, identity), Dagger.Argument(2, In(c)),
+                                  Dagger.Argument(3, Deps(c, InOut(UpperTriangular)))])
+             for c in remote]
+    # A typed spec, as `@spawn` builds for concretely-typed arguments
+    push!(pairs, pair((Dagger.TypedArgument(1, identity), Dagger.TypedArgument(2, InOut(done)),
+                       Dagger.TypedArgument(3, In(local_chunk)), Dagger.TypedArgument(4, In(unlaunched)))))
+    expected = Dict{Tuple{Chunk,Any},AbstractAliasing}((c, dep_mod) => aliasing(c, dep_mod)
+                                                       for c in remote for dep_mod in (identity, UpperTriangular))
+    expected[(done_chunk, identity)] = aliasing(done_chunk, identity)
+    memo = Dagger.ChunkAinfoMemo()
+    Dagger.with(Dagger.CHUNK_AINFO_MEMO => memo) do
+        Dagger.prefetch_chunk_aliasing!(pairs)
+        @test length(memo.entries) == length(expected)
+        for ((c, dep_mod), ainfo) in expected
+            key = Dagger.ainfo_memo_key(c, dep_mod)
+            # A cache miss must fail, not silently recompute the same answer.
+            cached = Dagger.memoized_ainfo(() -> error("prefetch did not memoize"), key)
+            @test cached == ainfo
+        end
+    end
+end
+
 @testset "Memory Aliasing" begin
     A = rand(4)
     a = Dagger.aliasing(A)

@@ -7,48 +7,16 @@ Base.isempty(spec::DAGSpec) = length(spec) == 0
 
 function dag_add_task!(dspec::DAGSpec, tspec::DTaskSpec, task::DTask)
     # Check if this task depends on any other tasks within the DAG,
-    # which we are not yet ready to handle
-    for (idx, _arg) in enumerate(tspec.fargs)
-        arg, deps = unwrap_inout(value(_arg))
-        for (dep_mod, readdep, writedep) in deps
-            if arg isa DTask
-                if arg.uid in keys(dspec.uid_to_id)
-                    # Within-DAG dependency, bail out
-                    return false
-                end
-            end
-        end
-    end
+    # which we are not yet ready to handle (a within-DAG dependency: bail out)
+    _any_arg(_arg -> _depends_on_dag_task(dspec, value(_arg)), tspec.fargs) && return false
 
     add_vertex!(dspec.g)
     id = nv(dspec.g)
 
     # Record function signature
     dspec.id_to_functype[id] = chunktype(tspec.fargs[1])
-    argtypes = DatadepsArgSpec[]
-    for (idx, _arg) in enumerate(tspec.fargs)
-        arg, deps = unwrap_inout(value(_arg))
-        pos = raw_position(_arg)
-        for (dep_mod, readdep, writedep) in deps
-            if arg isa DTask
-                #= TODO: Re-enable this when we can handle within-DAG dependencies
-                if arg.uid in keys(dspec.uid_to_id)
-                    # Within-DAG dependency
-                    arg_id = dspec.uid_to_id[arg.uid]
-                    push!(dspec.id_to_argtypes[arg_id], DatadepsArgSpec(pos, DTaskDAGID{arg_id}, dep_mod, UnknownAliasing()))
-                    add_edge!(dspec.g, arg_id, id)
-                    continue
-                end
-                =#
-
-                # External DTask, so fetch this and track it as a raw value
-                arg = fetch(arg; raw=true)
-            end
-            ainfo = aliasing(arg, dep_mod)
-            # FIXME: Generate syncdeps and add edges
-            push!(argtypes, DatadepsArgSpec(pos, typeof(arg), dep_mod, ainfo))
-        end
-    end
+    argtypes = sizehint!(DatadepsArgSpec[], length(tspec.fargs))
+    _foreach_arg(_arg -> _push_argspecs!(argtypes, raw_position(_arg), value(_arg)), tspec.fargs)
     dspec.id_to_argtypes[id] = argtypes
     dspec.id_to_scope[id] = @something(tspec.options.compute_scope,
                                        tspec.options.scope,
@@ -62,6 +30,55 @@ function dag_add_task!(dspec::DAGSpec, tspec::DTaskSpec, task::DTask)
 
     return true
 end
+
+# Visit a task's arguments. A typed spec's arguments are a heterogeneous `Tuple`,
+# whose elements a `for` loop sees as `Any`; `map` unrolls it, so each call is
+# specialized on that argument's type (cf. `map_or_ntuple` in `distribute_task!`).
+# `f::F` forces specializing on the closure: Julia does not specialize on a
+# function argument that is only passed along, so `map` was a dynamic call whose
+# result was boxed.
+_foreach_arg(f::F, fargs::Vector{Argument}) where {F} = foreach(f, fargs)
+_foreach_arg(f::F, fargs::Tuple) where {F} = (map(f, fargs); nothing)
+_any_arg(f::F, fargs::Vector{Argument}) where {F} = any(f, fargs)
+_any_arg(f::F, fargs::Tuple) where {F} = any(map(f, fargs))
+
+# Function barriers for `dag_add_task!`: `value(_arg)` is not inferrable for an
+# untyped spec, so each argument is handled by a method specialized on its
+# concrete type. Destructuring `unwrap_inout`'s result and iterating its deps on
+# an `Any` cost a generic `indexed_iterate`/`getfield` dispatch per dependency,
+# and was most of what was left of building a `DAGSpec` once aliasing was
+# prefetched.
+function _depends_on_dag_task(dspec::DAGSpec, v)
+    arg, deps = unwrap_inout(v)
+    arg isa DTask || return false
+    isempty(deps) && return false
+    return haskey(dspec.uid_to_id, arg.uid)
+end
+function _push_argspecs!(argtypes::Vector{DatadepsArgSpec}, pos, v)
+    arg, deps = unwrap_inout(v)
+    for (dep_mod, readdep, writedep) in deps
+        if arg isa DTask
+            #= TODO: Re-enable this when we can handle within-DAG dependencies
+            if arg.uid in keys(dspec.uid_to_id)
+                # Within-DAG dependency
+                arg_id = dspec.uid_to_id[arg.uid]
+                push!(dspec.id_to_argtypes[arg_id], DatadepsArgSpec(pos, DTaskDAGID{arg_id}, dep_mod, UnknownAliasing()))
+                add_edge!(dspec.g, arg_id, id)
+                continue
+            end
+            =#
+
+            # External DTask, so fetch this and track it as a raw value
+            arg = fetch(arg; raw=true)
+        end
+        # FIXME: Generate syncdeps and add edges
+        _push_argspec!(argtypes, pos, arg, dep_mod)
+    end
+    return
+end
+# A second barrier: the result of `fetch(...; raw=true)` is not inferrable either.
+_push_argspec!(argtypes::Vector{DatadepsArgSpec}, pos, arg, dep_mod) =
+    push!(argtypes, DatadepsArgSpec(pos, typeof(arg), dep_mod, aliasing(arg, dep_mod)))
 function dag_build_edges!(dag_spec::DAGSpec)
     # Naively build edges based on exact argument comparisons (no aliasing)
     arg_writes = Dict{Any,Int}()
