@@ -300,14 +300,41 @@ function Base.collect(d::DArray{T,N}; tree=true, copyto=false) where {T,N}
     #
     # Sparse tiles (`DSparseArray`) are unwrapped to host storage before `cat`:
     # GPU sparse types (CuSparse/ROCSparse/DeviceSparseMatrixCSC) disallow the
-    # scalar indexing that generic `cat` would use.
+    # scalar indexing that generic `cat` would use. Dense GPU tiles are brought
+    # to host too: tiles may live on different devices (with no peer access),
+    # which a device-side `cat` cannot combine, and the result is a host
+    # `Array` regardless.
     dimcatfuncs = [(x...) -> concat(x..., dims=i) for i in 1:N]
-    tiles = asyncmap(a.chunks) do c
-        x = fetch(c)
-        x isa DSparseArray ? _sparse_collect(x.mat) : x
-    end
+    tiles = asyncmap(_collect_host_tile, a.chunks)
     return _collect_dense(T, Val(N), treereduce_nd(dimcatfuncs, tiles))
 end
+
+# Host copy of a finished tile for `collect`'s in-process `cat`. GPU `execute!`
+# does not synchronize, so a tile's kernels may still be running on Dagger's
+# stream for that device. The caller's stream is a different one, and only
+# some array libraries synchronize the previous owner when another stream
+# touches a buffer (oneAPI does not). Wait on the tile's own processor and copy
+# under its context instead, on the owner: the synchronization has to happen
+# where the stream lives, and a host copy is also cheaper to send.
+_collect_host_tile(t::DTask) = _collect_host_tile(fetch(t; raw=true))
+function _collect_host_tile(chunk::Chunk)
+    owner = root_worker_id(chunk)
+    owner == myid() && return _collect_host_tile_local(chunk)
+    return remotecall_fetch(_collect_host_tile_local, owner, chunk)
+end
+# Chunks may also hold plain values (e.g. `sort`'s result tiles)
+_collect_host_tile(x) = _collect_host_tile_value(x)
+function _collect_host_tile_local(chunk::Chunk)
+    proc = chunk.processor
+    x = fetch(chunk)
+    x isa DSparseArray || x isa GPUArraysCore.AbstractGPUArray || return x
+    gpu_synchronize(proc)
+    return with_context(() -> _collect_host_tile_value(x), proc)
+end
+_collect_host_tile_value(x) =
+    x isa DSparseArray ? _sparse_collect(x.mat) :
+    x isa GPUArraysCore.AbstractGPUArray ? Array(x) : x
+
 Array{T,N}(A::DArray{S,N}) where {T,N,S} = convert(Array{T,N}, collect(A))
 
 Base.wait(A::DArray) = foreach(wait, A.chunks)

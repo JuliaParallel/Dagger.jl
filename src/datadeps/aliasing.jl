@@ -1507,6 +1507,17 @@ function remotecall_endpoint_transfer(f, accel::DistributedAcceleration, from_pr
     end
 end
 
+function remotecall_endpoint_transfer(f, accel::DistributedAcceleration, from_proc, to_proc, from_space, to_space, data::GPUArraysCore.AbstractGPUArray)
+    if root_worker_id(to_proc) == myid()
+        return f(accel, from_proc, to_proc, from_space, to_space, data)
+    end
+    # Keep the device allocation on its owner. Serializing a raw GPU array
+    # loses that ownership (and some backends cannot serialize it at all).
+    # A Chunk lets move dispatch to the backend's cross-worker transport.
+    chunk = tochunk(data, from_proc, from_space)
+    return remotecall_endpoint_transfer(f, accel, from_proc, to_proc, from_space, to_space, chunk)
+end
+
 #==============================================================================
   move_rewrap header + children protocol
 

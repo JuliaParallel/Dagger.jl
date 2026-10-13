@@ -43,9 +43,7 @@ function Dagger.memory_space(x::MtlArray)
     return MetalVRAMMemorySpace(myid(), device_id)
 end
 _device_id(dev::MtlDevice) = findfirst(other_dev->other_dev === dev, Metal.devices())
-function Dagger.aliasing(x::MtlArray{T}) where T
-    space = Dagger.memory_space(x)
-    S = typeof(space)
+function _mtl_addr(x::MtlArray)
     mtl_ptr = pointer(x)
     # Metal ≥1.10 defines `UInt(::MtlPtr)` as the GPU virtual address, which
     # `span_copy` uses via `UInt64(pointer(x))`. Metal <1.10 has no such method;
@@ -55,9 +53,17 @@ function Dagger.aliasing(x::MtlArray{T}) where T
     else
         Metal.contents(mtl_ptr.buffer) + mtl_ptr.offset
     end
-    rptr = Dagger.RemotePtr{Cvoid}(UInt64(addr), space)
+    return UInt64(addr)
+end
+function Dagger.aliasing(x::MtlArray{T}) where T
+    space = Dagger.memory_space(x)
+    S = typeof(space)
+    rptr = Dagger.RemotePtr{Cvoid}(_mtl_addr(x), space)
     return Dagger.ContiguousAliasing(Dagger.MemorySpan{S}(rptr, sizeof(T)*length(x)))
 end
+# Views locate themselves from their parent's address, which must match the
+# address the parent's own aliasing reports
+Dagger.data_address(x::MtlArray) = _mtl_addr(x)
 
 # MPI (SPMD) integration: stamp owning rank on VRAM spaces
 Dagger.mpi_remap_space(space::MetalVRAMMemorySpace, owner::Int) =
@@ -186,13 +192,28 @@ function Dagger.move!(to_space::Dagger.CPURAMMemorySpace, from_space::MetalVRAMM
         sync_with_context(from_space)
         with_context!(from_space)
     end
-    copyto!(to, from)
+    if from isa DenseArray
+        copyto!(to, from)
+    else
+        # A strided device view: gather it with a kernel first, since
+        # `copyto!` would index it element by element from the host
+        dense = similar(from, size(from))
+        dense .= from
+        copyto!(to, Array(dense))
+    end
     # N.B. DtoH will synchronize
     return
 end
 function Dagger.move!(to_space::MetalVRAMMemorySpace, from_space::Dagger.CPURAMMemorySpace, to::AbstractArray{T,N}, from::AbstractArray{T,N}) where {T,N}
     with_context!(to_space)
-    copyto!(to, from)
+    if to isa DenseArray
+        copyto!(to, from)
+    else
+        # A strided device view: upload densely, then scatter with a kernel
+        dense = MtlArray{T,N}(undef, size(from))
+        copyto!(dense, from isa DenseArray ? from : collect(from))
+        to .= dense
+    end
     return
 end
 function Dagger.move!(to_space::MetalVRAMMemorySpace, from_space::MetalVRAMMemorySpace, to::AbstractArray{T,N}, from::AbstractArray{T,N}) where {T,N}
@@ -222,6 +243,10 @@ function Dagger.move(from_proc::CPUProc, to_proc::MtlArrayDeviceProc, x::Chunk)
     to_w = Dagger.root_worker_id(to_proc)
     @assert myid() == to_w
     cpu_data = remotecall_fetch(unwrap, from_w, x)
+    # A chunk labelled with a host processor can already hold device memory:
+    # Datadeps rebuilding a view of a host array on a GPU passes the parent
+    # it already moved there. Treating that as host memory throws.
+    cpu_data isa MtlArray && return Dagger.move(from_proc, to_proc, cpu_data)
     with_context(to_proc) do
         if cpu_data isa DenseArray && isbitstype(eltype(cpu_data))
             Dagger.pin_buffer!(:Metal, cpu_data)

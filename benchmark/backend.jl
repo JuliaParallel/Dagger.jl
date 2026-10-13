@@ -19,6 +19,12 @@ if benchmark_accel !== nothing
     if benchmark_accel == "opencl" && get(ENV, "BENCHMARK_OPENCL_SOFTWARE", "false") == "true"
         @everywhere using pocl_jll
     end
+    if benchmark_accel == "amdgpu"
+        # CI installs this explicitly; recent AMDGPU also loads it itself.
+        @everywhere if Base.find_package("AMDGPU_LLVM_Backend_jll") !== nothing
+            using AMDGPU_LLVM_Backend_jll
+        end
+    end
     @eval @everywhere using $(cfg.package)
 end
 const benchmark_compute_scope = benchmark_accel === nothing ? nothing :

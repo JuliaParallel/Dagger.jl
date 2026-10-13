@@ -88,17 +88,26 @@ optin_test_names = USE_FINCH ? String[] : String[
 ]
 
 additional_workers::Int = 3
-worker_threads::Int = 1
+# AMDGPU's persistent host-call tasks can monopolize a worker's only thread.
+worker_threads::Int = USE_ROCM ? 2 : 1
 
-if PROGRAM_FILE != "" && realpath(PROGRAM_FILE) == @__FILE__
-    pushfirst!(LOAD_PATH, @__DIR__)
-    pushfirst!(LOAD_PATH, joinpath(@__DIR__, ".."))
+direct_test_run = PROGRAM_FILE != "" && realpath(PROGRAM_FILE) == @__FILE__
+if direct_test_run
     using Pkg
     Pkg.activate(@__DIR__)
+    # Resolve direct invocations in one project, as Pkg.test does.
+    # A repository project ahead of it in LOAD_PATH can shadow backend versions.
+    Pkg.develop([PackageSpec(path=joinpath(@__DIR__, "..")),
+                 PackageSpec(path=joinpath(@__DIR__, "..", "lib", "TimespanLogging"))])
     try
         Pkg.instantiate()
     catch
     end
+end
+
+# Pkg.test supplies test_args through ARGS without setting PROGRAM_FILE.
+if direct_test_run || !isempty(ARGS)
+    using Pkg
     using ArgParse
     s = ArgParseSettings(description = "Dagger Testsuite")
     @eval begin
@@ -122,7 +131,7 @@ if PROGRAM_FILE != "" && realpath(PROGRAM_FILE) == @__FILE__
                 help = "How many additional workers to launch"
             "-t", "--threads"
                 arg_type = Int
-                default = 1
+                default = worker_threads
                 help = "How many threads to give each additional worker"
             "-v", "--verbose"
                 action = :store_true
@@ -196,6 +205,8 @@ else
     to_test = filter(!in(optin_test_names), all_test_names)
     @info "Running all tests"
 end
+flush(stdout)
+flush(stderr)
 
 # Resolve optional dependencies before loading Dagger (and its dependencies) or
 # starting workers. Adding a GPU backend can downgrade LLVM/Atomix; a process
@@ -204,7 +215,7 @@ if USE_GPU || USE_FINCH || "extlang/python" in to_test
     using Pkg
     optional_packages = String[]
     USE_CUDA && push!(optional_packages, "CUDA")
-    USE_ROCM && push!(optional_packages, "AMDGPU")
+    USE_ROCM && append!(optional_packages, ["AMDGPU", "AMDGPU_LLVM_Backend_jll"])
     USE_ONEAPI && push!(optional_packages, "oneAPI")
     USE_METAL && push!(optional_packages, "Metal")
     USE_OPENCL && append!(optional_packages, ["OpenCL", "pocl_jll"])
@@ -246,7 +257,11 @@ try
         test_name = all_test_names[findfirst(x->x==test, all_test_names)]
         println()
         @info "Testing $test_title ($test_name)"
+        flush(stdout)
+        flush(stderr)
         @testset "$test_title" include(test * ".jl")
+        flush(stdout)
+        flush(stderr)
     end
 catch
     printstyled(stderr, "Tests Failed!\n"; color=:red)

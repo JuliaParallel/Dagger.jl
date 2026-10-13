@@ -180,11 +180,22 @@ function move!(dep_mod, to_space::MemorySpace, from_space::MemorySpace, to::Chun
         to_raw = unwrap(to)
         from_w = root_worker_id(from_space)
         # TODO: Use dep_mod to fetch with less memory usage
-        from_raw = to_w == from_w ? unwrap(from) : remotecall_fetch(unwrap, from_w, from)
+        from_raw = to_w == from_w ? unwrap(from) : fetch_copy_source(from, to)
         move!(dep_mod, to_space, from_space, to_raw, from_raw)
     end
     return
 end
+
+# Device backends track copy tasks separately from user kernels so a completed
+# transfer does not acquire dependencies on unrelated compute-stream work.
+is_move_task(f) = f === move!
+
+fetch_copy_source(from::Chunk, to::Chunk) =
+    remotecall_fetch(unwrap, root_worker_id(from), from)
+# GPU allocations must travel through the backend's transport, which stages
+# or imports them on the receiving worker without serializing device handles.
+fetch_copy_source(from::Chunk{<:GPUArraysCore.AbstractGPUArray}, to::Chunk) =
+    move(to.processor, from)
 function move!(dep_mod, to_space::MemorySpace, from_space::MemorySpace, to::Base.RefValue{T}, from::Base.RefValue{T}) where {T}
     to[] = from[]
     return
@@ -744,16 +755,30 @@ function _memory_spans(a::StridedAliasing{T,N,S}, spans, ptr, dim) where {T,N,S}
 
     return spans
 end
+"""
+    data_address(x::DenseArray) -> UInt64
+
+The address of `x`'s first element, for aliasing analysis. Defaults to
+`pointer(x)`; GPU extensions override it where `pointer` has side effects
+(CUDA.jl's and AMDGPU.jl's take stream ownership for the *active* stream, and
+CUDA.jl's throws when that device cannot reach `x` without peer access), or
+where it differs from the address their `aliasing` reports (Metal).
+"""
+data_address(x) = UInt64(pointer(x))
+
 function aliasing(x::SubArray{T,N}) where {T,N}
     if isbitstype(T)
         p = parent(x)
         space = memory_space(p)
         S = typeof(space)
-        parent_ptr = RemotePtr{Cvoid}(UInt64(pointer(p)), space)
-        ptr = RemotePtr{Cvoid}(UInt64(pointer(x)), space)
+        base = data_address(p)
+        parent_ptr = RemotePtr{Cvoid}(base, space)
         NA = ndims(p)
         raw_inds = parentindices(x)
         inds = ntuple(i->raw_inds[i] isa Integer ? (raw_inds[i]:raw_inds[i]) : UnitRange(raw_inds[i]), NA)
+        # The view's first element, located from the parent's address
+        first_offset = isempty(x) ? 0 : sum(ntuple(i->(first(inds[i]) - 1) * stride(p, i), NA))
+        ptr = RemotePtr{Cvoid}(base + UInt64(first_offset * sizeof(T)), space)
         sz = ntuple(i->length(inds[i]), NA)
         return StridedAliasing{T,NA,S}(parent_ptr,
                                        ptr,
