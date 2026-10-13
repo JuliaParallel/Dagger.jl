@@ -20,6 +20,22 @@ include(joinpath(@__DIR__, "array", "linalg", "matvec_defs.jl"))
     end
 end
 
+@testset "DArray reductions ($name)" for (name, scope) in GPU_SCOPES
+    Dagger.with_options(; scope) do
+        DA = rand(Blocks(4, 4), Float32, 16, 16)
+        A = collect(DA)
+        @test sum(DA) ≈ sum(A)
+        @test sum(DA; init=0f0) ≈ sum(A)
+        @test prod(DA) ≈ prod(A)
+        @test mapreduce(abs2, +, DA) ≈ mapreduce(abs2, +, A)
+        @test maximum(DA) == maximum(A)
+        @test extrema(DA) == extrema(A)
+        @test collect(sum(DA; dims=1)) ≈ sum(A; dims=1)
+        @test collect(maximum(DA; dims=2)) == maximum(A; dims=2)
+        @test collect(extrema(DA; dims=1)) == extrema(A; dims=1)
+    end
+end
+
 @everywhere begin
     function isongpu(X)
         return !(X isa Array)

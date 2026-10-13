@@ -72,16 +72,21 @@ end
 
 _mapped_type(f, op_inner, ::Type{T}) where T = Base._return_type(f, Tuple{T})
 
+# `Base._InitialValue` only means "no `init`" to `Base`'s own reductions. GPU
+# arrays take it for the initial value, so leave `init` out instead.
+_reduce_kwargs(dims, init) = init isa Base._InitialValue ? (; dims) : (; dims, init)
+
 function stage(ctx::Context, r::MapReduce{T,N}) where {T,N}
     inp = stage(ctx, r.input)
 
     # Reduce partitions individually
     dims = r.dims === nothing ? Colon() : r.dims
+    kwargs = _reduce_kwargs(dims, r.init)
     reduced_parts = map(chunks(inp)) do part
         if r.op_inner !== nothing
-            Dagger.@spawn r.op_inner(r.f, part; dims, init=r.init)
+            Dagger.@spawn r.op_inner(r.f, part; kwargs...)
         else
-            Dagger.@spawn mapreduce(r.f, r.op_outer, part; dims=dims, init=r.init)
+            Dagger.@spawn mapreduce(r.f, r.op_outer, part; kwargs...)
         end
     end
 
@@ -182,8 +187,8 @@ struct Extrema{T} <: Number
     max::T
 end
 Extrema(minmax::NTuple{2,T}) where T = Extrema{T}(minmax[1], minmax[2])
-function _extrema_inner(f, X; dims, init)
-    result = extrema(f, X; dims, init)
+function _extrema_inner(f, X; dims, init=Base._InitialValue())
+    result = extrema(f, X; _reduce_kwargs(dims, init)...)
     if dims === Colon()
         return Extrema(result)
     else
