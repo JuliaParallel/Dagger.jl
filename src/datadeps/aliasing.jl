@@ -1497,8 +1497,20 @@ function generate_slot!(state::DataDepsState, dest_space, data)
         # original for its aliasing key, exactly as the general path does.
         aliased_object!(Returns(data), aliased_object_cache, data)::Chunk
     else
-        moved = with(DATADEPS_THUNK_ID=>tid) do
-            remotecall_endpoint_toplevel(move_rewrap, current_acceleration(), aliased_object_cache, from_proc, to_proc, orig_space, dest_space, data)
+        direct = direct_uninit_slot(current_acceleration(), data, from_proc, to_proc, orig_space, dest_space)
+        moved = if direct !== nothing
+            # What `move_rewrap` would do on the source worker, done from here:
+            # the object cache lives with the planner, and the slot is only
+            # allocated, so the source worker has nothing to contribute.
+            T_dest, header = direct
+            slot = aliased_object!(aliased_object_cache, data) do _
+                alloc_slot_with_aliasing!(to_proc, dest_space, T_dest, header)
+            end
+            slot::Chunk
+        else
+            with(DATADEPS_THUNK_ID=>tid) do
+                remotecall_endpoint_toplevel(move_rewrap, current_acceleration(), aliased_object_cache, from_proc, to_proc, orig_space, dest_space, data)
+            end
         end
         if timing
             move_ns = time_ns() - t0
@@ -1555,6 +1567,64 @@ function remotecall_endpoint_alloc(accel::DistributedAcceleration, to_proc, to_s
     return remotecall_fetch(wid, to_proc, to_space, T, header) do to_proc, to_space, T, header
         return tochunk(alloc_uninit(to_space, T, header), to_proc, to_space)
     end
+end
+
+"""
+    direct_uninit_slot(accel, data, from_proc, to_proc, from_space, to_space)
+        -> Union{Tuple{Type,Any},Nothing}
+
+The type and `alloc_header` of the slot `move_rewrap` would conjure
+uninitialized for `data` in `to_space`, when the planning process can tell both
+from `data`'s handle alone; `nothing` when only the source worker can.
+
+Creating a slot through `move_rewrap` runs on the source worker, which then
+calls back to the planner for each object cache lookup (the cache lives with
+the planner) and on to the destination to allocate: ~6 round trips in series
+per slot. When the slot is only allocated, none of that needs the source
+worker, so `generate_slot!` does the lookups locally and allocates with one
+round trip (`alloc_slot_with_aliasing!`). That was ~90% of a flat-mode launch
+loop: a 4096^2 matmul with 512^2 tiles on 4 Distributed workers spent 2.8 s of
+a 3.4 s loop creating 461 slots under RoundRobin.
+
+Only Distributed qualifies: under MPI the cache is replicated and every rank
+takes part in each step.
+"""
+direct_uninit_slot(::Acceleration, data, from_proc, to_proc, from_space, to_space) = nothing
+function direct_uninit_slot(::DistributedAcceleration, data::Chunk, from_proc, to_proc, from_space, to_space)
+    T = chunktype(data)
+    isconcretetype(T) && T <: DenseArray || return nothing
+    # A wrapper is rebuilt from its children on the destination
+    move_rewrap_child_types(T) === nothing || return nothing
+    T_dest = move_type(from_proc, to_proc, T)
+    slot_may_be_uninit(from_space, to_space, T_dest) || return nothing
+    # `tochunk` records `domain(x)`, whose ranges span `size(x)`: what
+    # `alloc_header` would compute from the array itself.
+    dom = domain(data)
+    dom isa ArrayDomain || return nothing
+    header = map(length, dom.indexes)
+    header isa alloc_header_type(T_dest) || return nothing
+    return T_dest, header
+end
+
+"""
+    alloc_slot_with_aliasing!(to_proc, to_space, ::Type{T}, header) -> Chunk
+
+`remotecall_endpoint_alloc`, but bringing the new slot's aliasing back with it
+and memoizing it, so that planning does not pay another round trip to ask.
+"""
+function alloc_slot_with_aliasing!(to_proc, to_space, ::Type{T}, header) where T
+    wid = root_worker_id(to_proc)
+    slot, ainfo = if wid == myid()
+        _alloc_slot_with_aliasing(to_proc, to_space, T, header)
+    else
+        remotecall_fetch(_alloc_slot_with_aliasing, wid, to_proc, to_space, T, header)
+    end
+    memoize_ainfo!(ainfo_memo_key(slot, identity), ainfo)
+    return slot
+end
+function _alloc_slot_with_aliasing(to_proc, to_space, ::Type{T}, header) where T
+    x = alloc_uninit(to_space, T, header)
+    return tochunk(x, to_proc, to_space), aliasing_unwrapped(x, identity)
 end
 
 function remotecall_endpoint_transfer(f, accel::DistributedAcceleration, from_proc, to_proc, from_space, to_space, data)
