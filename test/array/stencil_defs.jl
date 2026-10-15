@@ -528,6 +528,7 @@ function test_stencil(; skip_highdim::Bool=false, skip_4d::Bool=false)
         for N in 3:4
             skip_4d && N == 4 && continue
             @testset "$(N)D array" begin
+                @info "Testing higher-dimensional stencil" dimensions=N
                 A = ones(Blocks(ntuple(_->1, N)...), Int, ntuple(_->3, N)...)
                 Dagger.allowscalar() do
                     A[:] = 1:length(A)
@@ -536,6 +537,7 @@ function test_stencil(; skip_highdim::Bool=false, skip_4d::Bool=false)
 
                 @stencil B[idx] = sum(@neighbors(A[idx], 1, Wrap())) ÷ length(A)
                 @test all(==(Float64(sum(1:length(A)) / length(A))), collect(B))
+                @info "Finished higher-dimensional stencil" dimensions=N
             end
         end
     end

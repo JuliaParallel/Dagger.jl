@@ -936,3 +936,14 @@ lesson.
     ordering defect. Isolate the cold 4D stencil and inspect all ranks; changing
     planner specialization alone is not yet a validated fix, and increasing a
     timeout would not fix the underlying compilation behavior.
+
+91. **A slow OpenCL stencil may be compiling host halo assembly.** A local
+    Julia 1.11/PoCL run passes all 53 shared stencil assertions, including 4D,
+    but takes 283 seconds cold: the first simple kernel takes 86 seconds and
+    the 4D case another 80. A stack snapshot in 4D showed host LLVM instruction
+    scheduling below `build_fused_halo`, before the device kernel runs; the
+    first simple kernel instead showed GPUCompiler inference/inlining. Time
+    the backend and dimension separately and inspect the active stack before
+    treating silence in the combined CPU/GPU suite as a device deadlock. Also
+    reproduce the CI worker topology: a single-process device pass does not
+    establish that the Distributed CPU half of the same job completes.
