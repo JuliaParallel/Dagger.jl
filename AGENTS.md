@@ -899,3 +899,12 @@ lesson.
     a non-square tile layout. Read the returned matrix's partitioning at that
     point: the buffering closure reassigns the captured `mb`/`nb` locals to the
     temporary square layout, so those locals no longer describe the original.
+
+87. **Sparse benchmark fixtures need fixed placement and fixed nonzeros.**
+    The sparse suite used arbitrary placement after the other suites adopted
+    `benchmark_assignment()`. Driver-only BenchmarkTools allocation counts then
+    changed with the driver's share of sparse tiles, even across the same
+    revision. Seed sparse matrices and right-hand sides in untimed setup and
+    use the shared assignment helper for both operands and capability probes.
+    Keep result placement and regression thresholds unchanged; MPI/GPU fixtures
+    must still use the helper's scope-aware arbitrary placement.
