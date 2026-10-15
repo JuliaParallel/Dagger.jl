@@ -41,7 +41,6 @@ function Dagger.aliasing(x::CuArray{T}) where T
     # calling task's active device, which throws when that device cannot reach
     # `x` (e.g. aliasing RPCs on a multi-GPU worker) and re-stamps ownership as
     # a side effect. Aliasing only needs the address.
-    # (`x.offset` counts elements; pointer arithmetic counts bytes)
     rptr = Dagger.RemotePtr{Cvoid}(UInt64(_raw_cuaddr(x)), space)
     return Dagger.ContiguousAliasing(Dagger.MemorySpan{S}(rptr, sizeof(T)*length(x)))
 end
@@ -237,7 +236,19 @@ end
 # Only addresses are read (as `Dagger.aliasing` does): `pointer` would take
 # CUDA.jl stream ownership for the active device, which throws without P2P.
 _buffer_key(x::CuArray) = UInt(convert(CUDA.CuPtr{Cvoid}, x.data[].mem))
-_raw_cuaddr(x::CuArray) = _buffer_key(x) + UInt(x.offset * Base.elsize(x))
+# Older CUDA.jl releases count elements, newer ones count bytes. Query the
+# loaded package's derive operation without taking ownership of the input.
+const OFFSET_IN_BYTES = Ref{Union{Bool,Nothing}}(nothing)
+function _offset_in_bytes()
+    inbytes = OFFSET_IN_BYTES[]
+    inbytes === nothing || return inbytes
+    probe = CuArray{Float32}(undef, 0)
+    inbytes = CUDAState.GPUArrays.derive(Float32, probe, (0,), 1).offset == sizeof(Float32)
+    OFFSET_IN_BYTES[] = inbytes
+    return inbytes
+end
+_raw_cuaddr(x::CuArray) =
+    _buffer_key(x) + UInt(_offset_in_bytes() ? x.offset : x.offset * Base.elsize(x))
 _cudevice(x::CuArray) = x.data[].mem.dev.handle
 Dagger.data_address(x::CuArray) = UInt64(_raw_cuaddr(x))
 
