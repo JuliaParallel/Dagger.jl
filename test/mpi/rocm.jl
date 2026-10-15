@@ -31,6 +31,26 @@ function rocm_gpu_direct_check()
         end
         ROCExt.MPI_GPU_DIRECT[] = nothing
     end
+
+    @testset "Uninitialized ROCm replica slots" begin
+        # A slot is allocated on its named device, with the exact source type
+        # and shape, but owns independent storage. Datadeps fills it later.
+        for T in (Float32, Float64, ComplexF32, ComplexF64), dims in ((3, 4), (0, 4))
+            source = ROCArray{T}(undef, dims)
+            space = Dagger.value_memory_space(source)
+            @test Dagger.can_alloc_uninit(space, typeof(source))
+            slot = Dagger.alloc_uninit(space, typeof(source), Dagger.alloc_header(source))
+            @test typeof(slot) === typeof(source)
+            @test size(slot) == dims
+            @test Dagger.value_memory_space(slot) == space
+            source .= one(T)
+            slot .= T(3)
+            AMDGPU.synchronize()
+            @test Array(source) == fill(one(T), dims)
+            @test Array(slot) == fill(T(3), dims)
+        end
+        @test !Dagger.can_alloc_uninit(ROCExt.ROCVRAMMemorySpace(1, 1), ROCArray{Any, 2})
+    end
 end
 
 run_mpi_gpu_suite((;

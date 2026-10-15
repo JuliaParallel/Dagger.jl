@@ -262,6 +262,16 @@ struct AllocateUndef{S} end
 (::AllocateUndef{S})(T, dims::Dims{N}) where {S,N} = ROCArray{S,N}(undef, dims)
 Dagger.allocate_array_func(::ROCArrayDeviceProc, ::Dagger.AllocateUndef{S}) where S = AllocateUndef{S}()
 
+# Datadeps establishes a new replica with its copy-to phase. Creating that
+# replica must not first transfer the entire source array (possibly through
+# host memory), especially when only a view will be copied into it.
+Dagger.can_alloc_uninit(::ROCVRAMMemorySpace, ::Type{<:ROCArray{T}}) where {T} = isbitstype(T)
+function Dagger.alloc_uninit(space::ROCVRAMMemorySpace, ::Type{A}, dims::Dims{N}) where {T,N,A<:ROCArray{T,N}}
+    return with_context(space) do
+        _note_alloc!(space.device_id, A(undef, dims))
+    end
+end
+
 # In-place
 # N.B. These methods assume that later operations will implicitly or
 # explicitly synchronize with their associated stream
