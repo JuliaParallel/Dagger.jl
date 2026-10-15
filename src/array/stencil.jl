@@ -898,18 +898,27 @@ end
 @inline halo_region_materialized(style::CopyHalos, neigh_dist, boundary, region_code, is_boundary, boundary_dims, chunk) =
     halo_region(style, neigh_dist, boundary, region_code, is_boundary, boundary_dims, chunk)
 
+# Keep host-side view construction and kernel launches out of the unrolled
+# tuple builder: 4D has 80 regions, and inlining their bodies makes LLVM spend
+# minutes compiling one halo assembly. This barrier still specializes on the
+# region's types; it does not erase the types used by the device kernel.
+@noinline function _build_fused_halo_region(style, neigh_dist, boundary, metadata, neighbor)
+    region_code, is_boundary, boundary_dims, is_prematerialized = metadata
+    if is_prematerialized
+        # `stencil_region_info` already built this region in its owner's memory
+        # space; `neighbor` is the region itself, not a chunk to slice.
+        return neighbor
+    else
+        return halo_region(style, neigh_dist, boundary, region_code, is_boundary,
+                           boundary_dims, neighbor)
+    end
+end
+
 @inline function _build_fused_halos(style, neigh_dist, boundary, region_metadata,
                                     neighbor_chunks::NTuple{NH,Any}) where NH
     return ntuple(Val(NH)) do i
-        region_code, is_boundary, boundary_dims, is_prematerialized = region_metadata[i]
-        if is_prematerialized
-            # `stencil_region_info` already built this region in its owner's memory
-            # space; `neighbor_chunks[i]` is the region itself, not a chunk to slice.
-            neighbor_chunks[i]
-        else
-            halo_region(style, neigh_dist, boundary, region_code, is_boundary,
-                        boundary_dims, neighbor_chunks[i])
-        end
+        _build_fused_halo_region(style, neigh_dist, boundary,
+                                region_metadata[i], neighbor_chunks[i])
     end
 end
 

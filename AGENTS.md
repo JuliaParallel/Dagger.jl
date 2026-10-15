@@ -947,3 +947,13 @@ lesson.
     treating silence in the combined CPU/GPU suite as a device deadlock. Also
     reproduce the CI worker topology: a single-process device pass does not
     establish that the Distributed CPU half of the same job completes.
+
+92. **Unroll the halo tuple, not each region's construction body.**
+    `_build_fused_halos` uses `ntuple(Val(NH))` to retain heterogeneous device
+    view types, but inlining the view/kernel-launch body into every element
+    duplicates it 80 times in 4D. A specialized, non-inlined per-region helper
+    reduced an isolated cold PoCL 4D stencil from 115 to 47 seconds. Deep-warmed
+    CPU and OpenCL fixtures in 2D/3D/4D retained exactly the same allocation
+    counts, bytes, and inferred return types. Keep the barrier on the host
+    construction path; erasing halo types or moving dynamic dispatch into the
+    device sweep would break the reason for the typed tuple in the first place.
