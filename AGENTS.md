@@ -908,3 +908,14 @@ lesson.
     use the shared assignment helper for both operands and capability probes.
     Keep result placement and regression thresholds unchanged; MPI/GPU fixtures
     must still use the helper's scope-aware arbitrary placement.
+
+88. **A Finch multiply may receive a CSC destination from `similar`.**
+    Dagger's generic sparse allocator does not retain Finch's tensor format.
+    Forwarding such a destination to generic matmul also forwards raw Finch
+    tensors to `collect`, which requires an iteration/length interface they do
+    not implement. Compute the Finch result and replace the DSparseArray's
+    storage; for nonzero beta, materialize the previous destination into Finch
+    before accumulation. Native Finch output still uses the same path. Finch
+    1.6.0 also has an independent thread-unsafe global `LogicExecutor.codes`
+    Dict: cold two-thread GEMM can raise a concurrent-write assertion even when
+    the one-thread-per-worker CI topology passes.
