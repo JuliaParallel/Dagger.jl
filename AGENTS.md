@@ -919,3 +919,10 @@ lesson.
     1.6.0 also has an independent thread-unsafe global `LogicExecutor.codes`
     Dict: cold two-thread GEMM can raise a concurrent-write assertion even when
     the one-thread-per-worker CI topology passes.
+
+89. **Wait for scheduler teardown before removing test workers.**
+    Notifying `state.halt` starts cleanup RPCs; it does not finish them. A
+    one-second sleep can expire while a worker is still compiling its cleanup
+    method, and removing its socket then logs a transport error after passing
+    assertions. Wait on `Sch.EAGER_STATE_LOCK` until `EAGER_INIT` clears, which
+    happens after scheduler cleanup, before calling `rmprocs`.

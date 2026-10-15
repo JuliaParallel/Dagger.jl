@@ -282,8 +282,15 @@ finally
     state = Dagger.Sch.EAGER_STATE[]
     if state !== nothing
         notify(state.halt)
+        # Scheduler teardown performs RPCs to workers. Wait for those calls to
+        # finish before removing their sockets; a fixed sleep races cold
+        # compilation and can produce transport errors after passing tests.
+        lock(Dagger.Sch.EAGER_STATE_LOCK) do
+            while Dagger.Sch.EAGER_INIT[]
+                wait(Dagger.Sch.EAGER_STATE_LOCK)
+            end
+        end
     end
-    sleep(1)
     if nprocs() > 1
         rmprocs(workers())
     end
