@@ -979,3 +979,10 @@ lesson.
     warmed 4D allocations also fell from 217,684 / 15,401,096 bytes to
     202,918 / 13,964,416. Check both dependency metadata types and unwrapped
     value types before adding a dynamic-dispatch threshold to submission.
+    Apple M2/macOS 26.7 with Julia 1.13.2 reproduces the same problem with
+    CI's coverage flag and three two-thread workers: 4D fell from 200 to 31
+    seconds, and the full CPU stencil suite from 310 to 117 seconds despite
+    ten additional regression assertions. Native samples of the original
+    driver showed LLVM dead-store elimination and alias analysis, rather than
+    a blocked transport. `addprocs` inherits the coverage flag, so retain it
+    when reproducing the CI compilation workload.
