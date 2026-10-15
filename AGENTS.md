@@ -957,3 +957,11 @@ lesson.
     counts, bytes, and inferred return types. Keep the barrier on the host
     construction path; erasing halo types or moving dynamic dispatch into the
     device sweep would break the reason for the typed tuple in the first place.
+
+93. **Extensions must use Dagger's selected transport too.** Importing
+    `Distributed.myid` or `remotecall_fetch` directly in an extension bypasses
+    the transport preference. Under DistributedNext, stdlib Distributed has
+    no workers, so OpenCL workers 2 and 3 both reported stdlib ID 1 and
+    registered their GPU processors with owner 1. Import these functions from
+    Dagger, which already selected the transport. The same rule applies to
+    Python processor registration and to every GPU extension's transfer RPCs.
