@@ -866,3 +866,10 @@ lesson.
     requesting its page. A short `LogWindow` may legitimately discard every
     event emitted before a long first compilation; test the HTTP response
     independently of whether that batch still contains recent events.
+
+83. **A log-window cutoff is a retained index, not a removal count.**
+    `findfirst(timestamp >= cutoff)` names the first event that must survive;
+    deleting through that index discards one valid event whenever a batch mixes
+    old and recent records. Convert it to the preceding index, and use the
+    full batch length only when every record expired. Apply the same removal
+    count to every consumer column and deletion hook.

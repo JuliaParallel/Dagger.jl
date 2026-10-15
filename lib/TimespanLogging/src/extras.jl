@@ -125,7 +125,7 @@ function (lw::LogWindow)(logs::Dict)
     # Find entries outside the window
     window_start = time_ns() - lw.window_length
     idx = something(findfirst(ev->ev.timestamp >= window_start, core_log),
-                    length(core_log))
+                    length(core_log) + 1) - 1
 
     # Return if all events are in the window
     if length(core_log) == 0 || (core_log[1].timestamp >= window_start)

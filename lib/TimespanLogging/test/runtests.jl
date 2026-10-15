@@ -41,6 +41,24 @@ end
         @test isempty(steal_legacy())
     end
 
+    @testset "LogWindow retains the first unexpired event" begin
+        now = time_ns()
+        window = UInt64(60_000_000_000)
+        lw = Events.LogWindow(window, :core)
+        logs = Dict(:core => [(timestamp=now - 2window,), (timestamp=now,)],
+                    :ids => [1, 2])
+        lw(logs)
+        @test logs[:core] == [(timestamp=now,)]
+        @test logs[:ids] == [2]
+
+        lw(logs)
+        @test logs[:ids] == [2]
+        expired = Dict(:core => [(timestamp=now - 2window,)], :ids => [1])
+        lw(expired)
+        @test isempty(expired[:core])
+        @test isempty(expired[:ids])
+    end
+
     @testset "Legacy Symbol API + LocalEventLog" begin
         reset!()
         ctx = Ctx(LocalEventLog(), false)
