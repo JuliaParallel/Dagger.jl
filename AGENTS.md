@@ -890,3 +890,12 @@ lesson.
     Cholesky/QR solves silently allocate a local Array and bypass Dagger's
     distributed solve path. Forward the new protocol to the existing column-count
     method, and check both result type and values in solve tests.
+
+86. **LU pivot chunks must match the returned factors' row blocks.**
+    `_dagger_apply_ipiv_rows!` interprets every pivot chunk using the factors'
+    row block size. AutoBlocks for NoPivot can therefore permute an identity
+    permutation incorrectly, or run its unchecked swap kernel out of bounds.
+    Pivoted LU also needs to re-tile its pivots after square-panel buffering of
+    a non-square tile layout. Read the returned matrix's partitioning at that
+    point: the buffering closure reassigns the captured `mb`/`nb` locals to the
+    temporary square layout, so those locals no longer describe the original.
