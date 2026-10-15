@@ -132,6 +132,7 @@ jobs:
     env:
       JULIA_NUM_THREADS: '1'
       CI_USE_OPENCL: '1'
+      CI_DISTRIBUTED_PACKAGE: DistributedNext
     steps:
       - uses: actions/checkout@v7
       - uses: julia-actions/setup-julia@v3
