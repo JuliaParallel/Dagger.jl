@@ -859,3 +859,10 @@ lesson.
    the failing native call, not its root cause. Keep Intel MPI functional tests
    enabled separately from the benchmark jobs; a green small matmul test is
    insufficient evidence to enable the larger tiled benchmark matrix.
+
+82. **Dashboard aggregators run when logs are collected.** A `D3Renderer`
+    attached to a `MultiEventLog` does not start its HTTP listener when a task
+    emits an event. Call `get_logs!` to run the consumers and aggregators before
+    requesting its page. A short `LogWindow` may legitimately discard every
+    event emitted before a long first compilation; test the HTTP response
+    independently of whether that batch still contains recent events.
