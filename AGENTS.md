@@ -1449,3 +1449,15 @@ lesson.
    ordinal 2. Native MPI device-buffer ring controls passed both visibility
    configurations; the cause of the Dagger prototype failures remains open.
    Those prototypes were not included in the device-packed transport patch.
+
+123. **Small green GPU suites do not validate a large scheduler/layout case.**
+   The full MPI/ROCm suite and 126 Oceananigans pressure checks per rank passed,
+   but 512x512x256 Float64 Fourier–tridiagonal runs failed independent CPU
+   guards under both baseline jps/dev and device-packed transfers. A four-GPU,
+   two-node Greedy async control failed at relative error 0.2765 in baseline
+   and 1.6555 in the optimized run; an eight-GPU baseline also failed. FFT and
+   several RoundRobin/AOT FT cases passed. Keep each failed configuration out
+   of timing claims, compare unmodified and forced-staged controls, and retain
+   changing-source and post-timing numerical guards. A matching baseline
+   failure establishes a baseline limitation, not that every candidate failure
+   has the same cause or that a new path is universally safe.
