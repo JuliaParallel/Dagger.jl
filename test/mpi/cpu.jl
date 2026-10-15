@@ -146,6 +146,7 @@ end
 end
 
 include("spawn.jl")
+include("rank_local.jl")
 
 @testset "Datadeps" begin
 
