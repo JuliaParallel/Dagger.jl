@@ -1461,3 +1461,14 @@ lesson.
    changing-source and post-timing numerical guards. A matching baseline
    failure establishes a baseline limitation, not that every candidate failure
    has the same cause or that a new path is universally safe.
+
+124. **A fixed-size eight-GPU success is not a weak-scaling observation.**
+   Odo's device-packed FFT passed 512x512x256 on eight GCDs, but the
+   256^3-cells-per-GCD weak grid (1024x512x256) faulted on both one and two
+   nodes. Weak Fourier–tridiagonal faulted on one node and passed on two.
+   Separate native MPI/RCCL controls passed the missing weak points, but omit
+   Dagger's resident plan/executions and do not identify the fault's cause.
+   Preserve missing Dagger points explicitly, label native-only controls, and
+   do not substitute fixed-size strong results into a weak curve. The four-GPU
+   512x512x256 problem is identical in both series and may be reused as an
+   explicitly marked anchor; that is one observation, not two independent runs.
