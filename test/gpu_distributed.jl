@@ -1,6 +1,6 @@
 # Included by gpu.jl in every GPU CI job. Both workers select device 1, so
 # this exercises inter-process transfers even on agents with just one GPU.
-using Distributed, Dagger, LinearAlgebra, Test
+using .Distributed, Dagger, LinearAlgebra, Test
 
 @everywhere begin
     function distributed_gpu_add!(A)

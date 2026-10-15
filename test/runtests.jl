@@ -226,7 +226,20 @@ if USE_GPU || USE_FINCH || "extlang/python" in to_test
     Pkg.add(optional_packages)
 end
 
-using Distributed
+# Select the transport before loading Dagger, MemPool, or TimespanLogging:
+# all three packages must resolve the same preference on every worker.
+if haskey(ENV, "CI_DISTRIBUTED_PACKAGE")
+    using Preferences
+    distributed_package = ENV["CI_DISTRIBUTED_PACKAGE"]
+    distributed_package in ("Distributed", "DistributedNext") ||
+        error("Invalid CI_DISTRIBUTED_PACKAGE: $distributed_package")
+    for package in ("Dagger", "MemPool", "TimespanLogging")
+        Preferences.set_preferences!(package, "distributed-package" => distributed_package; force=true)
+    end
+end
+using Dagger
+const Distributed = parentmodule(Dagger.myid)
+using .Distributed
 if additional_workers > 0
     # We put this inside a branch because addprocs() takes a minimum of 1s to
     # complete even if doing nothing, which is annoying.
@@ -240,7 +253,6 @@ include("util.jl")
 include("fakeproc.jl")
 
 using Test
-using Dagger
 using UUIDs
 @everywhere import MemPool
 

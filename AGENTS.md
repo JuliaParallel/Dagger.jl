@@ -873,3 +873,12 @@ lesson.
     old and recent records. Convert it to the preceding index, and use the
     full batch length only when every record expired. Apply the same removal
     count to every consumer column and deletion hook.
+
+84. **Transport selection must cover the test harness and every extra worker.**
+    Dagger, MemPool, and TimespanLogging read their transport preference before
+    loading; setting only Dagger's preference or continuing to import stdlib
+    Distributed in tests creates separate process registries. Import the module
+    that owns `Dagger.myid` throughout the harness. Even workers launched inside
+    individual tests must inherit `Base.active_project()`; bare `--project`
+    selects the checkout instead and can lose DistributedNext and test-only
+    dependencies. Preference tests must restore the incoming transport.

@@ -1,4 +1,4 @@
-using Distributed
+using .Distributed
 import Dagger: Context, Options, Processor, OSProc, ThreadProc, get_parent, get_processors
 
 @everywhere begin
@@ -61,7 +61,7 @@ end
     end
 
     @testset "Modify workers in Context" begin
-        ps = addprocs(4, exeflags="--project")
+        ps = addprocs(4, exeflags=`--project=$(Base.active_project())`)
         @everywhere ps using Dagger
 
         ctx = Context(ps[1:2])
