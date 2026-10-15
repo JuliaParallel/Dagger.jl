@@ -4,7 +4,7 @@
 
 @everywhere import Dagger: @stencil, Wrap, Pad, Reflect, AntiReflect, Clamp, LinearExtrapolate
 
-function test_stencil(; skip_highdim::Bool=false)
+function test_stencil(; skip_highdim::Bool=false, skip_4d::Bool=false)
     @testset "Simple assignment" begin
         A = zeros(Blocks(2, 2), Int, 4, 4)
         @stencil A[idx] = 1
@@ -526,6 +526,7 @@ function test_stencil(; skip_highdim::Bool=false)
     # stencils and corrupts subsequent tests, so they can be skipped there.
     if !skip_highdim
         for N in 3:4
+            skip_4d && N == 4 && continue
             @testset "$(N)D array" begin
                 A = ones(Blocks(ntuple(_->1, N)...), Int, ntuple(_->3, N)...)
                 Dagger.allowscalar() do
