@@ -965,3 +965,17 @@ lesson.
     registered their GPU processors with owner 1. Import these functions from
     Dagger, which already selected the transport. The same rule applies to
     Python processor registration and to every GPU extension's transfer RPCs.
+
+94. **Stencil placement must not become a kernel or planner type parameter.**
+    Local halo dependencies are `DTask`s while remote ones are `Chunk`s whose
+    parameters also encode processor/scope provenance. Wrapping each neighbor
+    in `Read{Any}` keeps the dependency wrapper concrete without specializing
+    submission on every placement pattern; execution still specializes on the
+    actual arrays. Separately, local CPU Wrap halos are views but received
+    regions are Arrays. Wrap received Arrays in full-range views too, or every
+    local/remote mask creates another heterogeneous 80-region tuple and unrolled
+    `halo_load` kernel in 4D. These are independent sources of compilation
+    growth. On Julia 1.11 with three workers, CPU 4D fell from 720 to 49 seconds;
+    warmed 4D allocations also fell from 217,684 / 15,401,096 bytes to
+    202,918 / 13,964,416. Check both dependency metadata types and unwrapped
+    value types before adding a dynamic-dispatch threshold to submission.

@@ -898,6 +898,15 @@ end
 @inline halo_region_materialized(style::CopyHalos, neigh_dist, boundary, region_code, is_boundary, boundary_dims, chunk) =
     halo_region(style, neigh_dist, boundary, region_code, is_boundary, boundary_dims, chunk)
 
+@inline prematerialized_halo_region(style, region) = region
+# Local Wrap halos are SubArrays. Give received CPU regions the same view
+# representation, rather than generating a distinct heterogeneous halo tuple
+# (and a new unrolled halo_load kernel) for every cross-worker placement.
+@inline function prematerialized_halo_region(::ViewHalos, region::Array{T,N}) where {T,N}
+    ranges = ntuple(i -> firstindex(region, i):lastindex(region, i), Val(N))
+    return view(region, ranges...)
+end
+
 # Keep host-side view construction and kernel launches out of the unrolled
 # tuple builder: 4D has 80 regions, and inlining their bodies makes LLVM spend
 # minutes compiling one halo assembly. This barrier still specializes on the
@@ -907,7 +916,7 @@ end
     if is_prematerialized
         # `stencil_region_info` already built this region in its owner's memory
         # space; `neighbor` is the region itself, not a chunk to slice.
-        return neighbor
+        return prematerialized_halo_region(style, neighbor)
     else
         return halo_region(style, neigh_dist, boundary, region_code, is_boundary,
                            boundary_dims, neighbor)
@@ -1389,7 +1398,13 @@ macro stencil(orig_ex)
                     $nneighbors = length($neighbor_cks)
                 end)
                 push!(arg_exs, :($Read($(syms.src_chunks)[$chunk_idx])))
-                push!(arg_exs, Expr(:..., :(map($Read, $neighbor_cks))))
+                # A neighbor may be a local DTask or a remotely extracted Chunk;
+                # Chunk types also encode processor/scope provenance. Keep that
+                # runtime metadata out of the submission signature, or every
+                # placement pattern specializes the whole planner again. The
+                # wrapper still records a read dependency, and task execution
+                # specializes on the actual array values after unwrapping.
+                push!(arg_exs, Expr(:..., :(map($(Read{Any}), $neighbor_cks))))
                 push!(unpack_exs, quote
                     $local_var = $build_fused_halo($neigh_dist, $boundary, $region_meta,
                                                    $task_args[$arg_offset + 1],

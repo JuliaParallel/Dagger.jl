@@ -5,6 +5,30 @@
 @everywhere import Dagger: @stencil, Wrap, Pad, Reflect, AntiReflect, Clamp, LinearExtrapolate
 
 function test_stencil(; skip_highdim::Bool=false, skip_4d::Bool=false)
+    @testset "CPU Wrap halo views" begin
+        center = zeros(Int, 2, 2)
+        codes = Dagger.all_region_codes(Val(2))
+        metadata = ntuple(length(codes)) do i
+            (codes[i], false, (false, false), iseven(i))
+        end
+        neighbors = ntuple(length(codes)) do i
+            dims = iseven(i) ? Dagger.halo_region_size((2, 2), (1, 1), codes[i]) : (2, 2)
+            fill(i, dims)
+        end
+        halo = Dagger.build_fused_halo(1, Wrap(), metadata, center, neighbors...)
+        # Received regions and local views must share a representation, so
+        # placement does not create a new heterogeneous kernel signature.
+        @test allequal(fieldtypes(typeof(halo.halos)))
+        for (i, code) in enumerate(codes)
+            idx = CartesianIndex(ntuple(d -> code[d] == 0 ? 1 : code[d] < 0 ? 0 : 3, 2))
+            @test halo[idx] == i
+        end
+        neighbors[2] .= 99
+        code = codes[2]
+        idx = CartesianIndex(ntuple(d -> code[d] == 0 ? 1 : code[d] < 0 ? 0 : 3, 2))
+        @test halo[idx] == 99
+    end
+
     @testset "Simple assignment" begin
         A = zeros(Blocks(2, 2), Int, 4, 4)
         @stencil A[idx] = 1
