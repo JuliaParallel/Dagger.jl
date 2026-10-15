@@ -926,3 +926,13 @@ lesson.
     method, and removing its socket then logs a transport error after passing
     assertions. Wait on `Sch.EAGER_STATE_LOCK` until `EAGER_INIT` clears, which
     happens after scheduler cleanup, before calling `rmprocs`.
+
+90. **Inspect peer compilation before diagnosing an MPI receive timeout.**
+    The four-rank Julia 1.10 CPU suite can fail in the 4D stencil and cascade
+    into later uniformity checks (reproduced as 1,433 passes and seven errors).
+    Peer stack snapshots showed LLVM's `LiveDebugValues`/PHI-placement passes
+    compiling planning calls while other ranks waited on uniformity or result
+    broadcasts. The receive stack alone therefore does not establish a message
+    ordering defect. Isolate the cold 4D stencil and inspect all ranks; changing
+    planner specialization alone is not yet a validated fix, and increasing a
+    timeout would not fix the underlying compilation behavior.
