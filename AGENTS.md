@@ -882,3 +882,11 @@ lesson.
     individual tests must inherit `Base.active_project()`; bare `--project`
     selects the checkout instead and can lose DistributedNext and test-only
     dependencies. Preference tests must restore the incoming transport.
+
+85. **Track LinearAlgebra's factorization allocation protocol across Julia versions.**
+    Dagger's `_zeros(T, rhs, n::Integer)` hook keeps factorization solves over
+    distributed right-hand sides distributed. Julia 1.14 now passes the
+    factorization itself as the third argument. Without the matching method,
+    Cholesky/QR solves silently allocate a local Array and bypass Dagger's
+    distributed solve path. Forward the new protocol to the existing column-count
+    method, and check both result type and values in solve tests.
