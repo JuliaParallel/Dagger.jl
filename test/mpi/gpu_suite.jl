@@ -40,6 +40,7 @@ include(joinpath(@__DIR__, "..", "util.jl"))
 include(joinpath(@__DIR__, "..", "array", "stencil_defs.jl"))
 include(joinpath(@__DIR__, "..", "array", "sparse_defs.jl"))
 include(joinpath(@__DIR__, "..", "array", "linalg", "matvec_defs.jl"))
+include(joinpath(@__DIR__, "span_transport.jl"))
 
 # Broadcast-only mutation helpers (scalar indexing is illegal on GPU arrays)
 add1!(X) = (X .+= 1; nothing)
@@ -121,6 +122,16 @@ function run_mpi_gpu_suite(cfg)
         @test p.innerProc isa DeviceProc
         @test Dagger.check_uniform(p)
     end
+end
+
+local_gpu = gpu_proc_for_rank(rank).innerProc
+Dagger.with_context(local_gpu) do
+    to_device = values -> Dagger.move(Dagger.OSProc(), local_gpu, values)
+    to_host = values -> begin
+        Dagger.gpu_synchronize(local_gpu)
+        Dagger.move(local_gpu, Dagger.OSProc(), values)
+    end
+    test_mpi_span_transport(to_device, to_host, elt; comm)
 end
 
 if gpu_key !== nothing

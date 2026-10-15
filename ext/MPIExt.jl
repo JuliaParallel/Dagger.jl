@@ -1700,6 +1700,66 @@ fetch_handle(ref::MPIRef; uniform::Bool=uniform_execution()) = poolget(ref; unif
 Dagger.fetch_local(ref::MPIRef) =
     ref.rank == MPI.Comm_rank(ref.comm) ? poolget(ref; uniform=false) : nothing
 
+# A partial copy is a raw byte stream at both endpoints. GPU-aware MPI can
+# use a device-packed stream; the opposite endpoint may still receive on the
+# host (e.g. a device-to-host copy). No transport-policy handshake is needed.
+function send_spans(value, spans, space, comm, destination, tag)
+    storage = Dagger.storage_array(value)
+    len = sum(span_len, spans; init=UInt64(0))
+    with_context!(space)
+    mpi_device_sync(space)
+    if storage isa DenseArray && !(storage isa Array) && mpi_device_direct(storage)
+        T = eltype(storage)
+        @assert len % sizeof(T) == 0
+        packed = similar(storage, T, (Int(len ÷ sizeof(T)),))
+        Dagger._multi_span_gather_packed!(packed, storage, spans)
+        send_yield!(reinterpret(UInt8, packed), comm, destination, tag)
+    else
+        kind = gpu_memory_kind(space)
+        stage_buf = stage_acquire!(kind, len)
+        try
+            GC.@preserve stage_buf begin
+                copies = unsafe_wrap(Array, pointer(stage_buf), Int(len))
+                multi_span_gather!(copies, value, spans)
+                send_yield!(copies, comm, destination, tag)
+            end
+        finally
+            stage_release!(kind, stage_buf)
+        end
+    end
+    return nothing
+end
+
+function recv_spans!(value, spans, space, comm, source, tag)
+    storage = Dagger.storage_array(value)
+    len = sum(span_len, spans; init=UInt64(0))
+    with_context!(space)
+    if storage isa DenseArray && !(storage isa Array) && mpi_device_direct(storage)
+        T = eltype(storage)
+        @assert len % sizeof(T) == 0
+        packed = similar(storage, T, (Int(len ÷ sizeof(T)),))
+        recv_yield!(reinterpret(UInt8, packed), comm, source, tag)
+        Dagger._multi_span_scatter_packed!(storage, packed, spans)
+        # Consumers run on other tasks/streams.
+        mpi_device_sync(space)
+    else
+        kind = gpu_memory_kind(space)
+        stage_buf = stage_acquire!(kind, len)
+        try
+            GC.@preserve stage_buf begin
+                copies = unsafe_wrap(Array, pointer(stage_buf), Int(len))
+                recv_yield!(copies, comm, source, tag)
+                multi_span_scatter!(value, copies, spans)
+            end
+        finally
+            # The staging buffer must remain leased until the upload completes.
+            mpi_device_sync(space)
+            stage_release!(kind, stage_buf)
+        end
+    end
+    return nothing
+end
+
 function move!(dep_mod, to_space::MPIMemorySpace, from_space::MPIMemorySpace, to::Chunk, from::Chunk)
     @assert to.handle isa MPIRef && from.handle isa MPIRef "MPIRef expected"
     @assert to.handle.comm == from.handle.comm "MPIRef comm mismatch"
@@ -1759,18 +1819,8 @@ function move!(dep_mod, to_space::MPIMemorySpace, from_space::MPIMemorySpace, to
                     pack = !(ainfo isa NoAliasing || ainfo isa UnknownAliasing)
                 end
                 if pack
-                    spans = memory_spans(ainfo)
-                    len = sum(span_len, spans; init=UInt64(0))
-                    kind = gpu_memory_kind(from_space.innerSpace)
-                    stage_buf = stage_acquire!(kind, len)
-                    copies = unsafe_wrap(Array, pointer(stage_buf), Int(len))
-                    with_context!(from_space.innerSpace)
-                    mpi_device_sync(from_space.innerSpace)
-                    GC.@preserve stage_buf begin
-                        multi_span_gather!(copies, from_val, spans)
-                        send_yield!(copies, to_space.comm, to_space.rank, tag)
-                    end
-                    stage_release!(kind, stage_buf)
+                    send_spans(from_val, memory_spans(ainfo), from_space.innerSpace,
+                               to_space.comm, to_space.rank, tag)
                 else
                     send_yield(from_val, to_space.comm, to_space.rank, tag)
                 end
@@ -1783,18 +1833,8 @@ function move!(dep_mod, to_space::MPIMemorySpace, from_space::MPIMemorySpace, to
                     pack = !(ainfo isa NoAliasing || ainfo isa UnknownAliasing)
                 end
                 if pack
-                    spans = memory_spans(ainfo)
-                    len = sum(span_len, spans; init=UInt64(0))
-                    kind = gpu_memory_kind(to_space.innerSpace)
-                    stage_buf = stage_acquire!(kind, len)
-                    copies = unsafe_wrap(Array, pointer(stage_buf), Int(len))
-                    GC.@preserve stage_buf begin
-                        recv_yield!(copies, from_space.comm, from_space.rank, tag)
-                        with_context!(to_space.innerSpace)
-                        multi_span_scatter!(to_val, copies, spans)
-                    end
-                    mpi_device_sync(to_space.innerSpace)
-                    stage_release!(kind, stage_buf)
+                    recv_spans!(to_val, memory_spans(ainfo), to_space.innerSpace,
+                                from_space.comm, from_space.rank, tag)
                 else
                     val = recv_yield(from_space.comm, from_space.rank, tag)
                     # Dense payloads arrive host-staged; materialize in this
@@ -1818,38 +1858,13 @@ function move!(dep_mod::Dagger.RemainderAliasing{<:MPIMemorySpace}, to_space::MP
         tag = Dagger.in_task() ? to_tag() : to_tag(from.handle)
         @dagdebug nothing :mpi "[$local_rank][$tag] Moving from  $(from_space.rank)  to  $(to_space.rank)\n"
         if local_rank == from_space.rank
-            # Gather the source spans into a host buffer (device arrays pack
-            # via multi_span_gather! / one KA launch, then a single DtoH)
-            len = sum(span_tuple->span_len(span_tuple[1]), dep_mod.spans)
-            kind = gpu_memory_kind(from_space.innerSpace)
-            stage_buf = stage_acquire!(kind, len)
-            copies = unsafe_wrap(Array, pointer(stage_buf), Int(len))
             from_raw = poolget(from.handle; uniform=false)
-            with_context!(from_space.innerSpace)
-            # Producers may have enqueued work on other tasks' streams
-            mpi_device_sync(from_space.innerSpace)
-            GC.@preserve stage_buf begin
-                multi_span_gather!(copies, from_raw, first.(dep_mod.spans))
-                send_yield!(copies, to_space.comm, to_space.rank, tag)
-            end
-            stage_release!(kind, stage_buf)
+            send_spans(from_raw, Iterators.map(first, dep_mod.spans), from_space.innerSpace,
+                       to_space.comm, to_space.rank, tag)
         elseif local_rank == to_space.rank
-            # Receive the spans
-            len = sum(span_tuple->span_len(span_tuple[1]), dep_mod.spans)
-            kind = gpu_memory_kind(to_space.innerSpace)
-            stage_buf = stage_acquire!(kind, len)
-            copies = unsafe_wrap(Array, pointer(stage_buf), Int(len))
-            GC.@preserve stage_buf begin
-                recv_yield!(copies, from_space.comm, from_space.rank, tag)
-
-                # Scatter the received bytes into the destination spans
-                to_raw = poolget(to.handle; uniform=false)
-                with_context!(to_space.innerSpace)
-                multi_span_scatter!(to_raw, copies, last.(dep_mod.spans))
-            end
-            # Consumers run on other tasks/streams
-            mpi_device_sync(to_space.innerSpace)
-            stage_release!(kind, stage_buf)
+            to_raw = poolget(to.handle; uniform=false)
+            recv_spans!(to_raw, Iterators.map(last, dep_mod.spans), to_space.innerSpace,
+                        from_space.comm, from_space.rank, tag)
 
             # Ensure that the data is visible
             Core.Intrinsics.atomic_fence(:release)

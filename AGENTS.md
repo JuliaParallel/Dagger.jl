@@ -1416,3 +1416,36 @@ lesson.
    original/skip/original/skip control did not repeat its first timing gain
    (flat ratios 0.842 then 1.039). A plausible profile frame is a candidate
    cost, not proof of the dominant latency cause or a validated optimization.
+
+120. **Partial MPI copies need a byte-compatible device-packed protocol.**
+   The dep-mod and remainder paths always staged through host RAM, even when
+   GPU-aware MPI handled full tiles directly. In the Oceananigans pencil
+   cycle this sent 3 GiB through the host in asynchronous 2x2 layouts and
+   4–5 GiB in slab layouts. Gather device spans into a typed contiguous device
+   buffer, but send and receive its UInt8 reinterpretation: the peer may be
+   using host staging, and MPI datatypes must agree. Synchronize the producer
+   before gathering and keep staging leases until uploads complete. Test
+   device/device and both host/device directions, complex and UInt8 payloads,
+   irregular spans, and untouched destination elements. Preserve the forced
+   GPU-direct-off fallback.
+
+121. **CUDA derived-array offsets are version-dependent units.**
+   CUDA 5/6 CuArray offsets count bytes, while older supported releases used
+   elements. Multiplying an already-byte offset by elsize corrupts span
+   addresses. A zero-length Float32 GPUArrays.derive probe can distinguish the
+   loaded convention without taking ownership of the user's array; cache the
+   result, as the ROCm extension already does. Check addresses against native
+   pointers for Float32/64, ComplexF32/64, and UInt8, and exercise derived GPU
+   arrays inside irregular MPI span copies. A UInt8-only test hides this bug.
+
+122. **Logical MPI tile types do not establish the physical array backend.**
+   MPI DArray tiles can carry an Array type tag while storing a ROCArray.
+   A GPU-type-only DArray copy optimization therefore silently misses them.
+   Conversely, changing a wire payload to Some{T} can convert the GPU array
+   into the logical host type. Experiments changing wire payloads and slice
+   ownership must validate the actual stored array, allocation space, and
+   numerical results. Oceananigans copy prototypes passed on Aurora and with
+   one visible Odo GPU per rank but faulted with two visible GPUs and selected
+   ordinal 2. Native MPI device-buffer ring controls passed both visibility
+   configurations; the cause of the Dagger prototype failures remains open.
+   Those prototypes were not included in the device-packed transport patch.
