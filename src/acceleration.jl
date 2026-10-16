@@ -179,18 +179,6 @@ bind_moved_argument(::Acceleration, original, moved) = moved
 "Logical execution rank of `proc` used for uniform task placement preference."
 processor_owner_rank(accel::Acceleration, proc::Processor) = first(fire_order_key(proc))
 
-# This scan dispatches on abstract Processor elements. Pass the acceleration
-# through unspecialized so an isbits backend is not boxed for every candidate;
-# keep the barrier out of line so inlining does not reintroduce those boxes.
-@noinline function preferred_processor_count(procs, @nospecialize(accel), rank)
-    n = 0
-    for proc in procs
-        processor_owner_rank(accel, proc) == rank || break
-        n += 1
-    end
-    return n
-end
-
 "Deterministic ordering key for `proc` under uniform execution."
 processor_order_key(accel::Acceleration, proc::Processor) =
     (fire_order_key(proc)..., short_name(proc))
@@ -211,6 +199,88 @@ partition_affinity_id(proc::Processor) = partition_affinity_id(only(memory_space
 task_processor_preference(accel::Acceleration, task, state) = nothing
 
 """
+    sort_processors_canonical!(procs, accel)
+
+Sort `procs` into the canonical order of `accel`: ascending
+[`processor_order_key`](@ref), which begins with the processor's owner rank
+(`processor_owner_rank`) and so groups each rank's processors contiguously.
+The keys are computed once per processor: a comparison sort that rebuilds them
+per comparison (each one formats a `short_name` string) costs `O(n log n)`
+string constructions.
+"""
+function sort_processors_canonical!(procs, accel::Acceleration)
+    length(procs) <= 1 && return procs
+    keys = map(p -> processor_order_key(accel, p), procs)
+    return permute!(procs, sortperm(keys))
+end
+
+# Index range of the processors owned by `rank` in canonically sorted `procs`
+# (empty, `lo > hi`, when it owns none). Binary search: the canonical order is
+# sorted by owner rank. The acceleration is passed through unspecialized, and
+# the barrier kept out of line, so an isbits backend is boxed once per search
+# instead of once per probed (abstractly typed) processor.
+@noinline function preferred_processor_range(procs, @nospecialize(accel), rank)
+    n = length(procs)
+    lo, hi = 1, n + 1
+    while lo < hi
+        mid = (lo + hi) >>> 1
+        if processor_owner_rank(accel, @inbounds procs[mid]) < rank
+            lo = mid + 1
+        else
+            hi = mid
+        end
+    end
+    first_idx = lo
+    hi = n + 1
+    while lo < hi
+        mid = (lo + hi) >>> 1
+        if processor_owner_rank(accel, @inbounds procs[mid]) <= rank
+            lo = mid + 1
+        else
+            hi = mid
+        end
+    end
+    return first_idx, lo - 1
+end
+
+"""
+    place_processors_uniform!(procs, accel, task, state)
+
+Given `procs` already in canonical order (see [`sort_processors_canonical!`](@ref)),
+apply the per-task part of uniform placement: with a `task`, move the processors
+of the rank the acceleration prefers for it (the owner of its argument data) to
+the front, then rotate the candidates of that rank (or all of them when there is
+no eligible preferred rank) by the task ID, so independent tasks spread across
+processors without consulting rank-local load or ready order. Everything is an
+in-place reversal: no scratch and no per-candidate allocation.
+"""
+function place_processors_uniform!(procs, accel::Acceleration, task, state)
+    task === nothing && return procs
+    n = length(procs)
+    pref = task_processor_preference(accel, task, state)
+    if pref !== nothing
+        lo, hi = preferred_processor_range(procs, accel, pref)
+        if lo <= hi
+            if lo > 1
+                # `[others][preferred]` -> `[preferred][others]`, both parts keep their order
+                reverse!(procs, 1, hi)
+                reverse!(procs, 1, hi - lo + 1)
+                reverse!(procs, hi - lo + 2, hi)
+            end
+            n = hi - lo + 1
+        end
+    end
+    if n > 1
+        offset = mod(task.id - 1, n)
+        # Rotate only the preferred prefix, in place and without scratch.
+        reverse!(procs, 1, offset)
+        reverse!(procs, offset + 1, n)
+        reverse!(procs, 1, n)
+    end
+    return procs
+end
+
+"""
     select_processors_uniform!(procs, accel, task=nothing, state=nothing)
 
 Re-sort `procs` with a deterministic, acceleration-dispatched key when
@@ -221,29 +291,16 @@ there is no eligible preferred rank) using the task ID, so independent tasks
 spread across processors without consulting rank-local load or ready order.
 Calls without a task retain the canonical order used by Datadeps and proc grids.
 When not under uniform execution, leaves `procs` unchanged.
+
+Callers that place many tasks over the same candidate set should keep the
+canonical order (`sort_processors_canonical!`) and call
+[`place_processors_uniform!`](@ref) per task instead.
 """
 function select_processors_uniform!(procs, accel::Acceleration,
                                     task=nothing, state=nothing)
     uniform_execution(accel) || return procs
-    pref = task_processor_preference(accel, task, state)
-    sort!(procs, by=p -> (
-        pref !== nothing && processor_owner_rank(accel, p) != pref,
-        processor_order_key(accel, p)...,
-    ))
-    task === nothing && return procs
-    n = length(procs)
-    if pref !== nothing
-        n = preferred_processor_count(procs, accel, pref)
-        n == 0 && (n = length(procs))
-    end
-    if n > 1
-        offset = mod(task.id - 1, n)
-        # Rotate only the preferred prefix, in place and without scratch.
-        reverse!(procs, 1, offset)
-        reverse!(procs, offset + 1, n)
-        reverse!(procs, 1, n)
-    end
-    return procs
+    sort_processors_canonical!(procs, accel)
+    return place_processors_uniform!(procs, accel, task, state)
 end
 
 # Default processor grid for block assignment of new distributed arrays.

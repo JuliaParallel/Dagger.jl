@@ -18,7 +18,7 @@ import ..Dagger: Context, Processor, SchedulerOptions, Options, Thunk, WeakThunk
 import ..Dagger: Sealed, SEALED, FutureNode, futures_push!, futures_seal!
 import ..Dagger: DepNode, deps_push!, deps_seal!
 import ..Dagger: order, dependents, noffspring, istask, inputs, unwrap_weak, unwrap_weak_checked, wrap_weak, tochunk, timespan_start, timespan_finish, procs, move, chunktype, default_enabled, processor, get_processors, get_parent, execute!, rmprocs!, task_processor, constrain, cputhreadtime, maybe_take_or_alloc!
-import ..Dagger: datasize, root_worker_id, is_local_processor, fire_order_key, short_name, select_processors_uniform!, processor_order_key, current_acceleration, set_task_acceleration!, scheduling_ignore_capacity, scheduling_task_occupancy, schedule_argument_move, argument_move_may_inline, sched_move, bind_moved_argument
+import ..Dagger: datasize, root_worker_id, is_local_processor, fire_order_key, short_name, select_processors_uniform!, processor_order_key, uniform_execution, current_acceleration, set_task_acceleration!, scheduling_ignore_capacity, scheduling_task_occupancy, schedule_argument_move, argument_move_may_inline, sched_move, bind_moved_argument
 import ..Dagger: @dagdebug, @safe_lock_spin1, @maybelog, @take_or_alloc!
 import ..Dagger: LogCompute, LogComputeId, LogMove, LogMoveId, LogTake, LogTakeId
 import ..Dagger: LogProcRunWait, LogProcRunWaitId, LogProcRunFetch, LogProcRunFetchId
@@ -98,7 +98,15 @@ completion handler (via `schedule_dependents!`) so there is no central ready que
 # The entry retains the scope object itself: hits require `===`, which both
 # guards against objectid reuse after GC and keeps the scope alive so its id
 # cannot be recycled while the entry lives.
-const COMPAT_PROCS_CACHE = LockedObject(Dagger.BasicLFUCache{Tuple{UInt,UInt},Tuple{Any,Vector{Processor},Set{Processor}}}(256))
+# One cached (accel, scope, procs) lookup. `ordered` is the same set in the
+# acceleration's canonical order, built on first use by uniform placement.
+mutable struct CompatEntry
+    const scope::Any
+    const procs::Vector{Processor}
+    const compat::Set{Processor}
+    ordered::Union{Nothing,Vector{Processor}}
+end
+const COMPAT_PROCS_CACHE = LockedObject(Dagger.BasicLFUCache{Tuple{UInt,UInt},CompatEntry}(256))
 # Drop all cached compatible-processor sets. Called whenever the processor
 # hierarchy changes (add/delete_processor_callback!) — a callback change alters
 # `get_processors(::OSProc)` without changing the (accel, scope, procs) key, so
@@ -111,31 +119,51 @@ function invalidate_compat_procs_cache!()
     @safe_lock_spin1 COMPAT_PROCS_CACHE cache empty!(cache)
     return
 end
-function compatible_processors_cached(accel, scope, procs::Vector{<:Processor})
+function compat_entry(accel, scope, procs::Vector{<:Processor})
     key = (objectid(accel), objectid(scope))
     cached = @safe_lock_spin1 COMPAT_PROCS_CACHE cache begin
         entry = get(cache.cache, key, nothing)
-        if entry !== nothing && entry[1] === scope && entry[2] == procs
+        if entry !== nothing && entry.scope === scope && entry.procs == procs
             cache.freq[key] += 1
-            entry[3]
+            entry
         else
             nothing
         end
     end
-    cached !== nothing && return cached::Set{Processor}
+    cached !== nothing && return cached::CompatEntry
     compat = Dagger.compatible_processors(accel, scope, procs)
     # N.B. `Vector{Processor}`, not `copy(procs)`: the cache's value type is
-    # `Tuple{Any,Vector{Processor},Set{Processor}}`, and `copy` preserves the
-    # caller's concrete element type (`Vector{OSProc}` from a `Context`'s procs,
-    # `Vector{MPIProcessor{...}}` under MPI), which fails `get!`'s typeassert.
-    # Only on a *miss*, so it stays hidden until some run happens not to have
-    # this (accel, scope) pair cached already -- see the sibling fix in generic
-    # `compatible_processors`, which had the same defect with `Set(gen)`.
-    entry = (scope, Vector{Processor}(procs), compat)
-    @safe_lock_spin1 COMPAT_PROCS_CACHE cache begin
+    # `CompatEntry`, whose `procs` field is a `Vector{Processor}`, and `copy`
+    # preserves the caller's concrete element type (`Vector{OSProc}` from a
+    # `Context`'s procs, `Vector{MPIProcessor{...}}` under MPI), which fails
+    # the field conversion. Only on a *miss*, so it stays hidden until some run
+    # happens not to have this (accel, scope) pair cached already -- see the
+    # sibling fix in generic `compatible_processors`, which had the same defect
+    # with `Set(gen)`.
+    entry = CompatEntry(scope, Vector{Processor}(procs), compat, nothing)
+    return @safe_lock_spin1 COMPAT_PROCS_CACHE cache begin
         get!(()->entry, cache, key)
+    end::CompatEntry
+end
+compatible_processors_cached(accel, scope, procs::Vector{<:Processor}) =
+    compat_entry(accel, scope, procs).compat
+
+"""
+    compatible_processors_ordered(accel, scope, procs) -> Vector{Processor}
+
+The compatible processors in `accel`'s canonical order (see
+`Dagger.sort_processors_canonical!`), cached with the compatible set so uniform
+placement sorts a given candidate set once, not once per task. The returned
+vector is shared: callers must not mutate it.
+"""
+function compatible_processors_ordered(accel, scope, procs::Vector{<:Processor})
+    entry = compat_entry(accel, scope, procs)
+    ordered = entry.ordered
+    if ordered === nothing
+        ordered = Dagger.sort_processors_canonical!(Vector{Processor}(collect(entry.compat)), accel)
+        entry.ordered = ordered
     end
-    return compat
+    return ordered
 end
 
 # N.B. `mutable` (with no field ever assigned) so the 23-field struct has a
@@ -1008,23 +1036,27 @@ concurrently across threads.
     # rank picks the same processor for this task.
     accel = something(options.acceleration, current_acceleration())
 
-    input_procs = @reusable_vector :schedule_one!_input_procs Processor OSProc() 32
-    compat = compatible_processors_cached(accel, scope, procs_filt)
-    for proc in compat
-        if !(proc in input_procs)
-            push!(input_procs, proc)
-        end
-    end
-
     sorted_procs = @reusable_vector :schedule_one!_sorted_procs Processor OSProc() 32
-    resize!(sorted_procs, length(input_procs))
     costs = @reusable_dict :schedule_one!_costs Processor Float64 OSProc() 0.0 32
-    estimate_task_costs!(sorted_procs, costs, state, input_procs, task; sig)
-    empty!(input_procs)
-
-    # Under uniform execution, measured costs are rank-local, so re-order by a
-    # deterministic, acceleration-dispatched key instead (no-op otherwise).
-    select_processors_uniform!(sorted_procs, accel, task, state)
+    if uniform_execution(accel)
+        # Measured costs are rank-local, so under uniform execution the
+        # candidates are ordered by a deterministic, acceleration-dispatched key
+        # instead and the cost estimate would be discarded unread. Start from
+        # the cached canonical order of the candidate set and apply only the
+        # per-task part (owner preference and rotation).
+        ordered = compatible_processors_ordered(accel, scope, procs_filt)
+        resize!(sorted_procs, length(ordered))
+        copyto!(sorted_procs, ordered)
+        Dagger.place_processors_uniform!(sorted_procs, accel, task, state)
+    else
+        input_procs = @reusable_vector :schedule_one!_input_procs Processor OSProc() 32
+        compat = compatible_processors_cached(accel, scope, procs_filt)
+        # N.B. `compat` is a `Set`: its elements are already unique
+        append!(input_procs, compat)
+        resize!(sorted_procs, length(input_procs))
+        estimate_task_costs!(sorted_procs, costs, state, input_procs, task; sig)
+        empty!(input_procs)
+    end
 
     # Select the best available processor and reserve time pressure optimistically.
     # These operations use their own fine-grained locks — no state.lock needed.
@@ -1052,7 +1084,7 @@ concurrently across threads.
                 lock(state.running_pressure_refs) do rpr
                     rpr[task.id] = (counter_ref, est_time_util)
                 end
-                @dagdebug task :schedule "Scheduling to $gproc -> $proc (cost: $(costs[proc]), pressure: $(counter_ref[]))"
+                @dagdebug task :schedule "Scheduling to $gproc -> $proc (cost: $(get(costs, proc, 0.0)), pressure: $(counter_ref[]))"
                 # Uniform execution overlaps communicating tasks on a processor
                 # (rank-local shares); avoid serializing them into wait cycles.
                 est_occupancy = scheduling_task_occupancy(accel, est_occupancy)
