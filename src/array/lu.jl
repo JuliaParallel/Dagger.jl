@@ -43,7 +43,9 @@ function LinearAlgebra.lu!(A::DMatrix{T}, ::LinearAlgebra.NoPivot; check::Bool =
         end
     end
 
-    ipiv = DVector([i for i in 1:min(size(A)...)])
+    # Row permutation kernels index pivot chunks using the factor row blocks.
+    # AutoBlocks depends on the processor count and need not match those blocks.
+    ipiv = DVector(collect(1:min(size(A)...)), Blocks(mb))
 
     return LinearAlgebra.LU{T,DMatrix{T},DVector{Int}}(A, ipiv, 0)
 end
@@ -381,5 +383,8 @@ function LinearAlgebra.lu!(A::DMatrix{T}, ::LinearAlgebra.RowMaximum; check::Boo
         return panel_info
     end
 
+    # Buffering a non-square tile layout factors square tiles internally, but
+    # row permutation kernels use the original factor matrix's row blocking.
+    ipiv = repartition(ipiv, Blocks(A.partitioning.blocksize[1]))
     return LinearAlgebra.LU{T,DMatrix{T},DVector{Int}}(A, ipiv, info_value)
 end

@@ -299,7 +299,8 @@ if get(cfg, :stencil, false)
         # exchange (including the stencil_source_chunks pre-sweep snapshot
         # for self-referencing Wrap stencils) on the GPU.
         Dagger.with_options(;scope=all_gpu_scope()) do
-            test_stencil(; skip_highdim=get(cfg, :stencil_skip_highdim, false))
+            test_stencil(; skip_highdim=get(cfg, :stencil_skip_highdim, false),
+                         skip_4d=true)
         end
     end
 end

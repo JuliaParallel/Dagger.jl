@@ -1,5 +1,5 @@
 using DaggerWebDash
-import DaggerWebDash: LinePlot, GanttPlot
+import DaggerWebDash: LinePlot, GanttPlot, HTTP
 using TimespanLogging
 using Dagger
 using Test
@@ -33,6 +33,18 @@ using Test
     ml.aggregators[:logwindow] = lw
     ctx = Context(; log_sink=ml)
     Dagger.Sch.EAGER_CONTEXT[] = ctx
-    fetch(Dagger.@spawn 1+1)
-    run(pipeline(`curl -s localhost:8080/index.html`; stdout=devnull))
+    TimespanLogging.enable!()
+    try
+        @test fetch(Dagger.@spawn 1+1) == 2
+        # Consumers and aggregators run when logs are collected, rather than
+        # during event emission. Collection starts the renderer's HTTP server.
+        logs = TimespanLogging.get_logs!(ml)
+        # The five-second window may prune events emitted before compilation.
+        @test haskey(logs[1], :core)
+        response = HTTP.get("http://localhost:8080/index.html")
+        @test response.status == 200
+        @test occursin("<html", String(response.body))
+    finally
+        Dagger.disable_logging!()
+    end
 end

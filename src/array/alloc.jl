@@ -144,6 +144,11 @@ function LinearAlgebra._zeros(::Type{T}, B::DMatrix, n::Integer) where T
     return zeros(auto_blocks(sz), T, sz)
 end
 
+# LinearAlgebra 1.14 passes the factorization rather than its column count.
+# Preserve distributed RHS storage through that allocation path as well.
+LinearAlgebra._zeros(::Type{T}, B::DVecOrMat, F::LinearAlgebra.Factorization) where T =
+    LinearAlgebra._zeros(T, B, size(F, 2))
+
 function Base.view(A::AbstractArray{T,N}, p::Blocks{N}) where {T,N}
     d = ArrayDomain(Base.index_shape(A))
     dc = partition(p, d)

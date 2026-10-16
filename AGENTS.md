@@ -859,3 +859,158 @@ lesson.
    the failing native call, not its root cause. Keep Intel MPI functional tests
    enabled separately from the benchmark jobs; a green small matmul test is
    insufficient evidence to enable the larger tiled benchmark matrix.
+
+82. **Dashboard aggregators run when logs are collected.** A `D3Renderer`
+    attached to a `MultiEventLog` does not start its HTTP listener when a task
+    emits an event. Call `get_logs!` to run the consumers and aggregators before
+    requesting its page. A short `LogWindow` may legitimately discard every
+    event emitted before a long first compilation; test the HTTP response
+    independently of whether that batch still contains recent events.
+
+83. **A log-window cutoff is a retained index, not a removal count.**
+    `findfirst(timestamp >= cutoff)` names the first event that must survive;
+    deleting through that index discards one valid event whenever a batch mixes
+    old and recent records. Convert it to the preceding index, and use the
+    full batch length only when every record expired. Apply the same removal
+    count to every consumer column and deletion hook.
+
+84. **Transport selection must cover the test harness and every extra worker.**
+    Dagger, MemPool, and TimespanLogging read their transport preference before
+    loading; setting only Dagger's preference or continuing to import stdlib
+    Distributed in tests creates separate process registries. Import the module
+    that owns `Dagger.myid` throughout the harness. Even workers launched inside
+    individual tests must inherit `Base.active_project()`; bare `--project`
+    selects the checkout instead and can lose DistributedNext and test-only
+    dependencies. Preference tests must restore the incoming transport.
+
+85. **Track LinearAlgebra's factorization allocation protocol across Julia versions.**
+    Dagger's `_zeros(T, rhs, n::Integer)` hook keeps factorization solves over
+    distributed right-hand sides distributed. Julia 1.14 now passes the
+    factorization itself as the third argument. Without the matching method,
+    Cholesky/QR solves silently allocate a local Array and bypass Dagger's
+    distributed solve path. Forward the new protocol to the existing column-count
+    method, and check both result type and values in solve tests.
+
+86. **LU pivot chunks must match the returned factors' row blocks.**
+    `_dagger_apply_ipiv_rows!` interprets every pivot chunk using the factors'
+    row block size. AutoBlocks for NoPivot can therefore permute an identity
+    permutation incorrectly, or run its unchecked swap kernel out of bounds.
+    Pivoted LU also needs to re-tile its pivots after square-panel buffering of
+    a non-square tile layout. Read the returned matrix's partitioning at that
+    point: the buffering closure reassigns the captured `mb`/`nb` locals to the
+    temporary square layout, so those locals no longer describe the original.
+
+87. **Sparse benchmark fixtures need fixed placement and fixed nonzeros.**
+    The sparse suite used arbitrary placement after the other suites adopted
+    `benchmark_assignment()`. Driver-only BenchmarkTools allocation counts then
+    changed with the driver's share of sparse tiles, even across the same
+    revision. Seed sparse matrices and right-hand sides in untimed setup and
+    use the shared assignment helper for both operands and capability probes.
+    Keep result placement and regression thresholds unchanged; MPI/GPU fixtures
+    must still use the helper's scope-aware arbitrary placement.
+
+88. **A Finch multiply may receive a CSC destination from `similar`.**
+    Dagger's generic sparse allocator does not retain Finch's tensor format.
+    Forwarding such a destination to generic matmul also forwards raw Finch
+    tensors to `collect`, which requires an iteration/length interface they do
+    not implement. Compute the Finch result and replace the DSparseArray's
+    storage; for nonzero beta, materialize the previous destination into Finch
+    before accumulation. Native Finch output still uses the same path. Finch
+    1.6.0 also has an independent thread-unsafe global `LogicExecutor.codes`
+    Dict: cold two-thread GEMM can raise a concurrent-write assertion even when
+    the one-thread-per-worker CI topology passes.
+
+89. **Wait for scheduler teardown before removing test workers.**
+    Notifying `state.halt` starts cleanup RPCs; it does not finish them. A
+    one-second sleep can expire while a worker is still compiling its cleanup
+    method, and removing its socket then logs a transport error after passing
+    assertions. Wait on `Sch.EAGER_STATE_LOCK` until `EAGER_INIT` clears, which
+    happens after scheduler cleanup, before calling `rmprocs`.
+
+90. **Inspect peer compilation before diagnosing an MPI receive timeout.**
+    The four-rank Julia 1.10 CPU suite can fail in the 4D stencil and cascade
+    into later uniformity checks (reproduced as 1,433 passes and seven errors).
+    Peer stack snapshots showed LLVM's `LiveDebugValues`/PHI-placement passes
+    compiling planning calls while other ranks waited on uniformity or result
+    broadcasts. The receive stack alone therefore does not establish a message
+    ordering defect. Isolate the cold 4D stencil and inspect all ranks; changing
+    planner specialization alone is not yet a validated fix, and increasing a
+    timeout would not fix the underlying compilation behavior.
+
+91. **A slow OpenCL stencil may be compiling host halo assembly.** A local
+    Julia 1.11/PoCL run passes all 53 shared stencil assertions, including 4D,
+    but takes 283 seconds cold: the first simple kernel takes 86 seconds and
+    the 4D case another 80. A stack snapshot in 4D showed host LLVM instruction
+    scheduling below `build_fused_halo`, before the device kernel runs; the
+    first simple kernel instead showed GPUCompiler inference/inlining. Time
+    the backend and dimension separately and inspect the active stack before
+    treating silence in the combined CPU/GPU suite as a device deadlock. Also
+    reproduce the CI worker topology: a single-process device pass does not
+    establish that the Distributed CPU half of the same job completes.
+
+92. **Unroll the halo tuple, not each region's construction body.**
+    `_build_fused_halos` uses `ntuple(Val(NH))` to retain heterogeneous device
+    view types, but inlining the view/kernel-launch body into every element
+    duplicates it 80 times in 4D. A specialized, non-inlined per-region helper
+    reduced an isolated cold PoCL 4D stencil from 115 to 47 seconds. Deep-warmed
+    CPU and OpenCL fixtures in 2D/3D/4D retained exactly the same allocation
+    counts, bytes, and inferred return types. Keep the barrier on the host
+    construction path; erasing halo types or moving dynamic dispatch into the
+    device sweep would break the reason for the typed tuple in the first place.
+
+93. **Extensions must use Dagger's selected transport too.** Importing
+    `Distributed.myid` or `remotecall_fetch` directly in an extension bypasses
+    the transport preference. Under DistributedNext, stdlib Distributed has
+    no workers, so OpenCL workers 2 and 3 both reported stdlib ID 1 and
+    registered their GPU processors with owner 1. Import these functions from
+    Dagger, which already selected the transport. The same rule applies to
+    Python processor registration and to every GPU extension's transfer RPCs.
+
+94. **Stencil placement must not become a kernel or planner type parameter.**
+    Local halo dependencies are `DTask`s while remote ones are `Chunk`s whose
+    parameters also encode processor/scope provenance. Wrapping each neighbor
+    in `Read{Any}` keeps the dependency wrapper concrete without specializing
+    submission on every placement pattern; execution still specializes on the
+    actual arrays. Separately, local CPU Wrap halos are views but received
+    regions are Arrays. Wrap received Arrays in full-range views too, or every
+    local/remote mask creates another heterogeneous 80-region tuple and unrolled
+    `halo_load` kernel in 4D. These are independent sources of compilation
+    growth. On Julia 1.11 with three workers, CPU 4D fell from 720 to 49 seconds;
+    warmed 4D allocations also fell from 217,684 / 15,401,096 bytes to
+    202,918 / 13,964,416. Check both dependency metadata types and unwrapped
+    value types before adding a dynamic-dispatch threshold to submission.
+    Apple M2/macOS 26.7 with Julia 1.13.2 reproduces the same problem with
+    CI's coverage flag and three two-thread workers: 4D fell from 200 to 31
+    seconds, and the full CPU stencil suite from 310 to 117 seconds despite
+    ten additional regression assertions. Native samples of the original
+    driver showed LLVM dead-store elimination and alias analysis, rather than
+    a blocked transport. `addprocs` inherits the coverage flag, so retain it
+    when reproducing the CI compilation workload.
+
+95. **The test project must directly declare its worker transport.**
+    DistributedNext launches each worker with `using DistributedNext` in Main.
+    Dagger can import a transitive dependency from its own module, but that
+    does not make the package visible to Main in the active test project.
+    Declaring it only in the root Project.toml therefore lets the driver load
+    and every worker fail before printing its host/port. Validate with a copy
+    of test/Project.toml and `JULIA_LOAD_PATH=@:@stdlib`; an ad-hoc environment
+    that explicitly adds DistributedNext hides this defect.
+
+96. **Log windows need elapsed ages, not an absolute unsigned cutoff.**
+    `time_ns()` and event timestamps are UInt64 counters. On a freshly booted
+    runner, subtracting a long window can underflow; constructing an older
+    fixture can wrap too (GHA's counter was about 104 seconds when the fixture
+    subtracted 120 seconds). Numeric timestamp ordering then retains expired
+    records or drops recent ones. Compare `now - timestamp <= window_length`
+    instead, and test a timestamp across UInt64 wrap explicitly so validation
+    does not depend on the developer machine's uptime.
+
+97. **A sparse indexing fallback can make ArrayDomain indexing ambiguous.**
+    Julia 1.14's SparseArrays adds `getindex(::AbstractSparseMatrixCSC, I...)`.
+    It is more specific in the array argument while Dagger's
+    `getindex(::AbstractArray, ::ArrayDomain)` is more specific in the index,
+    so ordinary `distribute(::SparseMatrixCSC, ::Blocks)` fails while slicing
+    its first tile. Put the intersection method in SparseArraysExt and expand
+    the domain's indices there. Test both direct sparse-domain slicing and the
+    existing allocation/distribute suite on the current nightly; an older
+    nightly without the fallback does not exercise the conflict.
