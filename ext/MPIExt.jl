@@ -654,8 +654,12 @@ function Base.:(==)(a::MPIMemorySpace, b::MPIMemorySpace)
            a.comm == b.comm &&
            a.rank == b.rank
 end
+# N.B. Not `space.comm.val`: that is the raw MPI handle, which is a small integer in MPICH
+# but a pointer in Open MPI, so it differs from process to process and made every
+# uniformity check on a collection of spaces (hash of a Vector{MemorySpace}) report
+# divergence between ranks that agree. `==` still distinguishes communicators.
 Base.hash(space::MPIMemorySpace, h::UInt=UInt(0)) =
-    hash(space.innerSpace, hash(space.comm.val, hash(space.rank, hash(MPIMemorySpace, h))))
+    hash(space.innerSpace, hash(space.rank, hash(MPIMemorySpace, h)))
 
 function check_uniform(space::MPIMemorySpace, original=space)
     return check_uniform(space.rank, original) &&
