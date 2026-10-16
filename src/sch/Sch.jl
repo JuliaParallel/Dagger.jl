@@ -2173,6 +2173,11 @@ function do_tasks(to_proc, return_queue, tasks)
         if other_istate.proc === to_proc
             continue
         end
+        # A kick only makes the runner try to steal (see `start_processor_runner!`);
+        # one that may not steal wakes up to do nothing. Under MPI that is every
+        # processor of every rank, so each enqueued task would otherwise wake
+        # `ranks x threads` runners on every rank.
+        stealing_permitted(other_istate.proc) || continue
         notify(other_istate.reschedule)
     end
     @dagdebug nothing :processor "Kicked processors"
