@@ -986,3 +986,12 @@ lesson.
     driver showed LLVM dead-store elimination and alias analysis, rather than
     a blocked transport. `addprocs` inherits the coverage flag, so retain it
     when reproducing the CI compilation workload.
+
+95. **The test project must directly declare its worker transport.**
+    DistributedNext launches each worker with `using DistributedNext` in Main.
+    Dagger can import a transitive dependency from its own module, but that
+    does not make the package visible to Main in the active test project.
+    Declaring it only in the root Project.toml therefore lets the driver load
+    and every worker fail before printing its host/port. Validate with a copy
+    of test/Project.toml and `JULIA_LOAD_PATH=@:@stdlib`; an ad-hoc environment
+    that explicitly adds DistributedNext hides this defect.
