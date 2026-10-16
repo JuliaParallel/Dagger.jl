@@ -1004,3 +1004,13 @@ lesson.
     records or drops recent ones. Compare `now - timestamp <= window_length`
     instead, and test a timestamp across UInt64 wrap explicitly so validation
     does not depend on the developer machine's uptime.
+
+97. **A sparse indexing fallback can make ArrayDomain indexing ambiguous.**
+    Julia 1.14's SparseArrays adds `getindex(::AbstractSparseMatrixCSC, I...)`.
+    It is more specific in the array argument while Dagger's
+    `getindex(::AbstractArray, ::ArrayDomain)` is more specific in the index,
+    so ordinary `distribute(::SparseMatrixCSC, ::Blocks)` fails while slicing
+    its first tile. Put the intersection method in SparseArraysExt and expand
+    the domain's indices there. Test both direct sparse-domain slicing and the
+    existing allocation/distribute suite on the current nightly; an older
+    nightly without the fallback does not exercise the conflict.
