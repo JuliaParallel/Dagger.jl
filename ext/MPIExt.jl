@@ -1299,6 +1299,8 @@ end
 # rather than a wait. A real cycle still trips them, just once the work that
 # does not depend on it has drained.
 function mpi_deadlock_detect(timer::DeadlockTimer, rank, tag, kind, srcdest)
+    # A wait on a task's result ends in that task's error when its owner failed
+    POISON_REF[] === nothing || mpi_check_poison()
     timer.detect || return timer
     progress = MPI_PROGRESS[]
     if progress != timer.last_progress
@@ -1680,6 +1682,45 @@ function bcast_meta_yield(comm::MPI.Comm, root::Integer, tag, value=nothing)
     end
 end
 
+# --- Failure-only task status ---------------------------------------------------
+#
+# `execute!` of a task that may throw makes the owner broadcast `:ok`/`:error` and
+# every other rank wait for it, so every rank is coupled to every task. For the
+# tasks `elide_task!` handles (see "Owner elision") the status is instead sent
+# *only on failure*: ranks never wait for success, and a rank that later needs the
+# task's data -- an argument move or a fetch -- stops waiting when the failure
+# arrives. The failure is the `(:error, ex)` payload of the owner's broadcast on
+# the task's tag, which the relay keeps in the task's (root, tag) slot; the data
+# the task produced carries that tag in its ref id (`MPIRefID.tid`), so a wait on
+# a `MPIRef` can look the failure up. Waits install the ref they are on behalf of
+# in `POISON_REF`, and every polling wait already goes through
+# `mpi_deadlock_detect`, which checks it.
+
+const POISON_REF = ScopedValue{Union{MPIRef,Nothing}}(nothing)
+
+function mpi_check_poison()
+    ref = POISON_REF[]::MPIRef
+    ref.id.generic && return
+    state = lock(BCAST_STATES) do states
+        get(states, ref.comm, nothing)
+    end
+    state === nothing && return
+    err = nothing
+    @lock state.cond begin
+        slot = get(state.slots, (ref.rank, UInt32(ref.id.tid)), nothing)
+        if slot !== nothing && !isempty(slot.values)
+            msg = slot.values[1]
+            msg isa Tuple && first(msg) === :error && (err = msg[2])
+        end
+    end
+    err === nothing || throw(err)
+    return
+end
+
+# Run `f` (a wait on data of `ref`'s task) so that it ends in that task's error
+mpi_poisonable(f, ref::MPIRef) =
+    Dagger.ELIDE_FOREIGN_TASKS[] ? with(f, POISON_REF => ref) : f()
+
 WeakChunk(c::Chunk{T,H}) where {T,H<:MPIRef} = WeakChunk(c.handle.rank, c.handle.id.id, WeakRef(c), T)
 
 function MemPool.poolget(ref::MPIRef; uniform::Bool=uniform_execution())
@@ -1689,7 +1730,9 @@ function MemPool.poolget(ref::MPIRef; uniform::Bool=uniform_execution())
         if ref.rank == MPI.Comm_rank(ref.comm)
             return bcast_yield(ref.comm, ref.rank, tag, poolget(ref.innerRef))
         else
-            return bcast_yield(ref.comm, ref.rank, tag)
+            return mpi_poisonable(ref) do
+                bcast_yield(ref.comm, ref.rank, tag)
+            end
         end
     else
         return poolget(ref.innerRef)
@@ -2326,7 +2369,9 @@ function move(src::MPIProcessor, dst::MPIProcessor, x::Chunk)
                 send_yield(value, dst.comm, dst.rank, tag)
                 return nothing
             elseif local_rank == dst.rank
-                value = recv_yield(dst.comm, x.handle.rank, tag)
+                value = mpi_poisonable(x.handle) do
+                    recv_yield(dst.comm, x.handle.rank, tag)
+                end
                 return move(from, dst, value)
             end
             return nothing
@@ -2595,6 +2640,20 @@ function mpi_execute_body(proc::MPIProcessor, f, args...; kwargs...)
     # Concrete but may throw: broadcast only status (no T/space on the wire).
     # Type inference still skips metadata; poison keeps SPMD aligned on error.
     if !plan.need_type_bcast
+        if mpi_failure_only(Dagger.in_task() ? Dagger.get_tls().task_spec.options : nothing)
+            # Status only on failure (see "Failure-only task status"): nobody waits
+            # for success, so a rank that is not the owner stamps its placeholder at once
+            if islocal
+                # N.B. A failure reaches the other ranks from `task_failed!`, which
+                # covers every way this task can fail, not only an error in `f`
+                result = execute!(proc.innerProc, f, raw_args...; kwargs...)
+                space = mpi_result_space(result, proc)
+                return tochunk(result, proc, space; type=plan.inferred)
+            else
+                space = memory_space(nothing, proc)::MPIMemorySpace
+                return tochunk(nothing, proc, space; type=plan.inferred)
+            end
+        end
         if islocal
             result = try
                 mpi_execute_inner(proc, f, raw_args...; kwargs...)
@@ -2785,5 +2844,134 @@ accel_matches_proc(accel::MPIAcceleration, proc::MPIOSProc) = true
 accel_matches_proc(accel::MPIAcceleration, proc::MPIClusterProc) = true
 accel_matches_proc(accel::MPIAcceleration, proc::MPIProcessor) = true
 accel_matches_proc(accel::MPIAcceleration, proc) = false
+
+# --- Owner elision --------------------------------------------------------------
+#
+# Under SPMD every rank builds, places and "executes" every task, whether or not
+# it takes part: a rank that neither runs a task nor owns data the task reads pays
+# nearly the full planning cost (measured: 168 us against the owner's 188 us) only
+# to stamp an empty result. A task qualifies for elision on a rank when
+#
+# * its scope is a single `ExactScope(::MPIProcessor)`, so its rank is known at
+#   spawn time, on every rank, without consulting the scheduler;
+# * that rank is not this one, and this rank owns none of its arguments (an owner
+#   has to send its data, so it takes part in the move);
+# * its return type is concrete (a non-concrete one needs the type broadcast to every
+#   rank), and it reports failures only: `execute!` then does not make the other
+#   ranks wait for its status (see "Failure-only task status");
+# * every argument is a plain value, an `MPIRef` chunk with no scope restriction,
+#   or an earlier task whose owner is known and is not this rank.
+#
+# Such a task skips thunk creation, scheduling, dispatch and the placeholder
+# execution; the rank only takes the task id (done by `eager_spawn`, so ids and
+# tags stay uniform) and builds the same placeholder result `execute!` would have.
+# Uniformity checks are collective over all ranks, so they disable elision.
+
+# The single MPI processor `opts` restricts a task to, or `nothing`. `scope=` sets
+# both `scope` and `compute_scope`; accept either, or both when equal.
+function mpi_scope_processor(opts::Options)
+    scope = if opts.compute_scope === nothing
+        opts.scope
+    elseif opts.scope === nothing || opts.scope == opts.compute_scope
+        opts.compute_scope
+    else
+        nothing
+    end
+    scope isa Dagger.ExactScope || return nothing
+    proc = scope.processor
+    return proc isa MPIProcessor ? proc : nothing
+end
+
+# At spawn time the scheduler has not yet filled in the execution or result scope
+function mpi_task_processor(opts::Options)
+    (opts.exec_scope === nothing && opts.result_scope === nothing) || return nothing
+    return mpi_scope_processor(opts)
+end
+
+# Whether the owner of this task reports only failures (see "Failure-only task
+# status"). Decided from the task's own options alone, so every rank agrees; it
+# holds for every task `elide_task!` may elide. Uniformity checks are collective
+# and so rule it out, as does an explicit tag (Datadeps tasks, whose copies and
+# waits do not know about failures that arrive this way).
+mpi_failure_only(::Nothing) = false
+mpi_failure_only(opts::Options) =
+    Dagger.ELIDE_FOREIGN_TASKS[] && !CHECK_UNIFORMITY[] && opts.tag === nothing &&
+    mpi_scope_processor(opts) !== nothing
+
+# Whether `local_rank` takes part in moving `v` to the task's rank, or cannot tell
+function mpi_arg_participates(v, local_rank::Int)
+    if v isa Dagger.DTask
+        v.stub !== nothing && return mpi_arg_participates(v.stub, local_rank)
+        return v.owner < 0 || v.owner == local_rank
+    elseif v isa Chunk
+        v.handle isa MPIRef || return true
+        v.scope isa Dagger.AnyScope || return true
+        return v.handle.rank == local_rank
+    elseif v isa Dagger.WeakChunk
+        return true
+    end
+    return false
+end
+
+# The owner tells everyone when a failure-only task fails, whatever the cause: an
+# error in the task, in moving its arguments, or an upstream failure. This runs
+# under the scheduler lock, so the send is handed to another task.
+function Dagger.Sch.task_failed!(::MPIAcceleration, thunk, value)
+    opts = thunk.options
+    mpi_failure_only(opts) || return
+    proc = mpi_scope_processor(opts)
+    MPI.Comm_rank(proc.comm) == proc.rank || return
+    ex = mpi_wire_exception(value isa Dagger.DTaskFailedException ? value.ex : value)
+    tag = UInt32(thunk.id)
+    Dagger.Sch.errormonitor_tracked("mpi_task_failed", Threads.@spawn begin
+        bcast_meta_yield(proc.comm, proc.rank, tag, (:error, ex))
+    end)
+    return
+end
+
+# A fetch that throws on the owner still has to take the generic id that the
+# broadcast of a successful fetch takes on every other rank (see `poolget`)
+function Dagger.fetch_failed_uniform!(::MPIAcceleration)
+    Dagger.ELIDE_FOREIGN_TASKS[] && !CHECK_UNIFORMITY[] && take_ref_id!()
+    return
+end
+
+function Dagger.elide_task!(accel::MPIAcceleration, spec, task)
+    CHECK_UNIFORMITY[] && return false
+    opts = spec.options
+    proc = mpi_task_processor(opts)
+    proc === nothing && return false
+    # Later submissions use this to decide about their own arguments, and `fetch`
+    # to stay uniform when the task fails. Only failure-only tasks have an owner.
+    mpi_failure_only(opts) || return false
+    task.owner = proc.rank
+    local_rank = MPI.Comm_rank(proc.comm)
+    proc.rank == local_rank && return false
+    (opts.syncdeps === nothing || isempty(opts.syncdeps)) || return false
+    opts.restore === nothing || return false
+    T = task.metadata.return_type
+    (isconcretetype(T) && T !== Union{}) || return false
+    fargs = spec.fargs
+    f = Dagger.value(fargs[1])
+    (f isa Function || f isa Type) || return false
+    for i in 2:length(fargs)
+        arg = fargs[i]
+        Dagger.ispositional(arg) || return false
+        mpi_arg_participates(Dagger.value(arg), local_rank) && return false
+    end
+    # The placeholder `execute!` stamps on a non-owner, with the id it would get
+    space = memory_space(nothing, proc)::MPIMemorySpace
+    # N.B. `execute!` first takes a ref id for the task's tag when the task has no
+    # tag option (`to_tag()`), so the result chunk is the second id of its task.
+    # The owner builds the real chunk with that id, and every rank must agree on it.
+    stub = with(DATADEPS_THUNK_ID => Int64(task.uid)) do
+        opts.tag === nothing && take_ref_id!()
+        tochunk(nothing, proc, space; type=T)
+    end
+    mpi_cleanup_tid(task.uid)
+    task.stub = stub
+    put!(task.future, stub)
+    return true
+end
 
 end # module MPIExt
