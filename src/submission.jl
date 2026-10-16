@@ -184,11 +184,17 @@ eager_submit_internal!(ctx, state, task, tid, payload::Tuple{<:AnyPayload}) =
         lock(state.thunk_dict)
         local thunk
         try
-            thunk = Dagger.payload(state.thunk_dict)[dep.id.id]
+            # N.B. A task elided on this process has no thunk and is already
+            # finished: it contributes no edge
+            thunk = get(Dagger.payload(state.thunk_dict), dep.id.id, nothing)
         finally
             unlock(state.thunk_dict)
         end
-        @inbounds syncdeps_vec[idx] = ThunkSyncdep(thunk)
+        @inbounds syncdeps_vec[idx] = thunk === nothing ? ThunkSyncdep() : ThunkSyncdep(thunk)
+    end
+    # Drop the placeholders left for elided tasks
+    if any(dep -> dep.id === nothing && dep.thunk === nothing, syncdeps_vec)
+        filter!(dep -> !(dep.id === nothing && dep.thunk === nothing), syncdeps_vec)
     end
     if !isempty(syncdeps_vec) || any(arg->istask(value(arg)), fargs)
         if options.syncdeps === nothing
@@ -391,7 +397,10 @@ function eager_process_elem_submission_to_local!(arg::Argument)
     @assert !(T <: Thunk) "Cannot use `Thunk`s in `@spawn`/`spawn`"
     if T <: DTask
         task = value(arg)::DTask
-        if istaskstarted(task)
+        if task.stub !== nothing
+            # No thunk exists here: the placeholder result is the argument
+            arg.value = task.stub
+        elseif istaskstarted(task)
             #=FIXME:UNIQUE=#
             arg.value = Sch.ThunkID(Int(task.uid), task.thunk_ref)
         end
@@ -401,7 +410,9 @@ function eager_process_elem_submission_to_local(arg::TypedArgument{T}) where T
     @assert !(T <: Thunk) "Cannot use `Thunk`s in `@spawn`/`spawn`"
     if T <: DTask
         task = value(arg)::DTask
-        if istaskstarted(task)
+        if task.stub !== nothing
+            return TypedArgument(arg.pos, task.stub)
+        elseif istaskstarted(task)
             #=FIXME:UNIQUE=#
             tid = Sch.ThunkID(Int(task.uid), task.thunk_ref)
             # Preserve the argument position by re-wrapping in a TypedArgument;
@@ -538,9 +549,42 @@ end
 
 chunktype(t::DTask) = t.metadata.return_type
 
+"""
+    ELIDE_FOREIGN_TASKS
+
+Opt-in switch (`Dagger.elide_foreign_tasks!`, or the environment variable
+`JULIA_DAGGER_ELIDE_FOREIGN_TASKS=1` at startup) for [`elide_task!`](@ref).
+"""
+const ELIDE_FOREIGN_TASKS = Ref{Bool}(false) # set from the environment in `__init__`
+elide_foreign_tasks!(on::Bool=true) = (ELIDE_FOREIGN_TASKS[] = on)
+
+"""
+    elide_task!(accel::Acceleration, spec::DTaskSpec, task::DTask) -> Bool
+
+Give the acceleration the chance to complete `task` without building, scheduling
+or running a `Thunk` for it, because this process takes no part in executing it
+and nothing it does can depend on the outcome. When it returns `true`, `task`
+must be complete: its future filled and `task.stub` set to a placeholder
+result that downstream submissions can use in place of the task. The default
+elides nothing.
+"""
+elide_task!(::Acceleration, spec, task) = false
+
 function eager_launch!(pair::DTaskPair)
     spec = pair.spec
     task = pair.task
+
+    # Tasks this process only has to account for (never run or source data for)
+    # skip the thunk entirely
+    if ELIDE_FOREIGN_TASKS[] && !Dagger.in_task()
+        # The first real submission starts the eager scheduler, which takes a task
+        # id of its own. Elision must not change which process consumes which
+        # ids (they feed the uniform MPI tags), so start it here, at the same
+        # point in the id sequence, whether or not this task is elided.
+        Sch.EAGER_STATE[] === nothing && myid() == 1 && Sch.init_eager()
+        accel = spec.options.acceleration
+        accel !== nothing && elide_task!(accel, spec, task) && return
+    end
 
     # Assign a name, if specified
     eager_assign_name!(spec, task)

@@ -75,6 +75,18 @@ compatible_processors(accel::Union{Acceleration,Nothing}, scope::AbstractScope=g
 uniform_execution(::DistributedAcceleration) = false
 uniform_execution() = uniform_execution(current_acceleration())
 
+"""
+    fetch_failed_uniform!(accel)
+
+Called when `fetch` of a task with a known owner (`DTask.owner`) throws because the
+task failed on this process. Under uniform execution a fetch of a task that did
+not fail takes part in a broadcast, which takes a task-id-derived tag on every
+process; a process that fails before it gets there must take the same ids, or the
+ids (and tags) of everything that follows differ across processes. Does nothing
+by default.
+"""
+fetch_failed_uniform!(::Acceleration) = nothing
+
 # SPMD uniformity checking. Under a uniform-execution acceleration (e.g. MPI),
 # planning-time values are hashed and compared across ranks to catch divergence
 # early. Core datadeps calls `check_uniform` unconditionally; the real checks

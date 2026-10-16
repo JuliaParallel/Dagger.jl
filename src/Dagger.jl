@@ -186,6 +186,10 @@ function __init__()
     delete!(SYSTEM_UUIDS, myid())
     system_uuid()
 
+    # Read at startup, not at precompile time: a `const` initialized from the
+    # environment would be baked into the compiled image
+    ELIDE_FOREIGN_TASKS[] = get(ENV, "JULIA_DAGGER_ELIDE_FOREIGN_TASKS", "0") in ("1", "true")
+
     @static if !isdefined(Base, :get_extension)
         @require Distributions="31c24e10-a181-5473-b8eb-7969acd0382f" begin
             include(joinpath(dirname(@__DIR__), "ext", "DistributionsExt.jl"))

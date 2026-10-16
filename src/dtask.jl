@@ -74,16 +74,21 @@ mutable struct DTask
     uid::UInt
     future::ThunkFuture
     metadata::DTaskMetadata
+    # Result placeholder of a task this process never built a `Thunk` for (see
+    # `elide_task!`); `nothing` for every ordinary task.
+    stub::Any
+    # Rank/worker known to own this task's result at spawn time, `-1` when unknown
+    owner::Int
     thunk_ref::DRef
 
-    DTask(uid, future, metadata) = new(uid, future, metadata)
+    DTask(uid, future, metadata) = new(uid, future, metadata, nothing, -1)
 end
 
 const EagerThunk = DTask
 
 Base.isready(t::DTask) = isready(t.future)
 Base.istaskdone(t::DTask) = isready(t.future)
-Base.istaskstarted(t::DTask) = isdefined(t, :thunk_ref)
+Base.istaskstarted(t::DTask) = t.stub !== nothing || isdefined(t, :thunk_ref)
 function Base.wait(t::DTask)
     if !istaskstarted(t)
         throw(ConcurrencyViolationError("Cannot `wait` on an unlaunched `DTask`"))
@@ -94,6 +99,18 @@ end
 function Base.fetch(t::DTask; raw=false, move_value=!raw, unwrap=!raw, uniform=false)
     if !istaskstarted(t)
         throw(ConcurrencyViolationError("Cannot `fetch` an unlaunched `DTask`"))
+    end
+    if t.owner >= 0
+        # The owner learns of a failure from its own task, every other process from
+        # a message, and a fetch must do the same on all of them: see
+        # `fetch_failed_uniform!`
+        value = try
+            fetch(t.future; move_value=false, unwrap=false, uniform)
+        catch
+            fetch_failed_uniform!(current_acceleration())
+            rethrow()
+        end
+        return move_value ? move(OSProc(), value) : value
     end
     return fetch(t.future; move_value, unwrap, uniform)
 end
