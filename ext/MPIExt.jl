@@ -2867,19 +2867,54 @@ accel_matches_proc(accel::MPIAcceleration, proc) = false
 # tags stay uniform) and builds the same placeholder result `execute!` would have.
 # Uniformity checks are collective over all ranks, so they disable elision.
 
-# The single MPI processor `opts` restricts a task to, or `nothing`. `scope=` sets
-# both `scope` and `compute_scope`; accept either, or both when equal.
+# A processor of the one rank `opts` restricts a task to, or `nothing` when the scope
+# allows several ranks (or is not a scope of MPI processors). Only its rank and
+# communicator are meaningful: a scope that names a whole rank, as
+# `Dagger.scope(mpi_rank=r)` does, leaves the choice of thread to the scheduler, and a
+# rank that elides the task never learns which thread that was. `scope=` sets both
+# `scope` and `compute_scope`; accept either, or both when equal.
 function mpi_scope_processor(opts::Options)
     scope = if opts.compute_scope === nothing
         opts.scope
-    elseif opts.scope === nothing || opts.scope == opts.compute_scope
+    elseif opts.scope === nothing || opts.scope === opts.compute_scope || opts.scope == opts.compute_scope
         opts.compute_scope
     else
         nothing
     end
-    scope isa Dagger.ExactScope || return nothing
-    proc = scope.processor
-    return proc isa MPIProcessor ? proc : nothing
+    if scope isa Dagger.ExactScope
+        proc = scope.processor
+        return proc isa MPIProcessor ? proc : nothing
+    elseif scope isa Dagger.UnionScope
+        return mpi_union_scope_processor(scope)
+    end
+    return nothing
+end
+
+# Scopes are reused (a `with_options(scope=...)` block hands the same object to every
+# task spawned under it), so what a union scope names is worked out once per scope.
+const MPI_UNION_SCOPE_CACHE = LockedObject(Dict{UInt,Tuple{Any,Any}}())
+
+function mpi_union_scope_processor(scope::Dagger.UnionScope)
+    key = objectid(scope)
+    hit = lock(MPI_UNION_SCOPE_CACHE) do cache
+        get(cache, key, nothing)
+    end
+    # `===`: the entry keeps the scope alive, so a hit cannot be a recycled objectid
+    hit !== nothing && hit[1] === scope && return hit[2]
+    proc = nothing
+    scopes = scope.scopes
+    if !isempty(scopes) && all(sc -> sc isa Dagger.ExactScope && sc.processor isa MPIProcessor, scopes)
+        first_proc = first(scopes).processor
+        if all(sc -> sc.processor.rank == first_proc.rank && sc.processor.comm == first_proc.comm, scopes)
+            # The same processor on every rank, whatever order the scopes came in
+            proc = argmin(short_name, [sc.processor for sc in scopes])
+        end
+    end
+    lock(MPI_UNION_SCOPE_CACHE) do cache
+        length(cache) >= 256 && empty!(cache)
+        cache[key] = (scope, proc)
+    end
+    return proc
 end
 
 # At spawn time the scheduler has not yet filled in the execution or result scope
