@@ -20,6 +20,8 @@
     # Tiny, concrete-typed bodies: dispatch/scheduling dominates, and a concrete
     # return type keeps the MPI execute! on its cheap path.
     bench_noop() = 1
+    # Concrete return type but cannot be proven not to throw (like most real task bodies)
+    bench_checked(x::Int) = x > 0 ? 1 : error("bench_checked")
     bench_inc(x::Int) = x + 1
     bench_add(a::Int, b::Int) = a + b
     bench_produce(n::Int, seed::Int) = fill(Float64(seed), n)
@@ -51,6 +53,10 @@ rr(procs, i) = procs[mod1(i, length(procs))]
 
 function spawn_pinned(procs, n)
     return [Dagger.@spawn scope=pin(rr(procs, i)) bench_noop() for i in 1:n]
+end
+
+function spawn_pinned_checked(procs, n)
+    return [Dagger.@spawn scope=pin(rr(procs, i)) bench_checked(i) for i in 1:n]
 end
 
 function spawn_unscoped(n)
@@ -146,6 +152,14 @@ function tasks_suite(_ctx; method, accels)
     # still plan, place and execute-as-no-op every one of these tasks.
     ok("tasks/pinned-one-owner", () -> fetch.(spawn_pinned(first_owner, 4)), fill(1, 4)) &&
         (sub["pinned, one owner (n=$n)"] = @benchmarkable(waitall_tasks(spawn_pinned($first_owner, $n))))
+    # Only the last owner's tasks: the benchmark process (rank 0 under MPI) takes no
+    # part in them, so this is what a rank that plans foreign tasks pays
+    ok("tasks/pinned-last-owner", () -> fetch.(spawn_pinned(last_owner, 4)), fill(1, 4)) &&
+        (sub["pinned, last owner (n=$n)"] = @benchmarkable(waitall_tasks(spawn_pinned($last_owner, $n))))
+    ok("tasks/pinned-checked", () -> fetch.(spawn_pinned_checked(procs, 4)), fill(1, 4)) &&
+        (sub["pinned, round robin, may throw (n=$n)"] = @benchmarkable(waitall_tasks(spawn_pinned_checked($procs, $n))))
+    ok("tasks/pinned-checked-last-owner", () -> fetch.(spawn_pinned_checked(last_owner, 4)), fill(1, 4)) &&
+        (sub["pinned, last owner, may throw (n=$n)"] = @benchmarkable(waitall_tasks(spawn_pinned_checked($last_owner, $n))))
     ok("tasks/unscoped", () -> fetch.(spawn_unscoped(4)), fill(1, 4)) &&
         (sub["unscoped (n=$nunscoped)"] = @benchmarkable(waitall_tasks(spawn_unscoped($nunscoped))))
     ok("tasks/hops", () -> fetch(hop_chain(first(first_owner), first(last_owner), 6)), 7) &&
