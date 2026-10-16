@@ -123,12 +123,15 @@ function (lw::LogWindow)(logs::Dict)
     end
 
     # Find entries outside the window
-    window_start = time_ns() - lw.window_length
-    idx = something(findfirst(ev->ev.timestamp >= window_start, core_log),
+    # Compare elapsed durations: both timestamps and time_ns() are wrapping
+    # UInt64 counters. An absolute cutoff underflows shortly after boot when
+    # the window is longer than the counter's current value.
+    now = time_ns()
+    idx = something(findfirst(ev->now - ev.timestamp <= lw.window_length, core_log),
                     length(core_log) + 1) - 1
 
     # Return if all events are in the window
-    if length(core_log) == 0 || (core_log[1].timestamp >= window_start)
+    if idx == 0
         return
     end
 

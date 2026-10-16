@@ -995,3 +995,12 @@ lesson.
     and every worker fail before printing its host/port. Validate with a copy
     of test/Project.toml and `JULIA_LOAD_PATH=@:@stdlib`; an ad-hoc environment
     that explicitly adds DistributedNext hides this defect.
+
+96. **Log windows need elapsed ages, not an absolute unsigned cutoff.**
+    `time_ns()` and event timestamps are UInt64 counters. On a freshly booted
+    runner, subtracting a long window can underflow; constructing an older
+    fixture can wrap too (GHA's counter was about 104 seconds when the fixture
+    subtracted 120 seconds). Numeric timestamp ordering then retains expired
+    records or drops recent ones. Compare `now - timestamp <= window_length`
+    instead, and test a timestamp across UInt64 wrap explicitly so validation
+    does not depend on the developer machine's uptime.

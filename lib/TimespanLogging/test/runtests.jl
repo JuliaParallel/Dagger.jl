@@ -57,6 +57,14 @@ end
         lw(expired)
         @test isempty(expired[:core])
         @test isempty(expired[:ids])
+
+        # Force the old timestamp across UInt64 wrap regardless of machine
+        # uptime. Numeric timestamp ordering disagrees with elapsed age here.
+        wrapped = Dict(:core => [(timestamp=typemax(UInt64) - window,),
+                                 (timestamp=time_ns(),)], :ids => [1, 2])
+        lw(wrapped)
+        @test length(wrapped[:core]) == 1
+        @test wrapped[:ids] == [2]
     end
 
     @testset "Legacy Symbol API + LocalEventLog" begin
