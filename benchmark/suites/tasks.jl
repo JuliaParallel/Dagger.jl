@@ -59,6 +59,10 @@ function spawn_pinned_checked(procs, n)
     return [Dagger.@spawn scope=pin(rr(procs, i)) bench_checked(i) for i in 1:n]
 end
 
+function spawn_unscoped_checked(n)
+    return [Dagger.@spawn bench_checked(i) for i in 1:n]
+end
+
 function spawn_unscoped(n)
     return [Dagger.@spawn bench_noop() for i in 1:n]
 end
@@ -160,6 +164,10 @@ function tasks_suite(_ctx; method, accels)
         (sub["pinned, round robin, may throw (n=$n)"] = @benchmarkable(waitall_tasks(spawn_pinned_checked($procs, $n))))
     ok("tasks/pinned-checked-last-owner", () -> fetch.(spawn_pinned_checked(last_owner, 4)), fill(1, 4)) &&
         (sub["pinned, last owner, may throw (n=$n)"] = @benchmarkable(waitall_tasks(spawn_pinned_checked($last_owner, $n))))
+    # Larger, and with bodies that may throw: unscoped placement is cheap since the
+    # candidate order is cached, so the task count can match the pinned benchmarks
+    ok("tasks/unscoped-checked", () -> fetch.(spawn_unscoped_checked(4)), fill(1, 4)) &&
+        (sub["unscoped, may throw (n=$n)"] = @benchmarkable(waitall_tasks(spawn_unscoped_checked($n))))
     ok("tasks/unscoped", () -> fetch.(spawn_unscoped(4)), fill(1, 4)) &&
         (sub["unscoped (n=$nunscoped)"] = @benchmarkable(waitall_tasks(spawn_unscoped($nunscoped))))
     ok("tasks/hops", () -> fetch(hop_chain(first(first_owner), first(last_owner), 6)), 7) &&
