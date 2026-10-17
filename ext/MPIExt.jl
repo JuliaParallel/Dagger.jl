@@ -2971,9 +2971,96 @@ function Dagger.fetch_failed_uniform!(::MPIAcceleration)
     return
 end
 
+# --- Placement at spawn for tasks without a scope ----------------------------------
+#
+# A task without a scope is placed by the scheduler, so no rank knows the owner when
+# the task is created. The placement rule is deterministic and identical on every
+# rank, though: the cached canonical order of the candidate processors, the rank that
+# owns the task's first MPI argument moved to the front, then a rotation by the task
+# id. `elide_task!` therefore applies that rule at spawn time and pins the task to the
+# result with an ExactScope: the scheduler is handed a decision instead of making it,
+# so it cannot disagree with the ranks that elide the task. Whatever cannot be
+# decided at spawn time (an argument whose owner is unknown, a result scope, a
+# processor list, a processor that rejects the function or an argument) is left to
+# the scheduler and nothing is elided.
+
+struct MPIPlacementRequest
+    id::Int
+    pref::Union{Int,Nothing}
+end
+Dagger.task_processor_preference(::MPIAcceleration, req::MPIPlacementRequest, state) = req.pref
+
+# Rank that owns `v`, `nothing` for a plain value (the scheduler ignores those when it
+# looks for the owner), `-1` when it cannot be told at spawn time
+function mpi_arg_owner(v)
+    if v isa Dagger.DTask
+        v.stub !== nothing && return mpi_arg_owner(v.stub)
+        return v.owner
+    elseif v isa Chunk
+        v.handle isa MPIRef || return -1
+        v.scope isa Dagger.AnyScope || return -1
+        return v.handle.rank
+    elseif v isa Dagger.WeakChunk
+        return -1
+    end
+    return nothing
+end
+
+function mpi_preplace!(accel::MPIAcceleration, spec, task)
+    opts = spec.options
+    opts.exec_scope === nothing && opts.result_scope === nothing && opts.proclist === nothing &&
+        (opts.single === nothing || opts.single == 0) && opts.restore === nothing &&
+        opts.tag === nothing || return false
+    (opts.syncdeps === nothing || isempty(opts.syncdeps)) || return false
+    scope = if opts.compute_scope === nothing
+        opts.scope
+    elseif opts.scope === nothing || opts.scope === opts.compute_scope || opts.scope == opts.compute_scope
+        opts.compute_scope
+    else
+        return false
+    end
+    scope === nothing && (scope = Dagger.DefaultScope())
+    fargs = spec.fargs
+    f = Dagger.value(fargs[1])
+    (f isa Function || f isa Type) || return false
+    pref = nothing
+    for i in 2:length(fargs)
+        arg = fargs[i]
+        Dagger.ispositional(arg) || return false
+        owner = mpi_arg_owner(Dagger.value(arg))
+        owner === nothing && continue
+        owner < 0 && return false
+        pref === nothing && (pref = owner)
+    end
+    state = Dagger.Sch.EAGER_STATE[]
+    state === nothing && return false
+    ctx = Dagger.Sch.eager_context()
+    procs = filter(p -> haskey(state.worker_chans, root_worker_id(p)), Dagger.Sch.procs_to_use(ctx, state.sch_options))
+    isempty(procs) && return false
+    # The scheduler's own rule (`schedule_one!`): the compatible processors, re-ordered under uniform
+    # execution by the canonical key with the owner of the first MPI argument in front, then rotated by the id
+    candidates = Processor[p for p in Dagger.Sch.compatible_processors_cached(accel, scope, procs)]
+    isempty(candidates) && return false
+    Dagger.select_processors_uniform!(candidates, accel, MPIPlacementRequest(Int(task.uid), pref), nothing)
+    proc = first(candidates)
+    proc isa MPIProcessor || return false
+    # What `can_use_proc` would check of the processor the scheduler picks first
+    Dagger.proc_in_scope(proc, scope) || return false
+    Dagger.iscompatible_func(proc, opts, typeof(f)) || return false
+    for i in 2:length(fargs)
+        Dagger.iscompatible_arg(proc, opts, chunktype(Dagger.value(fargs[i]))) || return false
+    end
+    opts.compute_scope = Dagger.ExactScope(proc)
+    return true
+end
+
 function Dagger.elide_task!(accel::MPIAcceleration, spec, task)
     CHECK_UNIFORMITY[] && return false
     opts = spec.options
+    # Tasks without a scope are placed here, so that every rank knows the owner
+    if mpi_task_processor(opts) === nothing && opts.compute_scope === nothing && opts.scope === nothing
+        mpi_preplace!(accel, spec, task)
+    end
     proc = mpi_task_processor(opts)
     proc === nothing && return false
     # Later submissions use this to decide about their own arguments, and `fetch`

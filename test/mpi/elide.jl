@@ -66,6 +66,42 @@ elide_where() = (MPI.Comm_rank(MPI.COMM_WORLD), Threads.threadid())   # concrete
             @test fetch(multi) == 2
         end
 
+        @testset "tasks without a scope: placed at spawn" begin
+            # The owner follows the deterministic placement rule and is decided when the
+            # task is created, so every other rank can elide it. The scheduler must
+            # then run it exactly where the rule said.
+            n = nranks * Threads.nthreads()
+            tasks = [Dagger.@spawn(elide_inc(i)) for i in 1:2n]
+            @test fetch.(tasks) == [i + 1 for i in 1:2n]
+            @test all(t -> t.owner >= 0, tasks)
+            @test all(t -> fetch(t; raw=true).handle.rank == t.owner, tasks)
+            @test all(t -> allequal(MPI.Allgather(Int(t.uid), comm)), tasks[1:4])
+            @test count(t -> t.stub !== nothing, tasks) == count(t -> t.owner != rank, tasks)
+            @test all(r -> any(t -> t.owner == r, tasks), 0:nranks-1)   # round robin reaches every rank
+            # data affinity: a task that reads an MPI chunk runs on the chunk's rank
+            x = Dagger.tochunk(10, proc_for_rank(0), space_for_rank(0))
+            y = Dagger.@spawn elide_inc(x)
+            @test y.owner == 0
+            @test fetch(y) == 11
+            @test (y.stub !== nothing) == (rank != 0)
+            # a chain without scopes stays on one rank, and a scoped producer is followed
+            u1 = Dagger.@spawn scope=pinned(nranks-1) elide_inc(1)
+            u2 = Dagger.@spawn elide_inc(u1)
+            u3 = Dagger.@spawn elide_add(u2, u1)
+            @test u2.owner == nranks - 1 && u3.owner == nranks - 1
+            @test fetch(u3) == 3 + 2
+            # an argument whose owner is unknown at spawn time: left to the scheduler
+            lazy = Dagger.@spawn scope=Dagger.scope(mpi_ranks=:) elide_inc(1)
+            z = Dagger.@spawn elide_inc(lazy)
+            @test lazy.stub === nothing && z.stub === nothing
+            @test fetch(z) == 3
+            # a failing task without a scope: every rank sees an error and none hangs
+            bad = Dagger.@spawn elide_throws(1)
+            @test_throws Exception fetch(bad)
+            dep = Dagger.@spawn elide_inc(bad)
+            @test_throws Exception fetch(dep)
+        end
+
         @testset "dependent chains" begin
             # a chain on one rank, then a consumer on another
             a = Dagger.@spawn scope=pinned(0) elide_inc(1)
@@ -86,12 +122,6 @@ elide_where() = (MPI.Comm_rank(MPI.COMM_WORLD), Threads.threadid())   # concrete
             t = Dagger.@spawn scope=pinned(nranks-1) elide_inc(x)
             @test (t.stub !== nothing) == (rank != 0 && rank != nranks - 1)
             @test fetch(t) == 11
-            # unknown owner: a task without a pinned scope is placed by the scheduler
-            u = Dagger.@spawn elide_inc(1)
-            @test u.stub === nothing
-            w = Dagger.@spawn scope=pinned(nranks-1) elide_inc(u)
-            @test w.stub === nothing
-            @test fetch(w) == 3
             # a tagged task keeps the status broadcast
             v = Dagger.@spawn scope=pinned(0) tag=UInt32(12345) elide_inc(1)
             @test v.stub === nothing
