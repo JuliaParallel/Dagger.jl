@@ -1044,7 +1044,6 @@ concurrently across threads.
     accel = something(options.acceleration, current_acceleration())
 
     sorted_procs = @reusable_vector :schedule_one!_sorted_procs Processor OSProc() 32
-    costs = @reusable_dict :schedule_one!_costs Processor Float64 OSProc() 0.0 32
     if uniform_execution(accel)
         # Measured costs are rank-local, so under uniform execution the
         # candidates are ordered by a deterministic, acceleration-dispatched key
@@ -1061,7 +1060,7 @@ concurrently across threads.
         # N.B. `compat` is a `Set`: its elements are already unique
         append!(input_procs, compat)
         resize!(sorted_procs, length(input_procs))
-        estimate_task_costs!(sorted_procs, costs, state, input_procs, task; sig)
+        estimate_task_costs!(sorted_procs, nothing, state, input_procs, task; sig)
         empty!(input_procs)
     end
 
@@ -1091,7 +1090,7 @@ concurrently across threads.
                 lock(state.running_pressure_refs) do rpr
                     rpr[task.id] = (counter_ref, est_time_util)
                 end
-                @dagdebug task :schedule "Scheduling to $gproc -> $proc (cost: $(get(costs, proc, 0.0)), pressure: $(counter_ref[]))"
+                @dagdebug task :schedule "Scheduling to $gproc -> $proc (pressure: $(counter_ref[]))"
                 # Uniform execution overlaps communicating tasks on a processor
                 # (rank-local shares); avoid serializing them into wait cycles.
                 est_occupancy = scheduling_task_occupancy(accel, est_occupancy)
@@ -1103,7 +1102,6 @@ concurrently across threads.
         end
     end
     empty!(sorted_procs)
-    empty!(costs)
 
     # Phase 3 — brief state.lock hold: fire or fail the task.
     # `restore_ready` only becomes non-empty if a task completes synchronously

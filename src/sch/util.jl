@@ -708,14 +708,105 @@ function estimate_task_costs(state, procs, task; sig=nothing)
 end
 const DEFAULT_TRANSFER_RATE = UInt64(1_000_000)
 const EMPTY_TRANSFER_RATES = Dict{Processor,UInt64}()
+
+# The candidates are a `Vector{Processor}`, so every call on an element (`get_parent`,
+# `root_worker_id`, a lookup keyed by it) is a dynamic dispatch; at 1-2 us apiece on a
+# slow core that was most of the per-candidate cost. Nearly always all candidates have
+# one concrete type (every thread of a process): pass it as a function barrier, so the
+# loops below are compiled for it. Mixed candidates use `Processor` and stay dynamic.
+function candidate_type(procs)
+    P = typeof(@inbounds procs[1])
+    for idx in 2:length(procs)
+        typeof(@inbounds procs[idx]) === P || return Processor
+    end
+    return P
+end
+
+function fill_pressures!(pressures, procs, wtp, ::Type{P}) where {P}
+    last_pid = -1
+    local proc_map
+    for idx in eachindex(procs)
+        proc = (@inbounds procs[idx])::P
+        pid = Dagger.root_worker_id(get_parent(proc))
+        if pid != last_pid
+            proc_map = get(wtp, pid, nothing)
+            last_pid = pid
+        end
+        if proc_map === nothing
+            @inbounds pressures[idx] = UInt64(0)
+            continue
+        end
+        counter_ref = get(proc_map, proc, nothing)
+        @inbounds pressures[idx] = counter_ref === nothing ? UInt64(0) : counter_ref[]
+    end
+    return
+end
+
+# Returns whether every candidate costs the same
+function fill_costs!(cost_vec, procs, wtr, pressures, tx_costs, est_time_util, have_chunks, ::Type{P}) where {P}
+    first_cost = 0.0
+    all_equal = true
+    last_pid = -1
+    rates = EMPTY_TRANSFER_RATES
+    for idx in eachindex(procs)
+        proc = (@inbounds procs[idx])::P
+        gproc = get_parent(proc)
+        pid = Dagger.root_worker_id(gproc)
+        if pid != last_pid
+            rates = get(wtr, pid, EMPTY_TRANSFER_RATES)
+            last_pid = pid
+        end
+
+        # Add fixed cost for cross-worker task transfer (esimated at 1ms)
+        # TODO: Actually estimate/benchmark this
+        task_xfer_cost = pid != myid() ? 1_000_000 : 0 # 1ms
+
+        # N.B. `tx_rate` is in bytes per *second* (see the `transfer_rate`
+        # metadata `do_task` reports, which divides by a nanosecond
+        # duration scaled by 10^9), so `bytes/tx_rate` comes out in
+        # seconds while every other term here is in nanoseconds. Scale it
+        # up, or transfer cost is discounted by a factor of a billion and
+        # data locality never affects the choice of processor.
+        tx_cost = if have_chunks
+            tx_rate = get(rates, proc, DEFAULT_TRANSFER_RATE)
+            (tx_costs[gproc]/tx_rate) * 1e9
+        else
+            0.0
+        end
+        cost = est_time_util + @inbounds(pressures[idx]) + tx_cost + task_xfer_cost
+        @inbounds cost_vec[idx] = cost
+        if idx == 1
+            first_cost = cost
+        elseif cost != first_cost
+            all_equal = false
+        end
+    end
+    return all_equal
+end
+
+"""
+    estimate_task_costs!(sorted_procs, costs, state, procs, task; sig=nothing)
+
+Fill `sorted_procs` with `procs` ordered by estimated cost of running `task` (cheapest
+first; equally costly processors in random order). `costs` is an optional
+`Dict{Processor,Float64}` that receives the estimate of each processor; the scheduler
+passes `nothing`, because a dictionary keyed by an abstractly typed, isbits processor
+allocates a box for every insertion and is looked up again by the sort.
+
+N.B. Everything is kept in vectors aligned with `procs`, and what is the same for every
+candidate is computed once: this runs for every task with several candidate processors
+(any unscoped task on a multi-threaded process), where the dictionaries and per-
+candidate lookups cost about 130 us for 16 threads and grew with the thread count.
+"""
 @reuse_scope function estimate_task_costs!(sorted_procs, costs, state, procs, task; sig=nothing)
-    if length(procs) == 1
+    np = length(procs)
+    if np == 1
         # Nothing to rank: the costs only exist to order the candidates, and a
         # scan of the task's chunks to order one of them is pure overhead. This
         # is the common shape for Datadeps, which pins every task to one space.
         proc = procs[1]
         sorted_procs[1] = proc
-        costs[proc] = 0.0
+        costs === nothing || (costs[proc] = 0.0)
         return
     end
 
@@ -726,6 +817,7 @@ const EMPTY_TRANSFER_RATES = Dict{Processor,UInt64}()
             push!(chunks, Dagger.value(input)::Chunk)
         end
     end
+    have_chunks = !isempty(chunks)
 
     # Estimate the cost of executing the task itself
     if sig === nothing
@@ -736,16 +828,19 @@ const EMPTY_TRANSFER_RATES = Dict{Processor,UInt64}()
     # Estimate network transfer cost per *parent* processor. Chunks are located
     # per worker, so this depends only on `get_parent(proc)`, and `procs` is
     # commonly every thread of a single worker -- computing it per processor
-    # would redo identical work (a scan of every chunk) once per thread.
+    # would redo identical work (a scan of every chunk) once per thread. With no
+    # Chunk argument there is nothing to transfer and the table stays empty.
     # N.B. We treat same-worker transfers as having zero transfer cost
     # TODO: For non-Chunk, model cost from scheduler to worker
     # TODO: Measure and model processor move overhead
     tx_costs = @reusable_dict :estimate_task_costs_tx_costs Processor Float64 OSProc() 0.0 8
-    for proc in procs
-        gproc = get_parent(proc)
-        haskey(tx_costs, gproc) && continue
-        chunks_filt = Iterators.filter(c->get_parent(processor(c)) != gproc, chunks)
-        tx_costs[gproc] = impute_sum(datasize(chunk) for chunk in chunks_filt)
+    if have_chunks
+        for proc in procs
+            gproc = get_parent(proc)
+            haskey(tx_costs, gproc) && continue
+            chunks_filt = Iterators.filter(c->get_parent(processor(c)) != gproc, chunks)
+            tx_costs[gproc] = impute_sum(datasize(chunk) for chunk in chunks_filt)
+        end
     end
     empty!(chunks)
 
@@ -756,78 +851,48 @@ const EMPTY_TRANSFER_RATES = Dict{Processor,UInt64}()
     # added to every candidate is a constant offset that cancels out of the
     # comparison, leaving the scheduler blind to which processors are idle.
     # Gathered in its own pass so `worker_time_pressure` is locked once, and
-    # not nested inside the `worker_transfer_rate` hold below.
+    # not nested inside the `worker_transfer_rate` hold below. The per-worker
+    # table is looked up once per run of candidates of the same worker.
     pressures = @reusable_vector :estimate_task_costs_pressures UInt64 UInt64(0) 32
-    resize!(pressures, length(procs))
+    resize!(pressures, np)
+    P = candidate_type(procs)
     lock(state.worker_time_pressure) do wtp
-        for (idx, proc) in enumerate(procs)
-            pid = Dagger.root_worker_id(get_parent(proc))
-            proc_map = get(wtp, pid, nothing)
-            if proc_map === nothing
-                pressures[idx] = UInt64(0)
-                continue
-            end
-            counter_ref = get(proc_map, proc, nothing)
-            pressures[idx] = counter_ref === nothing ? UInt64(0) : counter_ref[]
-        end
+        fill_pressures!(pressures, procs, wtp, P)
     end
 
     # Estimate total cost for executing this task on each candidate processor.
     # The transfer-rate table is taken once rather than once per processor.
     # N.B. `all_equal` is returned from the locked block rather than assigned
     # to a captured outer local, which would Core.Box it.
+    cost_vec = @reusable_vector :estimate_task_costs_costs Float64 0.0 32
+    resize!(cost_vec, np)
     all_equal = lock(state.worker_transfer_rate) do wtr
-        local first_cost = 0.0
-        local all_equal = true
-        for (idx, proc) in enumerate(procs)
-            gproc = get_parent(proc)
-            pid = Dagger.root_worker_id(gproc)
-
-            # Add fixed cost for cross-worker task transfer (esimated at 1ms)
-            # TODO: Actually estimate/benchmark this
-            task_xfer_cost = pid != myid() ? 1_000_000 : 0 # 1ms
-
-            # N.B. `tx_rate` is in bytes per *second* (see the `transfer_rate`
-            # metadata `do_task` reports, which divides by a nanosecond
-            # duration scaled by 10^9), so `bytes/tx_rate` comes out in
-            # seconds while every other term here is in nanoseconds. Scale it
-            # up, or transfer cost is discounted by a factor of a billion and
-            # data locality never affects the choice of processor.
-            tx_rate = get(get(wtr, pid, EMPTY_TRANSFER_RATES), proc, DEFAULT_TRANSFER_RATE)
-            tx_cost = (tx_costs[gproc]/tx_rate) * 1e9
-            cost = est_time_util + pressures[idx] + tx_cost + task_xfer_cost
-            costs[proc] = cost
-            if idx == 1
-                first_cost = cost
-            elseif cost != first_cost
-                all_equal = false
-            end
-        end
-        return all_equal
+        fill_costs!(cost_vec, procs, wtr, pressures, tx_costs, est_time_util, have_chunks, P)
     end
     empty!(tx_costs)
     empty!(pressures)
 
-    # Shuffle procs around, so equally-costly procs are equally considered
-    np = length(procs)
-    if np == 1
-        # Nothing to shuffle
-        sorted_procs[1] = procs[1]
-    else
-        @reusable :estimate_task_costs_P Vector{Int} 0 4 np P begin
-            resize!(P, np)
-            copyto!(P, 1:np)
-            randperm!(P)
-            for idx in 1:np
-                sorted_procs[idx] = procs[P[idx]]
-            end
+    # Shuffle procs around, so equally-costly procs are equally considered, then
+    # sort the shuffled indices by lowest cost first (stable, so ties keep their
+    # random order). The sort is skipped when every processor costs the same (the
+    # usual single-worker case), where the shuffle already gives the arbitrary-
+    # but-fair order that sorting would leave us with anyway.
+    @reusable :estimate_task_costs_P Vector{Int} 0 4 np P begin
+        resize!(P, np)
+        copyto!(P, 1:np)
+        randperm!(P)
+        all_equal || sort!(P, by=i->@inbounds(cost_vec[i]))
+        for idx in 1:np
+            @inbounds sorted_procs[idx] = procs[P[idx]]
         end
     end
-
-    # Sort by lowest cost first. Skipped when every processor costs the same
-    # (the usual single-worker case), where the shuffle above already gives the
-    # arbitrary-but-fair order that sorting would leave us with anyway.
-    all_equal || sort!(sorted_procs, by=p->costs[p])
+    if costs !== nothing
+        for idx in 1:np
+            costs[procs[idx]] = cost_vec[idx]
+        end
+    end
+    empty!(cost_vec)
+    return
 end
 
 """
