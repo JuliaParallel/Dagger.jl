@@ -95,3 +95,51 @@ local_inc(x::Int) = x + 1
     end
     MPI.Barrier(comm)
 end
+
+# Datadeps regions inside a rank-local graph: the planner of a graph on a one-rank communicator
+# must not depend on what the other ranks do
+local_scale!(X, c) = (X .*= c; nothing)
+local_plus!(X, c) = (X .+= c; nothing)
+@testset "Datadeps inside a rank-local graph" begin
+    cpus = filter(p -> p.innerProc isa Dagger.ThreadProc, mpi_procs())
+    pinned(r) = Dagger.ExactScope(last(filter(p -> p.rank == r, cpus)))
+    @testset "a different number of regions and tasks on every rank" begin
+        n = 2 + 3rank
+        A = Dagger.with_rank_local() do
+            A = fill(1.0, 6)
+            for _ in 1:(1 + rank)
+                Dagger.spawn_datadeps() do
+                    for _ in 1:n
+                        Dagger.@spawn local_plus!(InOut(A), 1.0)
+                    end
+                end
+            end
+            A
+        end
+        @test A == fill(1.0 + n * (1 + rank), 6)
+    end
+    @testset "views of one array order correctly" begin
+        B = Dagger.with_rank_local() do
+            B = fill(1.0, 8)
+            Dagger.spawn_datadeps() do
+                Dagger.@spawn local_plus!(InOut(view(B, 1:4)), 1.0)
+                Dagger.@spawn local_scale!(InOut(view(B, 3:6)), 2.0)
+                Dagger.@spawn local_plus!(InOut(view(B, 5:8)), 3.0)
+            end
+            B
+        end
+        @test B == [2.0, 2.0, 4.0, 4.0, 5.0, 5.0, 4.0, 4.0]
+    end
+    @testset "the world still agrees afterwards" begin
+        t = Dagger.@spawn scope=pinned(nranks-1) local_inc(7)
+        @test fetch(t) == 8
+        @test allequal(MPI.Allgather(Int(t.uid), comm))
+        # and Datadeps of the world still works
+        W = fill(1.0, 4)
+        Dagger.spawn_datadeps() do
+            Dagger.@spawn scope=pinned(nranks-1) local_plus!(InOut(W), 1.0)
+        end
+        rank == 0 && @test W == fill(2.0, 4)
+    end
+    MPI.Barrier(comm)
+end

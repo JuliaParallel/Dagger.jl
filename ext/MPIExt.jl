@@ -869,13 +869,21 @@ function take_ref_id!()
             throw(ConcurrencyViolationError("Attempted to generate generic MPIRefID in a multi-threaded context"))
         end
         generic = true
-        id = next_id() # Abuse the TID counter for generic IDs
-        check_uniform(id)
+        accel = Dagger.current_acceleration()
+        if accel isa MPIAcceleration && accel.comm != MPI.COMM_WORLD
+            # A rank-local graph (a Datadeps planner running in it, say) must not draw from the
+            # counter the world's uniform generic ids come from: the ranks run different numbers
+            # of local operations, and the world's ids would stop agreeing
+            id = Int(Dagger.eager_next_id(accel))
+        else
+            id = next_id() # Abuse the TID counter for generic IDs
+            check_uniform(id)
+        end
     end
     # Only the tag-relevant component must fit in an MPI tag
     # N.B. Skip when MPI is uninitialized (e.g. pure-Distributed callers)
     # N.B. Ids of a rank-local graph start above the tag range (they never become tags)
-    @assert !MPI.Initialized() || tid >= MPI_LOCAL_ID_BASE || (generic == true ? id : tid) < MPI.tag_ub()
+    @assert !MPI.Initialized() || (generic == true ? id : tid) >= MPI_LOCAL_ID_BASE || (generic == true ? id : tid) < MPI.tag_ub()
     return MPIRefID(tid, generic, id)
 end
 
