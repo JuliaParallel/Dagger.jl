@@ -67,6 +67,13 @@ function spawn_unscoped(n)
     return [Dagger.@spawn bench_noop() for i in 1:n]
 end
 
+# Rank-local tasks as a task graph on a communicator of size one (`Dagger.with_rank_local`)
+function spawn_comm_self(n)
+    return Dagger.with_rank_local() do
+        [Dagger.@spawn bench_noop() for i in 1:n]
+    end
+end
+
 function spawn_local(n)
     local_accel = Dagger.DistributedAcceleration()
     return [Dagger.@spawn acceleration=local_accel bench_noop() for i in 1:n]
@@ -184,6 +191,10 @@ function tasks_suite(_ctx; method, accels)
     # only safe where MPI processors refuse them (see `accel_matches_proc`);
     # older revisions place them on MPI processors and lose them, so probe the
     # predicate rather than running tasks that can hang.
+    # Not every revision has it: the probe skips the benchmark where `with_rank_local` is missing
+    if mpi && ok("tasks/comm-self", () -> fetch.(spawn_comm_self(4)), fill(1, 4))
+        sub["rank-local, one-rank communicator (n=$n)"] = @benchmarkable(waitall_tasks(spawn_comm_self($n)))
+    end
     if mpi && !Dagger.accel_matches_proc(Dagger.DistributedAcceleration(), first(procs)) &&
        ok("tasks/local", () -> fetch.(spawn_local(4)), fill(1, 4))
         sub["rank-local (n=$n)"] = @benchmarkable(waitall_tasks(spawn_local($n)))
