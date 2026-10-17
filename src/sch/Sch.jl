@@ -142,7 +142,14 @@ function compat_entry(accel, scope, procs::Vector{<:Processor})
     # with `Set(gen)`.
     entry = CompatEntry(scope, Vector{Processor}(procs), compat, nothing)
     return @safe_lock_spin1 COMPAT_PROCS_CACHE cache begin
-        get!(()->entry, cache, key)
+        # N.B. `get!` would keep a *stale* entry for this key (one whose `procs` no longer
+        # matches, because the processor list changed without a cache flush) and hand it
+        # back, so every later call would miss again and recompute the set
+        if haskey(cache.cache, key)
+            cache.cache[key] = entry
+        else
+            get!(()->entry, cache, key)
+        end
     end::CompatEntry
 end
 compatible_processors_cached(accel, scope, procs::Vector{<:Processor}) =

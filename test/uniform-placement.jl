@@ -94,3 +94,25 @@ end
         @test Dagger.select_processors_uniform!(procs, Dagger.DistributedAcceleration(), Dagger.Thunk(noop; id=3), nothing) == want
     end
 end
+
+# A cached (accel, scope, procs) lookup whose processor list changed without a cache
+# flush must be replaced, not served stale: `BasicLFUCache.get!` keeps the old entry for
+# a present key, which made every later lookup miss and recompute (and re-sort) the set.
+Dagger.compatible_processors(::UniformPlacementAccel, ::Dagger.AbstractScope, procs::Vector{<:Dagger.Processor}) =
+    Set{Dagger.Processor}(procs)
+@testset "compat cache replaces a stale entry" begin
+    accel = UniformPlacementAccel()
+    scope = Dagger.AnyScope()
+    Dagger.Sch.invalidate_compat_procs_cache!()
+    procs = Dagger.Processor[RankProc(r, 1) for r in 0:1]
+    e1 = Dagger.Sch.compat_entry(accel, scope, procs)
+    @test e1.compat == Set(procs)
+    @test Dagger.Sch.compat_entry(accel, scope, procs) === e1
+    grown = Dagger.Processor[RankProc(r, 1) for r in 0:2]
+    e2 = Dagger.Sch.compat_entry(accel, scope, grown)
+    @test e2.compat == Set(grown)
+    # The new entry is what the cache now holds: the next lookup hits
+    @test Dagger.Sch.compat_entry(accel, scope, grown) === e2
+    @test Dagger.Sch.compatible_processors_ordered(accel, scope, grown) == grown
+    Dagger.Sch.invalidate_compat_procs_cache!()
+end
