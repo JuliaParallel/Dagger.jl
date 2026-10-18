@@ -2884,14 +2884,18 @@ accel_matches_proc(accel::MPIAcceleration, proc) = false
 # `Dagger.scope(mpi_rank=r)` does, leaves the choice of thread to the scheduler, and a
 # rank that elides the task never learns which thread that was. `scope=` sets both
 # `scope` and `compute_scope`; accept either, or both when equal.
-function mpi_scope_processor(opts::Options)
-    scope = if opts.compute_scope === nothing
+function mpi_task_scope(opts::Options)
+    return if opts.compute_scope === nothing
         opts.scope
     elseif opts.scope === nothing || opts.scope === opts.compute_scope || opts.scope == opts.compute_scope
         opts.compute_scope
     else
         nothing
     end
+end
+
+function mpi_scope_processor(opts::Options)::Union{Nothing,MPIProcessor}
+    scope = mpi_task_scope(opts)
     if scope isa Dagger.ExactScope
         proc = scope.processor
         return proc isa MPIProcessor ? proc : nothing
@@ -2929,7 +2933,7 @@ function mpi_union_scope_processor(scope::Dagger.UnionScope)
 end
 
 # At spawn time the scheduler has not yet filled in the execution or result scope
-function mpi_task_processor(opts::Options)
+function mpi_task_processor(opts::Options)::Union{Nothing,MPIProcessor}
     (opts.exec_scope === nothing && opts.result_scope === nothing) || return nothing
     return mpi_scope_processor(opts)
 end
