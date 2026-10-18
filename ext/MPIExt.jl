@@ -850,8 +850,9 @@ function take_ref_id!()
     if Dagger.in_task()
         tid = sch_handle().thunk_id.id
         id = next_ref_sub_id!(tid)
-    elseif DATADEPS_THUNK_ID[] != 0
-        tid = DATADEPS_THUNK_ID[]
+    elseif (dtid = DATADEPS_THUNK_ID[]) != 0
+        # One lookup: a scoped value is a walk of the scope chain, and this runs for every task
+        tid = dtid
         id = next_ref_sub_id!(tid)
     else
         if current_task() !== Base.roottask
