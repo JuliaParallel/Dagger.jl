@@ -324,6 +324,16 @@ default_procgrid(accel, nblocks::NTuple{N,Int}) where N = nothing
 "Acceleration-specific finalization after array chunk tasks are spawned."
 post_stage_array_chunks!(accel::Acceleration, tasks, eltype::Type, nd::Int) = tasks
 
+"""
+    note_chunk_placement!(accel, task::DTask, scope)
+
+Called for every task that produces a block of an array, with the compute scope the block was
+placed with (a single processor for the deterministic placements: every rank computes the same
+grid). An acceleration that wants to know at spawn time where a block lives records it here;
+the default does nothing.
+"""
+note_chunk_placement!(::Acceleration, task, scope) = nothing
+
 default_processor(space::CPURAMMemorySpace) = OSProc(space.owner)
 default_memory_space(accel::DistributedAcceleration) = CPURAMMemorySpace(myid())
 # Chunk records must be labeled with the space the value actually resides in

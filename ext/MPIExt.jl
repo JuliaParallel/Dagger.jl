@@ -2840,6 +2840,17 @@ function post_stage_array_chunks!(accel::MPIAcceleration, tasks, eltype::Type{T}
     return tasks
 end
 
+# The block grid of an array is the same on every rank, so a block placed on one processor has a
+# known rank at spawn time. The tasks that make the blocks run inside a Datadeps region (they
+# cannot be elided and are not failure-only), but the tasks that read a block can: they only
+# need to know who owns it (`mpi_arg_participates`).
+function Dagger.note_chunk_placement!(accel::MPIAcceleration, task, scope)
+    if accel.comm == MPI.COMM_WORLD && scope isa Dagger.ExactScope && scope.processor isa MPIProcessor
+        task.placed = scope.processor.rank
+    end
+    return
+end
+
 accel_matches_proc(accel::MPIAcceleration, proc::MPIOSProc) = true
 accel_matches_proc(accel::MPIAcceleration, proc::MPIClusterProc) = true
 accel_matches_proc(accel::MPIAcceleration, proc::MPIProcessor) = true
@@ -2937,7 +2948,9 @@ mpi_failure_only(opts::Options) =
 function mpi_arg_participates(v, local_rank::Int)
     if v isa Dagger.DTask
         v.stub !== nothing && return mpi_arg_participates(v.stub, local_rank)
-        return v.owner < 0 || v.owner == local_rank
+        # `placed`: the rank a block of an array was put on (it does not make the task failure-only)
+        where = v.owner >= 0 ? v.owner : v.placed
+        return where < 0 || where == local_rank
     elseif v isa Chunk
         # N.B. A scope restriction on the chunk (a `DArray` block has one) only matters through
         # `constrain(task scope, chunk scope)`, which `elide_task!` checks for the task as a whole
@@ -2996,10 +3009,9 @@ Dagger.task_processor_preference(::MPIAcceleration, req::MPIPlacementRequest, st
 function mpi_arg_owner(v)
     if v isa Dagger.DTask
         v.stub !== nothing && return mpi_arg_owner(v.stub)
-        return v.owner
+        return v.owner >= 0 ? v.owner : v.placed
     elseif v isa Chunk
         v.handle isa MPIRef || return -1
-        v.scope isa Dagger.AnyScope || return -1
         return v.handle.rank
     elseif v isa Dagger.WeakChunk
         return -1
@@ -3050,6 +3062,9 @@ function mpi_preplace!(accel::MPIAcceleration, spec, task)
     Dagger.iscompatible_func(proc, opts, typeof(f)) || return false
     for i in 2:length(fargs)
         Dagger.iscompatible_arg(proc, opts, chunktype(Dagger.value(fargs[i]))) || return false
+        # The scheduler also constrains the task's scope by that of every chunk argument
+        val = Dagger.value(fargs[i])
+        val isa Chunk && !Dagger.proc_in_scope(proc, val.scope) && return false
     end
     opts.compute_scope = Dagger.ExactScope(proc)
     return true

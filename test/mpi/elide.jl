@@ -5,6 +5,7 @@ elide_inc(x::Int) = x + 1                 # concrete, cannot throw: elidable
 elide_add(a::Int, b::Int) = a + b
 elide_throws(x::Int) = x > 0 ? error("elide_throws") : x   # may throw, concrete Int
 elide_len(x::Vector{Int}) = length(x)    # concrete, cannot throw
+elide_blocksum(x::Matrix{Float64}) = sum(x)
 elide_rank() = MPI.Comm_rank(MPI.COMM_WORLD)
 elide_where() = (MPI.Comm_rank(MPI.COMM_WORLD), Threads.threadid())   # concrete, cannot be proven not to throw
 
@@ -129,6 +130,36 @@ elide_where() = (MPI.Comm_rank(MPI.COMM_WORLD), Threads.threadid())   # concrete
                 @test t3.stub === nothing
                 @test_throws Exception fetch(t3)
                 @test allequal(MPI.Allgather(Int(t3.uid), comm))
+            end
+        end
+
+        @testset "DArray blocks: where they live is known when the task that reads one is spawned" begin
+            # The blocks of an array are tasks of a Datadeps region (not elidable themselves), but their placement is
+            # the same grid on every rank: the consumers of a block are planned in full only by ranks that take part
+            A = zeros(Blocks(2, 2), Float64, 2 * nranks, 2)
+            blocks = vec(A.chunks)
+            placed = [b.placed for b in blocks]
+            @test all(>=(0), placed)
+            held = [fetch(b; raw=true).handle.rank for b in blocks]
+            @test placed == held                              # what was recorded is where the block is
+            @test allequal(MPI.Allgather(hash(placed), comm))
+            for (i, b) in enumerate(blocks)
+                o = placed[i]
+                t = Dagger.@spawn scope=Dagger.scope(mpi_rank=o) elide_blocksum(b)
+                wait(t)
+                @test (t.stub !== nothing) == (rank != o)     # every other rank elides it
+                @test fetch(t) == 0.0
+                @test allequal(MPI.Allgather(Int(t.uid), comm))
+            end
+            if nranks >= 3
+                # on another rank than the block's: the block's rank sends the data (takes part), a third rank elides
+                o = placed[1]
+                other = (o + 1) % nranks
+                t = Dagger.@spawn scope=Dagger.scope(mpi_rank=other) elide_blocksum(blocks[1])
+                wait(t)
+                @test (t.stub !== nothing) == (rank != o && rank != other)   # every rank outside the transfer elides
+                @test fetch(t) == 0.0
+                @test allequal(MPI.Allgather(Int(t.uid), comm))
             end
         end
 

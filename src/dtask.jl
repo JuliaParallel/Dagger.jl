@@ -79,9 +79,13 @@ mutable struct DTask
     stub::Any
     # Rank/worker known to own this task's result at spawn time, `-1` when unknown
     owner::Int
+    # Rank/worker the placement code (`emit_chunk_tasks!`) put this task's result on, `-1` when
+    # not known at spawn time. Unlike `owner` it changes nothing about `fetch`; it only lets an
+    # acceleration decide about the *consumers* of the result (see `note_chunk_placement!`).
+    placed::Int
     thunk_ref::DRef
 
-    DTask(uid, future, metadata) = new(uid, future, metadata, nothing, -1)
+    DTask(uid, future, metadata) = new(uid, future, metadata, nothing, -1, -1)
 end
 
 const EagerThunk = DTask
