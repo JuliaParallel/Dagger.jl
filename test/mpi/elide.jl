@@ -4,6 +4,7 @@
 elide_inc(x::Int) = x + 1                 # concrete, cannot throw: elidable
 elide_add(a::Int, b::Int) = a + b
 elide_throws(x::Int) = x > 0 ? error("elide_throws") : x   # may throw, concrete Int
+elide_len(x::Vector{Int}) = length(x)    # concrete, cannot throw
 elide_rank() = MPI.Comm_rank(MPI.COMM_WORLD)
 elide_where() = (MPI.Comm_rank(MPI.COMM_WORLD), Threads.threadid())   # concrete, cannot be proven not to throw
 
@@ -100,6 +101,35 @@ elide_where() = (MPI.Comm_rank(MPI.COMM_WORLD), Threads.threadid())   # concrete
             @test_throws Exception fetch(bad)
             dep = Dagger.@spawn elide_inc(bad)
             @test_throws Exception fetch(dep)
+        end
+
+        @testset "chunk arguments with a scope restriction (as a DArray block has)" begin
+            # A chunk owned by `target` whose scope names that rank: a rank that neither runs the task nor
+            # owns the chunk elides the task. The restriction only matters if it contradicts the task's scope.
+            # N.B. `tochunk(x, proc, scope)` would place the chunk on rank 0 (the owner of plain values), so the memory
+            # space is given as well.
+            target = nranks - 1
+            data = fill(5, 4)
+            restricted = Dagger.tochunk(data, proc_for_rank(target), space_for_rank(target), Dagger.scope(mpi_rank=target))
+            t = Dagger.@spawn scope=Dagger.scope(mpi_rank=target) elide_len(restricted)
+            wait(t)
+            @test (t.stub !== nothing) == (rank != target)
+            @test fetch(t) == 4
+            @test allequal(MPI.Allgather(Int(t.uid), comm))
+            # ... and when the chunk is also an argument of a task pinned to one processor of that rank
+            t2 = Dagger.@spawn scope=pinned(target) elide_len(restricted)
+            wait(t2)
+            @test (t2.stub !== nothing) == (rank != target)
+            @test fetch(t2) == 4
+            if nranks > 1
+                # A scope that contradicts the task's is not elided: the scheduler of the owner fails the task
+                other = (target + 1) % nranks
+                clash = Dagger.tochunk(data, proc_for_rank(other), space_for_rank(other), Dagger.scope(mpi_rank=other))
+                t3 = Dagger.@spawn scope=Dagger.scope(mpi_rank=target) elide_len(clash)
+                @test t3.stub === nothing
+                @test_throws Exception fetch(t3)
+                @test allequal(MPI.Allgather(Int(t3.uid), comm))
+            end
         end
 
         @testset "dependent chains" begin

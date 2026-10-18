@@ -2939,8 +2939,9 @@ function mpi_arg_participates(v, local_rank::Int)
         v.stub !== nothing && return mpi_arg_participates(v.stub, local_rank)
         return v.owner < 0 || v.owner == local_rank
     elseif v isa Chunk
+        # N.B. A scope restriction on the chunk (a `DArray` block has one) only matters through
+        # `constrain(task scope, chunk scope)`, which `elide_task!` checks for the task as a whole
         v.handle isa MPIRef || return true
-        v.scope isa Dagger.AnyScope || return true
         return v.handle.rank == local_rank
     elseif v isa Dagger.WeakChunk
         return true
@@ -3076,10 +3077,22 @@ function Dagger.elide_task!(accel::MPIAcceleration, spec, task)
     fargs = spec.fargs
     f = Dagger.value(fargs[1])
     (f isa Function || f isa Type) || return false
+    # The scope the scheduler would compute for the task: the owner fails the task when it is invalid
+    # (task scope, result scope and every argument chunk's scope must agree), so a scope that can be
+    # satisfied is all a rank that elides the task needs to know. An invalid one keeps the ordinary
+    # protocol, which reports the failure as before.
+    scope = Dagger.constrain(@something(opts.compute_scope, opts.scope, Dagger.DefaultScope()),
+                             @something(opts.result_scope, Dagger.AnyScope()))
+    scope isa Dagger.InvalidScope && return false
     for i in 2:length(fargs)
         arg = fargs[i]
         Dagger.ispositional(arg) || return false
-        mpi_arg_participates(Dagger.value(arg), local_rank) && return false
+        val = Dagger.value(arg)
+        mpi_arg_participates(val, local_rank) && return false
+        if val isa Chunk
+            scope = Dagger.constrain(scope, val.scope)
+            scope isa Dagger.InvalidScope && return false
+        end
     end
     # The placeholder `execute!` stamps on a non-owner, with the id it would get
     space = memory_space(nothing, proc)::MPIMemorySpace
