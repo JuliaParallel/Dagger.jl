@@ -3070,6 +3070,24 @@ function mpi_preplace!(accel::MPIAcceleration, spec, task)
     return true
 end
 
+# The scheduler constrains a task's scope by the scope of every chunk argument and fails the task when they
+# cannot be satisfied together; a rank that elides the task only needs to know that they can. The result scope is
+# `nothing` for every task that gets here (`mpi_task_processor` refuses one), so the chain starts from the compute scope.
+# N.B. Computed only for chunk arguments that carry a restriction: `constrain` on the union scope of a whole rank
+# costs time proportional to its size, which showed up as +30 us per task at 16 threads when it ran for every task.
+function mpi_chunk_scopes_fit(opts::Options, fargs)
+    scope = nothing
+    for i in 2:length(fargs)
+        val = Dagger.value(fargs[i])
+        val isa Chunk || continue
+        val.scope isa Dagger.AnyScope && continue
+        scope === nothing && (scope = @something(opts.compute_scope, opts.scope, Dagger.DefaultScope()))
+        scope = Dagger.constrain(scope, val.scope)
+        scope isa Dagger.InvalidScope && return false
+    end
+    return true
+end
+
 function Dagger.elide_task!(accel::MPIAcceleration, spec, task)
     CHECK_UNIFORMITY[] && return false
     opts = spec.options
@@ -3092,23 +3110,12 @@ function Dagger.elide_task!(accel::MPIAcceleration, spec, task)
     fargs = spec.fargs
     f = Dagger.value(fargs[1])
     (f isa Function || f isa Type) || return false
-    # The scope the scheduler would compute for the task: the owner fails the task when it is invalid
-    # (task scope, result scope and every argument chunk's scope must agree), so a scope that can be
-    # satisfied is all a rank that elides the task needs to know. An invalid one keeps the ordinary
-    # protocol, which reports the failure as before.
-    scope = Dagger.constrain(@something(opts.compute_scope, opts.scope, Dagger.DefaultScope()),
-                             @something(opts.result_scope, Dagger.AnyScope()))
-    scope isa Dagger.InvalidScope && return false
     for i in 2:length(fargs)
         arg = fargs[i]
         Dagger.ispositional(arg) || return false
-        val = Dagger.value(arg)
-        mpi_arg_participates(val, local_rank) && return false
-        if val isa Chunk
-            scope = Dagger.constrain(scope, val.scope)
-            scope isa Dagger.InvalidScope && return false
-        end
+        mpi_arg_participates(Dagger.value(arg), local_rank) && return false
     end
+    mpi_chunk_scopes_fit(opts, fargs) || return false
     # The placeholder `execute!` stamps on a non-owner, with the id it would get
     space = memory_space(nothing, proc)::MPIMemorySpace
     # N.B. `execute!` first takes a ref id for the task's tag when the task has no
