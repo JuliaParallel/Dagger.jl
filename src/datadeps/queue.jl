@@ -76,7 +76,27 @@ function spawn_datadeps(f::Base.Callable; static::Bool=true,
     if !aliasing
         throw(ArgumentError("Aliasing analysis is no longer optional"))
     end
+    # The region's slot arenas (see `SlotPool`) are freed once every task it
+    # launched has finished, since a failed task would never let a dependent
+    # free task run. When the region succeeds, `wait_all` has waited for them
+    # all; when a task fails, it rethrows right away, possibly with others
+    # still running, so the arenas are freed in the background once those end.
+    arenas = RegionSlotArenas()
+    ok = false
+    try
+        result = with(DATADEPS_REGION_ARENAS => arenas) do
+            _spawn_datadeps_region(f, scheduler, launch_wait, hierarchical)
+        end
+        ok = true
+        return result
+    finally
+        ok ? free_region_arenas!(arenas) : free_region_arenas_when_done!(arenas)
+    end
+end
+function _spawn_datadeps_region(f, scheduler, launch_wait, hierarchical)
     wait_all(; check_errors=true) do
+        # Every task the region launches joins this queue
+        DATADEPS_REGION_ARENAS[].tasks = (get_options(:task_queue)::WaitAllQueue).tasks
         scheduler = something(scheduler, DATADEPS_SCHEDULER[], RoundRobinScheduler())
         launch_wait = something(launch_wait, DATADEPS_LAUNCH_WAIT[], false)::Bool
         hierarchical = something(hierarchical, DATADEPS_HIERARCHICAL[], true)::Bool
@@ -470,6 +490,10 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
     write_num = 1
     proc_to_scope_lfu = BasicLFUCache{Processor,AbstractScope}(1024)
     launch_start = time_ns()
+    # Allocate the slots the plan will need up front, one call per worker, so
+    # the loop below does not wait on one allocation per slot. Counted in the
+    # launch time, which is what it replaces.
+    prefill_slot_pool!(state, queue.seen_tasks, schedule)
     for pair in queue.seen_tasks
         spec = pair.spec
         task = pair.task
@@ -550,6 +574,8 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
             is_original(obj_cache, remote_space, ainfo) && continue
             haskey(freed, remote_arg) && continue
             freed[remote_arg] = nothing
+            # A slot in an arena is freed with it, when the region ends
+            freed_with_its_arena(remote_arg) && continue
             free_syncdeps = Set{ThunkSyncdep}()
             buf_ainfo = stored_value_ainfo(obj_cache, remote_space, ainfo)
             gather_free_syncdeps!(state, remote_space, buf_ainfo, remote_arg, write_num, chunk_to_ainfos, free_syncdeps)

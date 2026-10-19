@@ -712,7 +712,7 @@ function aliasing(x::Chunk, T)
         if root_worker_id(x.processor) == myid()
             return aliasing_unwrapped(unwrap(x), T)
         end
-        @assert x.handle isa DRef
+        @assert x.handle isa Union{DRef,ArenaRef}
         return remotecall_fetch(root_worker_id(x.processor), x, T) do x, T
             aliasing_unwrapped(unwrap(x), T)
         end

@@ -658,6 +658,79 @@ function aliased_object!(f, cache::AliasedObjectCache, x; ainfo=aliasing(cache.a
     end
 end
 
+"""
+    ArenaRef{T,N}
+
+The handle of a Datadeps slot carved out of a `SlotArena`: an `Array{T,N}` of
+size `dims` at address `addr` on worker `owner`, inside arena `arena`. Unlike a
+`DRef`, the planner makes one without asking `owner`, since it already knows the
+arena's base address: so it knows the slot's aliasing before the slot exists.
+"""
+struct ArenaRef{T,N}
+    owner::Int
+    arena::UInt
+    addr::UInt
+    dims::NTuple{N,Int}
+end
+
+"""
+    SlotArena
+
+One block of memory a region reserved on a worker for its slots, which the
+planner hands out by bumping `used`. It is freed whole, once, when the region
+ends (see `RegionSlotArenas`).
+"""
+mutable struct SlotArena
+    const space::CPURAMMemorySpace
+    const id::UInt
+    const base::UInt
+    const capacity::Int
+    used::Int
+end
+
+"""
+    RegionSlotArenas
+
+Every slot arena a `spawn_datadeps` region reserved, as `(owner, id)`, which it
+frees once all of its tasks have finished, failed or not: right away when the
+region succeeds, or in the background when a task fails
+(`free_region_arenas_when_done!`). Freeing an arena from a task that depends on
+its slots' users would leak it whenever one of them fails, since the scheduler
+fails a task's dependents outright; the per-slot buffers this replaces were
+reclaimed by their finalizers in that case, but an arena has none.
+"""
+mutable struct RegionSlotArenas
+    const lock::ReentrantLock
+    const arenas::Vector{Tuple{Int,UInt}}
+    # The region's `wait_all` queue's tasks, which every task it launches joins
+    tasks::Union{Vector{DTask},Nothing}
+end
+RegionSlotArenas() = RegionSlotArenas(ReentrantLock(), Tuple{Int,UInt}[], nothing)
+const DATADEPS_REGION_ARENAS = ScopedValue{Union{RegionSlotArenas,Nothing}}(nothing)
+
+"""
+    SlotPool
+
+The memory a region allocates its slots from, ahead of need. `generate_slot!`'s
+direct path (see `direct_uninit_slot`) takes each dense CPU slot from an arena
+(`SlotArena`) on its destination, computing its address and aliasing itself,
+instead of paying a round trip per slot -- most of what was left of a flat
+launch loop, where one allocation costs ~0.3 ms on an idle worker but ~5 ms in
+the middle of a region, queued behind the region's copies.
+
+For AOT plans `prefill_slot_pool!` reserves exactly what the plan needs, with
+one call per destination worker. Anything else reserves arenas on first need,
+growing from `SLOT_ARENA_MIN_BYTES` to `SLOT_ARENA_BYTES`. Each arena is freed
+whole when the region ends (`RegionSlotArenas`), so a region no longer spawns a
+free task per slot. The pool is only enabled inside a `spawn_datadeps` region,
+which is what frees its arenas.
+"""
+mutable struct SlotPool
+    enabled::Bool
+    arenas::Dict{CPURAMMemorySpace,Vector{SlotArena}}
+end
+SlotPool() = SlotPool(false, Dict{CPURAMMemorySpace,Vector{SlotArena}}())
+
 # N.B. Declared `mutable` (despite no field ever being rebound) purely for
 # identity: an immutable struct this large is re-boxed on every dynamic call
 # that passes it, and planning threads it through hundreds of such calls per
@@ -753,6 +826,9 @@ mutable struct DataDepsState
     scratch_deps::Vector{DataDepsTaskDependency}
     scratch_remote::Vector{Any}
 
+    # Slot buffers allocated ahead of need (see `SlotPool`)
+    slot_pool::SlotPool
+
     function DataDepsState()
         arg_to_chunk = IdDict{Any,Any}()
         sparse_arg_wrap = IdDict{Any,Any}()
@@ -781,7 +857,7 @@ mutable struct DataDepsState
 
         return new(arg_to_chunk, sparse_arg_wrap, arg_origin, remote_args, remote_arg_to_original, remote_arg_w, ainfo_arg, arg_history, arg_owner, arg_current, arg_overlaps, ainfo_backing_chunk,
                    supports_inplace_cache, ainfo_cache, ainfos_lookup, ainfos_overlaps, ainfos_owner, ainfos_readers,
-                   TaskArgInfo[], DataDepsTaskDependency[], Any[])
+                   TaskArgInfo[], DataDepsTaskDependency[], Any[], SlotPool())
     end
 end
 
@@ -1444,7 +1520,7 @@ function generate_slot!(state::DataDepsState, dest_space, data)
             # allocated, so the source worker has nothing to contribute.
             T_dest, header = direct
             slot = aliased_object!(aliased_object_cache, data) do _
-                alloc_slot_with_aliasing!(to_proc, dest_space, T_dest, header)
+                alloc_slot_with_aliasing!(state.slot_pool, to_proc, dest_space, T_dest, header)
             end
             slot::Chunk
         else
@@ -1547,12 +1623,17 @@ function direct_uninit_slot(::DistributedAcceleration, data::Chunk, from_proc, t
 end
 
 """
-    alloc_slot_with_aliasing!(to_proc, to_space, ::Type{T}, header) -> Chunk
+    alloc_slot_with_aliasing!(pool::SlotPool, to_proc, to_space, ::Type{T}, header) -> Chunk
 
 `remotecall_endpoint_alloc`, but bringing the new slot's aliasing back with it
 and memoizing it, so that planning does not pay another round trip to ask.
+With `pool` enabled, a dense CPU slot instead comes out of an arena on its
+destination, with no round trip at all once the arena is reserved.
 """
-function alloc_slot_with_aliasing!(to_proc, to_space, ::Type{T}, header) where T
+function alloc_slot_with_aliasing!(pool::SlotPool, to_proc, to_space, ::Type{T}, header) where T
+    if pool.enabled && _arena_slot_type(T, to_space)
+        return _arena_slot!(pool, to_proc, to_space, T, header)
+    end
     wid = root_worker_id(to_proc)
     slot, ainfo = if wid == myid()
         _alloc_slot_with_aliasing(to_proc, to_space, T, header)
@@ -1565,6 +1646,210 @@ end
 function _alloc_slot_with_aliasing(to_proc, to_space, ::Type{T}, header) where T
     x = alloc_uninit(to_space, T, header)
     return tochunk(x, to_proc, to_space), aliasing_unwrapped(x, identity)
+end
+
+_arena_slot_type(::Type{<:Array{E}}, ::CPURAMMemorySpace) where {E} = isbitstype(E)
+_arena_slot_type(::Type, ::MemorySpace) = false
+
+# Arenas hand out slots at this alignment. When no plan says how much a region
+# needs, they are reserved between these sizes (see `_arena_with_room!`).
+const SLOT_ARENA_ALIGN = 64
+const SLOT_ARENA_MIN_BYTES = 64 * 2^10
+const SLOT_ARENA_BYTES = 64 * 2^20
+_arena_aligned(n::Int) = cld(n, SLOT_ARENA_ALIGN) * SLOT_ARENA_ALIGN
+_arena_slot_bytes(::Type{<:Array{E}}, header) where {E} = sizeof(E) * prod(header)
+
+function _arena_slot!(pool::SlotPool, to_proc, to_space::CPURAMMemorySpace, ::Type{T}, header::Dims{N}) where {T<:Array,N}
+    E = eltype(T)
+    nbytes = _arena_slot_bytes(T, header)
+    arena = _arena_with_room!(pool, to_space, nbytes)
+    offset = arena.used
+    arena.used += _arena_aligned(nbytes)
+    ref = ArenaRef{E,N}(root_worker_id(to_space), arena.id, arena.base + offset, header)
+    # What `tochunk(x, to_proc, to_space)` would make of the array `unwrap(ref)`
+    slot = Chunk{T,typeof(ref),typeof(to_proc),AnyScope,typeof(to_space)}(
+        T, ArrayDomain([1:l for l in header]), ref, to_proc, AnyScope(), to_space)
+    # What `aliasing(::Array)` would compute on the owner
+    ainfo = ContiguousAliasing(MemorySpan{CPURAMMemorySpace}(RemotePtr{Cvoid}(arena.base + offset, to_space), nbytes))
+    memoize_ainfo!(ainfo_memo_key(slot, identity), ainfo)
+    return slot
+end
+
+function _arena_with_room!(pool::SlotPool, space::CPURAMMemorySpace, nbytes::Int)
+    arenas = get!(Vector{SlotArena}, pool.arenas, space)
+    prev = 0
+    if !isempty(arenas)
+        arena = last(arenas)
+        arena.capacity - arena.used >= nbytes && return arena
+        prev = arena.capacity
+    end
+    # On demand, start small and double: an arena reserved for a few small
+    # slots would be mostly waste.
+    want = clamp(max(2prev, 8 * _arena_aligned(nbytes)), SLOT_ARENA_MIN_BYTES, SLOT_ARENA_BYTES)
+    reserve_slot_arenas!(pool, Dict(space => max(want, _arena_aligned(nbytes))))
+    return last(pool.arenas[space])
+end
+
+"Reserve an arena of `bytes[space]` on each `space`'s worker, concurrently."
+function reserve_slot_arenas!(pool::SlotPool, bytes::Dict{CPURAMMemorySpace,Int})
+    region = DATADEPS_REGION_ARENAS[]::RegionSlotArenas
+    spaces = collect(keys(bytes))
+    results = Vector{Tuple{UInt,UInt}}(undef, length(spaces))
+    @sync for (j, space) in enumerate(spaces)
+        Threads.@spawn begin
+            wid = root_worker_id(space)
+            id, base = wid == myid() ? _reserve_slot_arena(bytes[space]) :
+                       remotecall_fetch(_reserve_slot_arena, wid, bytes[space])
+            # Registered as soon as it exists, so that the region frees it even
+            # if reserving another worker's arena fails
+            @lock region.lock push!(region.arenas, (wid, id))
+            results[j] = (id, base)
+        end
+    end
+    for (j, space) in enumerate(spaces)
+        id, base = results[j]
+        push!(get!(Vector{SlotArena}, pool.arenas, space), SlotArena(space, id, base, bytes[space], 0))
+    end
+    return
+end
+
+# Worker side: the arenas this process holds, by id
+const SLOT_ARENAS = Dict{UInt,Ptr{Cvoid}}()
+const SLOT_ARENAS_LOCK = ReentrantLock()
+const SLOT_ARENA_NEXT_ID = Threads.Atomic{UInt}(1)
+function _reserve_slot_arena(nbytes::Int)
+    p = Libc.malloc(nbytes)
+    p == C_NULL && throw(OutOfMemoryError())
+    id = Threads.atomic_add!(SLOT_ARENA_NEXT_ID, UInt(1))
+    @lock SLOT_ARENAS_LOCK SLOT_ARENAS[id] = p
+    return id, UInt(p)
+end
+function _free_slot_arenas!(ids::Vector{UInt})
+    for id in ids
+        p = @lock SLOT_ARENAS_LOCK pop!(SLOT_ARENAS, id)
+        Libc.free(p)
+    end
+    return
+end
+
+root_worker_id(h::ArenaRef) = h.owner
+datasize(h::ArenaRef{T}) where {T} = sizeof(T) * prod(h.dims)
+function unwrap(h::ArenaRef{T,N}) where {T,N}
+    @assert h.owner == myid() "ArenaRef $h is not owned by this process: $(h.owner) != $(myid())"
+    # Not registered with `_libc_register!`: the arena owns this memory, so
+    # `unsafe_free!` of the slot alone is a no-op and the arena is freed whole.
+    # Wrapping needs only the address, not the arena, so a slot outliving its
+    # region still answers `aliasing` (logs hold slots), like a freed
+    # `alloc_libc_array` buffer does; reading it then is a use-after-free either way.
+    return unsafe_wrap(Array{T,N}, Ptr{T}(h.addr), h.dims; own=false)
+end
+fetch_handle(h::ArenaRef; uniform::Bool=false) =
+    h.owner == myid() ? unwrap(h) : remotecall_fetch(unwrap, h.owner, h)
+MemPool.poolget(h::ArenaRef) = fetch_handle(h)
+unwrappable(::ArenaRef) = true
+move(from_proc::Processor, to_proc::Processor, x::ArenaRef) = move(from_proc, to_proc, fetch_handle(x))
+move(to_proc::Processor, d::ArenaRef) = move(OSProc(d.owner), to_proc, d)
+
+"""
+    prefill_slot_pool!(state, pairs, schedule)
+
+Enable `state.slot_pool` and reserve on each destination worker an arena with
+room for every slot that `schedule` (an AOT plan) will make `generate_slot!`
+create through its direct path: one per argument per destination space it is
+placed in, counted the way `direct_uninit_slot` decides them. Arguments it
+cannot see yet (`DTask`s still running) get arenas reserved on first need.
+"""
+function prefill_slot_pool!(state::DataDepsState, pairs::Vector{DTaskPair}, schedule::Dict{DTask,Processor})
+    accel = current_acceleration()
+    accel isa DistributedAcceleration || return
+    # Arenas are only safe where a region will free them
+    DATADEPS_REGION_ARENAS[] === nothing && return
+    state.slot_pool.enabled = true
+    bytes = Dict{CPURAMMemorySpace,Int}()
+    seen = Set{Tuple{UInt,MemorySpace}}()
+    for pair in pairs
+        proc = get(schedule, pair.task, nothing)
+        proc === nothing && continue
+        _count_spec_slots!(bytes, seen, accel, pair.spec, only(memory_spaces(proc)))
+    end
+    isempty(bytes) || reserve_slot_arenas!(state.slot_pool, bytes)
+    return
+end
+# A function barrier: `pair.spec` is abstractly typed (cf. `_collect_spec_remote_chunks!`)
+_count_spec_slots!(bytes, seen, accel, spec::DTaskSpec, to_space) =
+    _foreach_arg(_arg -> _count_arg_slot!(bytes, seen, accel, value(_arg), to_space), spec.fargs)
+function _count_arg_slot!(bytes, seen, accel, v, to_space)
+    arg, deps = unwrap_inout(v)
+    if arg isa DTask
+        isready(arg) || return
+        arg = fetch(arg; raw=true)
+    end
+    arg isa Chunk || return
+    from_space = memory_space(arg)
+    direct = direct_uninit_slot(accel, arg, first(processors(from_space)),
+                                first(processors(to_space)), from_space, to_space)
+    direct === nothing && return
+    T, header = direct
+    _arena_slot_type(T, to_space) || return
+    id = (_identity_hash(arg), to_space)
+    id in seen && return
+    push!(seen, id)
+    bytes[to_space] = get(bytes, to_space, 0) + _arena_aligned(_arena_slot_bytes(T, header))
+    return
+end
+
+"Whether `slot` lives in a slot arena, which its region frees whole (no free task of its own)."
+freed_with_its_arena(slot) = slot isa Chunk && slot.handle isa ArenaRef
+
+"""
+    free_region_arenas!(region::RegionSlotArenas)
+
+Free every arena `region` reserved, with one call per worker. Only valid once
+all of the region's tasks have finished (see `spawn_datadeps`). Never throws:
+it runs in a `finally`, where an error would hide the region's own; an arena
+that cannot be freed (its worker died, say) is reported and dropped.
+"""
+function free_region_arenas!(region::RegionSlotArenas)
+    arenas = @lock region.lock copy(region.arenas)
+    isempty(arenas) && return
+    by_owner = Dict{Int,Vector{UInt}}()
+    for (wid, id) in arenas
+        push!(get!(Vector{UInt}, by_owner, wid), id)
+    end
+    @sync for (wid, ids) in by_owner
+        Threads.@spawn try
+            wid == myid() ? _free_slot_arenas!(ids) : remotecall_wait(_free_slot_arenas!, wid, ids)
+        catch err
+            @warn "Could not free $(length(ids)) Datadeps slot arena(s) on worker $wid" exception=err
+        end
+    end
+    @lock region.lock empty!(region.arenas)
+    return
+end
+
+"""
+    free_region_arenas_when_done!(region::RegionSlotArenas)
+
+`free_region_arenas!`, from a background task, once every task `region`
+launched has finished: for a region that failed, whose `wait_all` rethrew the
+first task error without waiting for the rest, which may still be using their
+slots. The error reaches the caller as soon as it did without arenas.
+"""
+function free_region_arenas_when_done!(region::RegionSlotArenas)
+    @lock(region.lock, isempty(region.arenas)) && return
+    tasks = region.tasks === nothing ? DTask[] : copy(region.tasks)
+    errormonitor(Threads.@spawn begin
+        for task in tasks
+            # A task that was never launched has nothing to wait for
+            istaskstarted(task) || continue
+            try
+                wait(task)
+            catch
+            end
+        end
+        free_region_arenas!(region)
+    end)
+    return
 end
 
 function remotecall_endpoint_transfer(f, accel::DistributedAcceleration, from_proc, to_proc, from_space, to_space, data)

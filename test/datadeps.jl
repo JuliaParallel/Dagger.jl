@@ -123,6 +123,31 @@ end
     end
 end
 
+@testset "Slot arenas are freed when a region fails" begin
+    # A region frees its slot arenas once all of its tasks are done, in the
+    # background when one fails. Freeing them from a task depending on the
+    # slots' users leaked them whenever one failed, since the scheduler fails a
+    # task's dependents outright.
+    if nprocs() >= 3
+        arenas_alive() = sum(w -> remotecall_fetch(() -> length(Dagger.SLOT_ARENAS), w), procs())
+        arenas_made() = sum(w -> remotecall_fetch(() -> Int(Dagger.SLOT_ARENA_NEXT_ID[]), w), procs())
+        chunks = [remotecall_fetch(Dagger.tochunk, w, rand(16, 16)) for w in procs()]
+        made = arenas_made()
+        @test_throws Exception Dagger.with(Dagger.DATADEPS_SCHEDULER => Dagger.RoundRobinScheduler(),
+                                           Dagger.DATADEPS_HIERARCHICAL => false) do
+            Dagger.spawn_datadeps() do
+                for _ in 1:2, c in chunks
+                    Dagger.@spawn (x -> (x .+= 1; nothing))(InOut(c))
+                end
+                Dagger.@spawn (x -> error("failing on purpose"))(InOut(first(chunks)))
+            end
+        end
+        # RoundRobin moved tasks off their chunks' owners, so arenas were used
+        @test arenas_made() > made
+        @test timedwait(() -> arenas_alive() == 0, 60; pollint=0.5) === :ok
+    end
+end
+
 @testset "Memory Aliasing" begin
     A = rand(4)
     a = Dagger.aliasing(A)
