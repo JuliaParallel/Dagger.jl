@@ -76,7 +76,27 @@ function spawn_datadeps(f::Base.Callable; static::Bool=true,
     if !aliasing
         throw(ArgumentError("Aliasing analysis is no longer optional"))
     end
+    # The region's slot arenas (see `SlotPool`) are freed once every task it
+    # launched has finished, since a failed task would never let a dependent
+    # free task run. When the region succeeds, `wait_all` has waited for them
+    # all; when a task fails, it rethrows right away, possibly with others
+    # still running, so the arenas are freed in the background once those end.
+    arenas = RegionSlotArenas()
+    ok = false
+    try
+        result = with(DATADEPS_REGION_ARENAS => arenas) do
+            _spawn_datadeps_region(f, scheduler, launch_wait, hierarchical)
+        end
+        ok = true
+        return result
+    finally
+        ok ? free_region_arenas!(arenas) : free_region_arenas_when_done!(arenas)
+    end
+end
+function _spawn_datadeps_region(f, scheduler, launch_wait, hierarchical)
     wait_all(; check_errors=true) do
+        # Every task the region launches joins this queue
+        DATADEPS_REGION_ARENAS[].tasks = (get_options(:task_queue)::WaitAllQueue).tasks
         scheduler = something(scheduler, DATADEPS_SCHEDULER[], RoundRobinScheduler())
         launch_wait = something(launch_wait, DATADEPS_LAUNCH_WAIT[], false)::Bool
         hierarchical = something(hierarchical, DATADEPS_HIERARCHICAL[], true)::Bool
@@ -139,6 +159,122 @@ function _spec_has_region_dtask_arg(spec::DTaskSpec, region_uids::Set{UInt})
 end
 
 """
+    prefetch_chunk_aliasing!(pairs::Vector{DTaskPair})
+
+Resolve the aliasing of every remote `Chunk` argument in `pairs` with one
+`remotecall_fetch` per owning worker, issued concurrently, and seed the region's
+aliasing memo with the answers.
+
+Without this, the flat path asks each owner one chunk at a time, the first time
+`dag_add_task!` or the launch loop (`aliasing!`) needs a chunk: the memo only
+deduplicates a chunk within the region, so a 512-task matmul over 128 remote
+tiles paid ~128 sequential round trips, whatever the scheduler.
+`build_aliasing_parallel` already batches this way for the hierarchical path.
+
+Only each chunk's `DRef` travels, and only its aliasing comes back: sending the
+`Chunk` (and getting it back in a `Pair`, as `_compute_aliasing_batch` does)
+made the exchange ~3x slower, since every `Chunk` carries its type, domain,
+processor and scope, and each `DRef` crossing the wire is refcounted again.
+
+Skips arguments already in the memo, `DTask`s that have not finished (in-region
+producers, which fetching would block on), and uniform execution (MPI), whose
+`aliasing` is a collective that must stay in submission order on every rank.
+"""
+function prefetch_chunk_aliasing!(pairs::Vector{DTaskPair})
+    memo = CHUNK_AINFO_MEMO[]
+    memo === nothing && return
+    uniform_execution(current_acceleration()) && return
+    candidates = Tuple{Int,DRef,Any,UInt}[]  # (owner, handle, dep_mod, memo key)
+    seen = Set{UInt}()
+    for pair in pairs
+        _collect_spec_remote_chunks!(candidates, seen, pair.spec)
+    end
+    isempty(candidates) && return
+    batches = Dict{Int,ChunkAliasingBatch}()
+    @lock memo.lock for (wid, handle, dep_mod, key) in candidates
+        haskey(memo.entries, key) && continue
+        _batch_push!(get!(ChunkAliasingBatch, batches, wid), handle, dep_mod, key)
+    end
+    isempty(batches) && return
+    wids = collect(keys(batches))
+    results = Vector{Any}(undef, length(wids))
+    @sync for (j, wid) in enumerate(wids)
+        b = batches[wid]
+        Threads.@spawn results[j] = remotecall_fetch(_compute_chunk_aliasing_batch, wid,
+                                                     b.handles, b.which, b.dep_mods)
+    end
+    # Seed on the region's own task: the spawned tasks above do not see its
+    # task-local acceleration, which is part of every memo key.
+    for (j, wid) in enumerate(wids)
+        ks = batches[wid].keys
+        rs = results[j]
+        @assert length(rs) == length(ks) "prefetch_chunk_aliasing!: $(length(rs)) results for $(length(ks)) args (wid=$wid)"
+        for i in eachindex(ks)
+            memoize_ainfo!(ks[i], rs[i])
+        end
+    end
+    return
+end
+
+# One owner's share of a prefetch. Each `DRef` is listed once, even when the
+# region needs it under several `dep_mod`s (`which` points into `handles`):
+# MemPool's `DRef` serializer ignores `serialize_cycle_header`'s answer, so the
+# same `DRef` twice in one message corrupts it, and the owner errors or hangs.
+struct ChunkAliasingBatch
+    handles::Vector{DRef}
+    handle_idx::Dict{DRef,Int}
+    which::Vector{Int}
+    dep_mods::Vector{Any}
+    keys::Vector{UInt}
+end
+ChunkAliasingBatch() = ChunkAliasingBatch(DRef[], Dict{DRef,Int}(), Int[], Any[], UInt[])
+function _batch_push!(b::ChunkAliasingBatch, handle::DRef, dep_mod, key::UInt)
+    i = get!(b.handle_idx, handle) do
+        push!(b.handles, handle)
+        return length(b.handles)
+    end
+    push!(b.which, i)
+    push!(b.dep_mods, dep_mod)
+    push!(b.keys, key)
+    return
+end
+
+# Runs on the owner of every handle: what `aliasing(::Chunk, dep_mod)` computes
+# there, for a whole batch. `map` rather than an `AbstractAliasing[...]`: when
+# every answer has the same type, as for the tiles of an array, the result is
+# concretely typed and goes back as one block instead of element by element.
+function _compute_chunk_aliasing_batch(handles::Vector{DRef}, which::Vector{Int}, dep_mods::Vector{Any})
+    values = map(unwrap, handles)
+    return map(i -> aliasing_unwrapped(values[which[i]], dep_mods[i]), eachindex(which))
+end
+
+# A function barrier: `pair.spec` is abstractly typed, and reading `fargs` off
+# it dynamically cost more than the rest of collecting the candidates.
+_collect_spec_remote_chunks!(candidates, seen, spec::DTaskSpec) =
+    _foreach_arg(_arg -> _collect_remote_chunk_args!(candidates, seen, value(_arg)), spec.fargs)
+
+# A function barrier, like `_push_argspecs!`: `value(_arg)` is not always inferrable.
+function _collect_remote_chunk_args!(candidates, seen, v)
+    arg, deps = unwrap_inout(v)
+    if arg isa DTask
+        isready(arg) || return
+        arg = fetch(arg; raw=true)
+    end
+    arg isa Chunk || return
+    # Any other handle is left to `aliasing(::Chunk, dep_mod)`, as before.
+    arg.handle isa DRef || return
+    wid = root_worker_id(arg.processor)
+    wid == myid() && return
+    for (dep_mod, _, _) in deps
+        key = ainfo_memo_key(arg, dep_mod)
+        key in seen && continue
+        push!(seen, key)
+        push!(candidates, (wid, arg.handle, dep_mod, key))
+    end
+    return
+end
+
+"""
     datadeps_build_schedule!(scheduler, pairs, all_procs, all_scope;
                              region_uids=nothing, cache=true) -> (dag_spec, schedule)
 
@@ -197,11 +333,10 @@ function datadeps_build_schedule!(scheduler::DataDepsScheduler,
         found, stale = _schedule_cache_find(scheduler, schedule_cache, dag_spec)
         if found !== nothing
             @dagdebug nothing :spawn_datadeps "Found matching DAG spec!"
+            # `dag_add_task!` recorded each id's task; looking it up there
+            # rather than scanning `pairs` keeps a cache hit linear in tasks.
             for (id, proc) in found.id_to_proc
-                uid = dag_spec.id_to_uid[id]
-                task_idx = findfirst(spec_task -> spec_task.task.uid == uid, pairs)
-                task = pairs[task_idx].task
-                schedule[task] = proc
+                schedule[dag_spec.id_to_task[id]] = proc
             end
             cache_hit = true
         end
@@ -332,6 +467,10 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
 
     upper_queue = get_options(:task_queue)
 
+    # Both planning and launching need every argument's aliasing; ask for the
+    # remote chunks' in one batch per owner instead of one round trip each.
+    prefetch_chunk_aliasing!(queue.seen_tasks)
+
     # Plan the whole region ahead of time, if the scheduler supports it.
     # Schedulers that don't define `datadeps_schedule_dag_aot!` leave `schedule`
     # empty and every task falls through to JIT placement below. A planner is
@@ -351,6 +490,10 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
     write_num = 1
     proc_to_scope_lfu = BasicLFUCache{Processor,AbstractScope}(1024)
     launch_start = time_ns()
+    # Allocate the slots the plan will need up front, one call per worker, so
+    # the loop below does not wait on one allocation per slot. Counted in the
+    # launch time, which is what it replaces.
+    prefill_slot_pool!(state, queue.seen_tasks, schedule)
     for pair in queue.seen_tasks
         spec = pair.spec
         task = pair.task
@@ -431,6 +574,8 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
             is_original(obj_cache, remote_space, ainfo) && continue
             haskey(freed, remote_arg) && continue
             freed[remote_arg] = nothing
+            # A slot in an arena is freed with it, when the region ends
+            freed_with_its_arena(remote_arg) && continue
             free_syncdeps = Set{ThunkSyncdep}()
             buf_ainfo = stored_value_ainfo(obj_cache, remote_space, ainfo)
             gather_free_syncdeps!(state, remote_space, buf_ainfo, remote_arg, write_num, chunk_to_ainfos, free_syncdeps)

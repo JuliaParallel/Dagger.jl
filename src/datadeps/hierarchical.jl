@@ -1446,6 +1446,9 @@ function schedule_partition_full!(queue::DataDepsTaskQueue,
         end
         filtered
     end
+    # Arenas for this partition's slots, in the spaces its plan uses (see
+    # `SlotPool`); freed by the epilogue of `distribute_tasks_hierarchical!`.
+    prefill_slot_pool!(state, partition_pairs, schedule)
 
     # N.B. If this partition throws partway through (e.g. from
     # `distribute_task!`), any of our vertices that haven't yet been
@@ -1546,6 +1549,8 @@ function schedule_partitions_sequential!(queue::DataDepsTaskQueue,
     local_scopes = Vector{AbstractScope}(undef, n_partitions)
     proc_to_scope_lfus = [BasicLFUCache{Processor,AbstractScope}(1024) for _ in 1:n_partitions]
     shared_state = DataDepsState()
+    # Arenas for the region's slots (see `SlotPool`); freed by the epilogue
+    prefill_slot_pool!(shared_state, seen_tasks, schedule)
     write_num = 1
 
     # Uniform execution inverts `BatchedEnqueueQueue`'s latency/throughput
@@ -2148,6 +2153,8 @@ function _hierarchical_copy_from_and_free!(partition_states::Vector{DataDepsStat
                 is_original(obj_cache, remote_space, ainfo) && continue
                 haskey(freed, remote_arg) && continue
                 freed[remote_arg] = nothing
+                # A slot in an arena is freed with it, when the region ends
+                freed_with_its_arena(remote_arg) && continue
                 free_syncdeps = Set{ThunkSyncdep}()
                 buf_ainfo = stored_value_ainfo(obj_cache, remote_space, ainfo)
                 gather_free_syncdeps!(state, remote_space, buf_ainfo, remote_arg,
