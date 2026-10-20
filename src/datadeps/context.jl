@@ -182,6 +182,14 @@ mutable struct DataDepsContext
     # per region. See `get_context!`.
     drain_watcher_started::Bool
 
+    # A foreign drain must not reclaim slots while the owner is preparing or
+    # submitting tasks. The condition is allocated only on actual contention;
+    # waiting releases lock, so ContextQueue's asynchronous enqueuer can run.
+    planning_task::Union{Task,Nothing}
+    planning_regions::Union{Vector{SlotReuseRegion},Nothing}
+    planning_done::Union{Threads.Condition,Nothing}
+    arenas::Union{EpochSlotArenas,Nothing}
+
     function DataDepsContext(owner::Task=current_task())
         ctx = new()
         ctx.slots = SlotReuseRegion(Set{UInt}())
@@ -201,6 +209,10 @@ mutable struct DataDepsContext
         ctx.lock = ReentrantLock()
         ctx.owner = owner
         ctx.drain_watcher_started = false
+        ctx.planning_task = nothing
+        ctx.planning_regions = nothing
+        ctx.planning_done = nothing
+        ctx.arenas = nothing
         finalizer(_context_finalizer, ctx)
         return ctx
     end
@@ -224,7 +236,8 @@ or `arm_task_exit_drain!`'s watcher (both running as normal tasks) can do that.
 function _context_finalizer(ctx::DataDepsContext)
     try
         anything_pending = !isempty(ctx.inflight) || !isempty(ctx.pending_writeback) ||
-                           !isempty(ctx.pending_free) || ctx.err !== nothing
+                           !isempty(ctx.pending_free) || ctx.err !== nothing ||
+                           (ctx.arenas !== nothing && !isempty(ctx.arenas.arenas))
         anything_pending || return
         unfinished = count(t -> !isready(t), ctx.inflight)
         bt = ctx.err_region != 0 ? _resolve_region_bt(ctx, ctx.err_region) : nothing
@@ -397,11 +410,51 @@ no unreported error. Callers that need a consistent snapshot against a
 concurrent drain from another task should take `ctx.lock` around this.
 """
 function context_drained(ctx::DataDepsContext)
+    ctx.planning_task === nothing || return false
+    if ctx.arenas !== nothing
+        isempty(ctx.arenas.arenas) || return false
+    end
     isempty(ctx.inflight) || return false
     isempty(ctx.pending_writeback) || return false
     isempty(ctx.pending_free) || return false
     ctx.err === nothing || return false
     return true
+end
+
+# Call with ctx.lock held. A drain by the planner itself (the hierarchical
+# parallel strategy's pre/post barriers) remains reentrant.
+function wait_context_planning!(ctx::DataDepsContext)
+    while ctx.planning_task !== nothing && ctx.planning_task !== current_task()
+        if ctx.planning_done === nothing
+            ctx.planning_done = Threads.Condition(ctx.lock)
+        end
+        wait(ctx.planning_done::Threads.Condition)
+    end
+    return nothing
+end
+function start_context_planning!(ctx::DataDepsContext, region::SlotReuseRegion)
+    @lock ctx.lock begin
+        wait_context_planning!(ctx)
+        ctx.planning_task = current_task()
+        if ctx.planning_regions === nothing
+            ctx.planning_regions = SlotReuseRegion[]
+        end
+        push!(ctx.planning_regions::Vector{SlotReuseRegion}, region)
+    end
+    return nothing
+end
+function finish_context_planning!(ctx::DataDepsContext, region::SlotReuseRegion)
+    @lock ctx.lock begin
+        regions = ctx.planning_regions
+        if regions !== nothing && !isempty(regions) && last(regions) === region
+            pop!(regions)
+            if isempty(regions)
+                ctx.planning_task = nothing
+                ctx.planning_done === nothing || notify(ctx.planning_done; all=true)
+            end
+        end
+    end
+    return nothing
 end
 
 """

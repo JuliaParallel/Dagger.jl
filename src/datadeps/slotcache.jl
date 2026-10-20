@@ -153,6 +153,7 @@ Beyond the region's own eligibility rule, two structural requirements:
 function slot_reusable(region::SlotReuseRegion, data, orig_space, dest_space)
     DATADEPS_SLOT_REUSE[] || return false
     data isa Chunk || return false
+    data.handle isa ArenaRef && return false
     orig_space == dest_space && return false
     _identity_hash(data) in region.eligible || return false
     T = chunktype(data)
@@ -258,6 +259,7 @@ function retain_reusable_slots!(state::DataDepsState)
     for space in spaces
         for (data, slot) in state.remote_args[space]
             slot === data && continue
+            freed_with_its_arena(slot) && continue
             slot_reusable(region, data, memory_space(data), space) || continue
             retain_slot!(region, data, space, slot)
         end

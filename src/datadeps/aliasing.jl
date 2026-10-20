@@ -658,6 +658,52 @@ function aliased_object!(f, cache::AliasedObjectCache, x; ainfo=aliasing(cache.a
     end
 end
 
+"""
+    ArenaRef{T,N}
+
+The handle of a Datadeps slot carved out of a `SlotArena`: an `Array{T,N}` of
+size `dims` at address `addr` on worker `owner`, inside arena `arena`. Unlike a
+`DRef`, the planner makes one without asking `owner`, since it already knows the
+arena's base address: so it knows the slot's aliasing before the slot exists.
+"""
+struct ArenaRef{T,N}
+    owner::Int
+    arena::UInt
+    addr::UInt
+    dims::NTuple{N,Int}
+end
+
+"""
+    SlotArena
+
+One block of memory a context epoch reserved on a worker for its slots, which the
+planner hands out by bumping `used`. It is freed whole, once, when the region
+epoch is fully drained (see `EpochSlotArenas`).
+"""
+mutable struct SlotArena
+    const space::CPURAMMemorySpace
+    const id::UInt
+    const base::UInt
+    const capacity::Int
+    used::Int
+end
+
+"An epoch's arenas, owned by its DataDepsContext rather than a dynamic scope."
+mutable struct EpochSlotArenas
+    const lock::ReentrantLock
+    const arenas::Vector{Tuple{Int,UInt}}
+    reserved_bytes::Int
+    freed::Bool
+end
+EpochSlotArenas() = EpochSlotArenas(ReentrantLock(), Tuple{Int,UInt}[], 0, false)
+
+"Planner-local bump allocation over an epoch's bounded, worker-owned arenas."
+struct SlotPool
+    epoch::EpochSlotArenas
+    arenas::Dict{CPURAMMemorySpace,Vector{SlotArena}}
+end
+SlotPool(epoch::EpochSlotArenas) = SlotPool(epoch, Dict{CPURAMMemorySpace,Vector{SlotArena}}())
+
 # N.B. Declared `mutable` (despite no field ever being rebound) purely for
 # identity: an immutable struct this large is re-boxed on every dynamic call
 # that passes it, and planning threads it through hundreds of such calls per
@@ -753,6 +799,9 @@ mutable struct DataDepsState
     scratch_deps::Vector{DataDepsTaskDependency}
     scratch_remote::Vector{Any}
 
+    # Slot buffers allocated ahead of need (see `SlotPool`)
+    slot_pool::Union{SlotPool,Nothing}
+
     function DataDepsState()
         arg_to_chunk = IdDict{Any,Any}()
         sparse_arg_wrap = IdDict{Any,Any}()
@@ -781,7 +830,7 @@ mutable struct DataDepsState
 
         return new(arg_to_chunk, sparse_arg_wrap, arg_origin, remote_args, remote_arg_to_original, remote_arg_w, ainfo_arg, arg_history, arg_owner, arg_current, arg_overlaps, ainfo_backing_chunk,
                    supports_inplace_cache, ainfo_cache, ainfos_lookup, ainfos_overlaps, ainfos_owner, ainfos_readers,
-                   TaskArgInfo[], DataDepsTaskDependency[], Any[])
+                   TaskArgInfo[], DataDepsTaskDependency[], Any[], nothing)
     end
 end
 
@@ -1504,7 +1553,8 @@ function generate_slot!(state::DataDepsState, dest_space, data)
             # allocated, so the source worker has nothing to contribute.
             T_dest, header = direct
             slot = aliased_object!(aliased_object_cache, data) do _
-                alloc_slot_with_aliasing!(to_proc, dest_space, T_dest, header)
+                alloc_slot_with_aliasing!(arena_slot_cacheable(data, orig_space, dest_space) ? nothing : state.slot_pool,
+                                         to_proc, dest_space, T_dest, header)
             end
             slot::Chunk
         else
@@ -1607,12 +1657,20 @@ function direct_uninit_slot(::DistributedAcceleration, data::Chunk, from_proc, t
 end
 
 """
-    alloc_slot_with_aliasing!(to_proc, to_space, ::Type{T}, header) -> Chunk
+    alloc_slot_with_aliasing!(pool::SlotPool, to_proc, to_space, ::Type{T}, header) -> Chunk
 
 `remotecall_endpoint_alloc`, but bringing the new slot's aliasing back with it
 and memoizing it, so that planning does not pay another round trip to ask.
+With `pool` enabled, a dense CPU slot instead comes out of an arena on its
+destination, with no round trip at all once the arena is reserved.
 """
-function alloc_slot_with_aliasing!(to_proc, to_space, ::Type{T}, header) where T
+alloc_slot_with_aliasing!(to_proc, to_space, ::Type{T}, header) where T =
+    alloc_slot_with_aliasing!(nothing, to_proc, to_space, T, header)
+function alloc_slot_with_aliasing!(pool::Union{SlotPool,Nothing}, to_proc, to_space, ::Type{T}, header) where T
+    if pool !== nothing && _arena_slot_type(T, to_space)
+        slot = _arena_slot!(pool, to_proc, to_space, T, header)
+        slot === nothing || return slot
+    end
     wid = root_worker_id(to_proc)
     slot, ainfo = if wid == myid()
         _alloc_slot_with_aliasing(to_proc, to_space, T, header)

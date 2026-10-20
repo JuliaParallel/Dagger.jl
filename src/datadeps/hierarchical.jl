@@ -1620,7 +1620,8 @@ function schedule_partition_full!(queue::DataDepsTaskQueue,
                                   task_submitted::Vector{Base.Event},
                                   value_dep_verts::Set{Int},
                                   region_uids::Set{UInt},
-                                  registry::Union{SharedChunkRegistry,Nothing};
+                                  registry::Union{SharedChunkRegistry,Nothing},
+                                  ddctx::DataDepsContext;
                                   precomputed_schedule::Union{Dict{DTask,Processor},Nothing}=nothing)
     if isempty(partition_verts) || isempty(local_procs)
         return DataDepsState(), Dict{DTask,Processor}()
@@ -1674,6 +1675,8 @@ function schedule_partition_full!(queue::DataDepsTaskQueue,
         end
         filtered
     end
+    # Partition-local pools share the context epoch's budget and lifetime.
+    prefill_slot_pool!(ddctx, state, partition_pairs, schedule)
 
     # N.B. If this partition throws partway through (e.g. from
     # `distribute_task!`), any of our vertices that haven't yet been
@@ -1786,6 +1789,7 @@ function schedule_partitions_sequential!(queue::DataDepsTaskQueue,
     local_scopes = Vector{AbstractScope}(undef, n_partitions)
     proc_to_scope_lfus = [BasicLFUCache{Processor,AbstractScope}(1024) for _ in 1:n_partitions]
     shared_state = ddctx.state
+    prefill_slot_pool!(ddctx, shared_state, seen_tasks, schedule)
     write_num = ddctx.write_num
 
     # Uniform execution inverts `BatchedEnqueueQueue`'s latency/throughput
@@ -2252,7 +2256,7 @@ function _distribute_tasks_hierarchical!(queue::DataDepsTaskQueue,
                                 dag, seen_tasks,
                                 partition_procs[pid], vertex_to_partition,
                                 task_submitted, value_dep_verts,
-                                region_uids, registry;
+                                region_uids, registry, ddctx;
                                 precomputed_schedule
                             )
                         finally
@@ -2467,6 +2471,8 @@ function _hierarchical_copy_from_and_free!(partition_states::Vector{DataDepsStat
                 slot_is_retained(remote_arg) && continue
                 haskey(freed, remote_arg) && continue
                 freed[remote_arg] = nothing
+                # Arena slots retire together at the context epoch's drain.
+                freed_with_its_arena(remote_arg) && continue
                 free_syncdeps = Set{ThunkSyncdep}()
                 buf_ainfo = stored_value_ainfo(obj_cache, remote_space, ainfo)
                 gather_free_syncdeps!(state, remote_space, buf_ainfo, remote_arg,

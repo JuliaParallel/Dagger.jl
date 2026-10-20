@@ -196,6 +196,7 @@ function flush_pending_frees!(ddctx::DataDepsContext)
             slot_is_retained(ddctx, remote_arg) && continue
             haskey(freed, remote_arg) && continue
             freed[remote_arg] = nothing
+            freed_with_its_arena(remote_arg) && continue
             free_syncdeps = Set{ThunkSyncdep}()
             buf_ainfo = stored_value_ainfo(obj_cache, remote_space, ainfo)
             gather_free_syncdeps!(state, remote_space, buf_ainfo, remote_arg, write_num, chunk_to_ainfos, free_syncdeps)
@@ -243,6 +244,12 @@ caller meant: `synchronize(A)` means all of `A`.
 """
 function _resolve_sync_targets(ddctx::DataDepsContext, args::Tuple)
     isempty(args) && return nothing
+    @lock ddctx.lock begin
+        wait_context_planning!(ddctx)
+        return _resolve_sync_targets_locked(ddctx, args)
+    end
+end
+function _resolve_sync_targets_locked(ddctx::DataDepsContext, args::Tuple)
     isdefined(ddctx, :state) || return nothing
     state = ddctx.state
     # Resolved backing chunks, keyed by identity (matching `raw_arg_to_chunk`).
@@ -468,6 +475,13 @@ function _do_synchronize!(ddctx::DataDepsContext;
     err_region = 0
     resolved_bt = nothing
     @lock ddctx.lock begin
+        wait_context_planning!(ddctx)
+        # write_back=false deliberately leaves dirty replicas pending. Such a
+        # drain is not the end of their arena epoch: a later write-back still
+        # needs the slots and their cache leases. free=false alone does not
+        # retain arenas once write-back and execution have completed.
+        retain_arena_epoch = !write_back && !isempty(ddctx.pending_writeback) &&
+            ddctx.arenas !== nothing && !isempty(ddctx.arenas.arenas)
         # Steps 1-2. Flat and hierarchical shared-state planning publish
         # deferred write-back/free work through `ddctx.state`. The hierarchical
         # single-memory-space strategy can leave that field undef because it
@@ -487,7 +501,7 @@ function _do_synchronize!(ddctx::DataDepsContext;
             with_options(; task_queue=flush_queue) do
                 with_datadeps_planning_token() do
                     write_back && flush_pending_writeback!(ddctx)
-                    free && flush_pending_frees!(ddctx)
+                    free && !retain_arena_epoch && flush_pending_frees!(ddctx)
                 end
             end
         end
@@ -538,10 +552,12 @@ function _do_synchronize!(ddctx::DataDepsContext;
         # before they exist as tasks, so it always takes `take_ref_id!`'s
         # "generic" branch (the global, never-reclaimed `next_id()` counter),
         # not `next_ref_sub_id!`.
-        for slots in ddctx.retiring_slots
-            release_slot_reuse_region!(slots)
+        if !retain_arena_epoch
+            for slots in ddctx.retiring_slots
+                release_slot_reuse_region!(slots)
+            end
+            empty!(ddctx.retiring_slots)
         end
-        empty!(ddctx.retiring_slots)
         cleanup_tasks_accel!(current_acceleration(), drained_tasks)
 
         # Step 6: device-synchronize every space this context placed data in.
@@ -552,6 +568,10 @@ function _do_synchronize!(ddctx::DataDepsContext;
         if isdefined(ddctx, :state)
             _gpu_sync_spaces!(ddctx.state, gpu_sync)
         end
+
+        # All tasks (including failed siblings and flushes) and the requested
+        # GPU fences have completed. No ambient region scope is needed here.
+        !retain_arena_epoch && free_slot_arenas!(ddctx)
 
         # Step 7: reset for the next epoch. Every task that could reference
         # the old `state`'s cache (copies, frees, the user's own tasks) has
@@ -565,11 +585,13 @@ function _do_synchronize!(ddctx::DataDepsContext;
         # `spawn_datadeps` costing what it does on master and costing 3x
         # that, which matters because `@stencil` emits one region per
         # expression per iteration and most of them are small.
-        if isdefined(ddctx, :state) && !_state_is_pristine(ddctx.state)
-            ddctx.state = DataDepsState()
+        if !retain_arena_epoch
+            if isdefined(ddctx, :state) && !_state_is_pristine(ddctx.state)
+                ddctx.state = DataDepsState()
+            end
+            empty!(ddctx.pending_free)
+            empty!(ddctx.pending_retained_slots)
         end
-        empty!(ddctx.pending_free)
-        empty!(ddctx.pending_retained_slots)
         # `pending_writeback` is already empty when `write_back` was true
         # (the flush above cleared it); if the caller asked to skip
         # write-back, leave it for the next flush to pick up.
@@ -585,15 +607,17 @@ function _do_synchronize!(ddctx::DataDepsContext;
         end
         if err !== nothing && check_errors
             resolved_bt = _resolve_region_bt(ddctx, err_region)
-            delete!(ddctx.region_bt, err_region)
             # This call is about to report the failure to its caller --
             # that's what "observed" means. Clear the poison so a later
             # `spawn_datadeps` isn't refused for a failure its caller has
             # already been given the chance to handle. A drain that
             # swallows the error (`check_errors=false`) leaves it in place:
             # nobody has actually been told about it yet.
-            ddctx.err = nothing
-            ddctx.err_region = 0
+            if !retain_arena_epoch
+                delete!(ddctx.region_bt, err_region)
+                ddctx.err = nothing
+                ddctx.err_region = 0
+            end
         end
     end
 
@@ -652,6 +676,7 @@ function _do_synchronize_targeted!(ddctx::DataDepsContext, targets::Set{Argument
     err_region = 0
     resolved_bt = nothing
     @lock ddctx.lock begin
+        wait_context_planning!(ddctx)
         state = ddctx.state
         # The closure is computed *before* the write-back copies are emitted:
         # those copies are themselves synced against the tasks below, so

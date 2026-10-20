@@ -189,6 +189,7 @@ function spawn_datadeps(f::Base.Callable; static::Bool=true,
     end
 end
 function _spawn_datadeps(ddctx::DataDepsContext, f::Base.Callable, scheduler, launch_wait, hierarchical, sync::Bool)
+    region_slots = ddctx.slots
     # `ContextQueue` replaces `WaitAllQueue` as the region's `:task_queue`,
     # collecting into `ddctx.inflight` instead of a queue-local `Vector{DTask}`.
     queue_outer = ContextQueue(get_options(:task_queue, DefaultTaskQueue()), ddctx)
@@ -208,6 +209,7 @@ function _spawn_datadeps(ddctx::DataDepsContext, f::Base.Callable, scheduler, la
                 # One aliasing memo per region: planning asks for the same chunks'
                 # aliasing info from Phase 1, from every slot, and from the write-back
                 # epilogue, and each answer costs a round-trip to the owner.
+                start_context_planning!(ddctx, region_slots)
                 ddctx.memo = ChunkAinfoMemo()
                 with(CHUNK_AINFO_MEMO => ddctx.memo) do
                     # Under uniform (MPI/SPMD) execution, only one Julia Task
@@ -256,7 +258,12 @@ function _spawn_datadeps(ddctx::DataDepsContext, f::Base.Callable, scheduler, la
         # remain individually consistent, and the exception below propagates
         # to the caller immediately, exactly as it always has -- nothing is
         # silently lost, and nothing is silently blocked either.
-        @lock ddctx.lock push!(ddctx.retiring_slots, ddctx.slots)
+        @lock ddctx.lock begin
+            push!(ddctx.retiring_slots, region_slots)
+            # Publish retirement before waking a foreign drain. Otherwise it
+            # can finish and miss this region's checked-out cache leases.
+            finish_context_planning!(ddctx, region_slots)
+        end
     end
     if sync
         _do_synchronize!(ddctx; write_back=true, free=true, gpu_sync=:fence,
@@ -662,6 +669,7 @@ function distribute_tasks!(queue::DataDepsTaskQueue, ddctx::DataDepsContext)
     write_num = ddctx.write_num
     proc_to_scope_lfu = BasicLFUCache{Processor,AbstractScope}(1024)
     launch_start = time_ns()
+    prefill_slot_pool!(ddctx, state, queue.seen_tasks, schedule)
     for pair in queue.seen_tasks
         spec = pair.spec
         task = pair.task

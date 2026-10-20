@@ -1483,3 +1483,33 @@ lesson.
     256² factor. `UpperTriangular(collect(parent(cholesky(DA).U)))` gathers
     through the DArray concatenation tree once and preserves the same
     triangular values for the numerical assertion.
+
+126. **Slot arenas belong to context epochs, not region calls.** A
+    `sync=false` region returns while its kernels and deferred write-back still
+    use replicas; subsequent regions also reuse `state.remote_args`. Keep every
+    arena on the `DataDepsContext` until its full drain has fetched every
+    inflight task, including failed siblings and write-back. A targeted drain
+    or a drain that leaves dirty replicas pending cannot retire that storage.
+    Reset even a pristine state's prefilled pool, exclude arena handles from
+    both slot-cache eligibility and retention, and bound reserved bytes across
+    all partition-local pools. Logging payloads can outlive an epoch, so logging
+    uses ordinary DRef slots; historical identity aliasing can use the arena
+    descriptor without dereferencing expired memory.
+
+127. **A foreign drain must wait for planning publication, not just enqueue.**
+    `ContextQueue.enqueue!` locking does not protect the planner's slot creation,
+    state updates, or retirement publication. Mark planning before those
+    mutations and clear it only after publishing the region's retiring cache
+    leases. Wait with a condition sharing the context lock, so the asynchronous
+    enqueuer can acquire it while the drain sleeps. Allow the planning task's
+    own hierarchical pre/post drains to remain reentrant.
+
+128. **Test the hierarchical strategy actually selected.** The current
+    single-owner partition policy returns one partition and falls back to flat
+    planning, even when a test passes `hierarchical=true` and exceeds the old
+    tasks-per-partition threshold. To cover the retained partition pipeline,
+    use a narrowly dispatched test scheduler that enters it explicitly. For
+    cross-worker lifetime gates, pass an isbits key to a named kernel and keep
+    channels in explicitly installed worker globals: functions are Datadeps
+    arguments too, so capturing a `RemoteChannel` in a mutable callable still
+    asks the argument mover to move the channel.

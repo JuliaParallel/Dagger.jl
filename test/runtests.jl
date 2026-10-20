@@ -32,6 +32,7 @@ tests = [
     ("Task Affinity", "task-affinity.jl"),
     ("Datadeps", "datadeps.jl"),
     ("Datadeps - Scheduling", "datadeps/scheduling.jl"),
+    ("Datadeps - Slot Arenas", "datadeps/slotarenas.jl"),
     ("Datadeps - Locality Scheduling", "datadeps_locality.jl"),
     ("Datadeps - Hierarchical Async", "datadeps_hierarchical_async.jl"),
     ("Datadeps - Targeted Synchronize", "datadeps_synchronize.jl"),
