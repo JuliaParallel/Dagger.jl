@@ -97,7 +97,8 @@ for (name,f,check) in cases
             @assert check(f())
             logs = Dagger.fetch_logs!()
             for worker_logs in values(logs), taskname in worker_logs[:tasknames]
-                if taskname isa String && occursin("move!", taskname)
+                if taskname isa String && (occursin("move!", taskname) ||
+                                           occursin("move_toplevel!", taskname))
                     count += 1
                 end
             end
