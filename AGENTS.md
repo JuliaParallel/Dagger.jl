@@ -1459,7 +1459,7 @@ lesson.
     actual launch positions in the cost model; simply re-enabling the
     commented `DTaskDAGID` handling or swapping DFS for BFS is insufficient.
 
-70. **Explicit syncdeps constrain submission as well as execution.** The
+123. **Explicit syncdeps constrain submission as well as execution.** The
     eager submitter resolves a `ThunkSyncdep` ID through its thunk dictionary
     when submitting the consumer. A FIFO frontier that includes value and
     alias edges but omits explicit syncdeps can submit that consumer before
@@ -1468,7 +1468,7 @@ lesson.
     Reuse the UID-to-vertex scratch dictionary and skip it entirely when no
     task has explicit syncdeps.
 
-71. **A returned array need not alias its argument's original storage.** An
+124. **A returned array need not alias its argument's original storage.** An
     `identity(In(A))` task placed away from A receives a Datadeps replica;
     its returned array aliases that replica, not necessarily the original A.
     A regression test that writes through the returned result and expects a
@@ -1476,7 +1476,7 @@ lesson.
     Derive that scope from the acceleration-aware wrapped chunk's memory
     space so the test exercises actual aliasing under Distributed and MPI.
 
-72. **Gather a DArray before collecting a generic triangular wrapper.**
+125. **Gather a DArray before collecting a generic triangular wrapper.**
     `collect(cholesky(DA).U)` dispatches to LinearAlgebra's generic triangular
     copy, which scalar-indexes the DArray and fetches a tile for every element.
     The MPI production-mode smoke consequently spent minutes gathering a
