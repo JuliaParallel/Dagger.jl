@@ -262,41 +262,91 @@ move_type(from_proc::Processor, to_proc::Processor, ::Type{<:Chunk{T}}) where T 
 # buffer and deserializes it into a third; the raw path receives straight into the final array).
 # A value in which one array is reachable twice (a shared field) opts out, so that the sharing, which
 # `serialize` keeps, survives the transfer.
+# Elements whose bytes are all data: the MPI datatype of a struct with padding between its fields
+# carries the packed bytes only, so a buffer of such elements would not match the one the receiver allocates
+raw_dense(::Type{T}) where {T} = isprimitivetype(T) ||
+    (isbitstype(T) && fieldcount(T) > 0 && all(i -> raw_dense(fieldtype(T, i)), 1:fieldcount(T)) &&
+     sum(i -> sizeof(fieldtype(T, i)), 1:fieldcount(T)) == sizeof(T))
 raw_field_kind(::Type{F}) where {F} =
     isbitstype(F) ? :value :
-    (F <: Array && isconcretetype(F) && isbitstype(eltype(F))) ? :array :
+    (F <: Array && isconcretetype(F) && raw_dense(eltype(F))) ? :array :
     (isconcretetype(F) && isstructtype(F) && !ismutabletype(F) && raw_has_array(F)) ? :struct : :value
+# An array *wrapper* (`SubArray`, `ReshapedArray`, `PermutedDimsArray`, ...) is never decomposed: its
+# array field is the whole parent, which it does not own. A 256 x 256 view of a 2048 x 2048 matrix
+# travelled as all 32 MB of the parent, so `copyto!(::DArray, ::Matrix)` (one view per block) grew
+# with blocks x matrix size: 2048^2 in 256^2 blocks, 2 ranks: 2.1-2.9 s. `serialize` sends only the
+# viewed elements.
+# A type with its own `Serialization.serialize` method (`Thunk`, `WeakChunk`, ...) must keep it: taking the
+# value apart would bypass it. Only the generic method (and the one for tuples) is replaced. This needs
+# reflection, which a generated function may not use, so it is decided at run time, once per type.
+function raw_plain_serialize(::Type{T}) where {T}
+    try
+        m = which(Serialization.serialize, Tuple{Serialization.AbstractSerializer, T})
+        p = Base.unwrap_unionall(m.sig).parameters[3]
+        return p === Any || p === Tuple
+    catch
+        return false
+    end
+end
 function raw_has_array(::Type{T}) where {T}
-    (isconcretetype(T) && isstructtype(T) && !(T <: Array) && fieldcount(T) > 0) || return false
+    (isconcretetype(T) && isstructtype(T) && !(T <: AbstractArray) && fieldcount(T) > 0) || return false
     any(i -> raw_field_kind(fieldtype(T, i)) in (:array, :struct), 1:fieldcount(T))
 end
-# Emit the expressions that read the parts / header values / array sizes of `x::T`, in field order
-function raw_collect!(parts, vals, sizes, ::Type{T}, x) where {T}
+# Emit the expressions that read the parts / header values / array sizes of `x::T`, in field order. `checks`
+# collects `isdefined` tests, outermost first: a struct with an undefined field (an inner constructor that
+# leaves one unset) cannot be read field by field, so it is left to `serialize`, which handles it.
+function raw_collect!(parts, vals, sizes, checks, ::Type{T}, x) where {T}
     for i in 1:fieldcount(T)
         F = fieldtype(T, i)
         f = :(getfield($x, $i))
+        isbitstype(F) || push!(checks, :(isdefined($x, $i)))
         k = raw_field_kind(F)
         if k === :array
             push!(parts, f); push!(sizes, :(size($f)))
         elseif k === :struct
-            raw_collect!(parts, vals, sizes, F, f)
+            raw_collect!(parts, vals, sizes, checks, F, f)
         else
             push!(vals, f)
         end
     end
 end
-@generated function inplace_mpi_parts(x::T) where {T}
-    raw_has_array(T) || return :(nothing)
-    parts = Any[]; vals = Any[]; sizes = Any[]
-    raw_collect!(parts, vals, sizes, T, :x)
+function raw_all_plain(::Type{T}) where {T}
+    raw_plain_serialize(T) || return false
+    for i in 1:fieldcount(T)
+        F = fieldtype(T, i)
+        raw_field_kind(F) === :struct && !raw_all_plain(F) && return false
+    end
+    return true
+end
+const RAW_ENABLED = Dict{DataType,Bool}()
+const RAW_ENABLED_LOCK = ReentrantLock()
+function raw_enabled(::Type{T}) where {T}
+    lock(RAW_ENABLED_LOCK) do
+        get!(() -> raw_all_plain(T), RAW_ENABLED, T)
+    end
+end
+@generated raw_candidate(::T) where {T} = raw_has_array(T)    # decided at compile time: no lock for the common values
+inplace_mpi_parts(x::T) where {T} = raw_candidate(x) && raw_enabled(T) ? raw_parts(x) : nothing
+@generated function raw_parts(x::T) where {T}
+    parts = Any[]; vals = Any[]; sizes = Any[]; checks = Any[]
+    raw_collect!(parts, vals, sizes, checks, T, :x)
     n = length(parts)
+    ok = isempty(checks) ? true : foldr((c, r) -> :($c && $r), checks)
     return quote
+        $ok || return nothing
         parts = ($(parts...),)
-        # one array reachable twice: leave it to `serialize`, which preserves the sharing
-        for i in 1:$n, j in (i + 1):$n
-            parts[i] === parts[j] && return nothing
+        vals = ($(vals...),)
+        # Memory reachable twice (a shared field, or an array next to a view or reshape of it): leave it
+        # to `serialize`, which keeps the sharing; the raw path would rebuild two independent arrays
+        for i in 1:$n
+            for j in (i + 1):$n
+                Base.mightalias(parts[i], parts[j]) && return nothing
+            end
+            for v in vals
+                v isa AbstractArray && Base.mightalias(parts[i], v) && return nothing
+            end
         end
-        (parts, (($(vals...),), ($(sizes...),)))
+        (parts, (vals, ($(sizes...),)))
     end
 end
 # Allocate the receive buffers for `T` from `header` (host-resident; the sender
