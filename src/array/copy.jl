@@ -125,6 +125,11 @@ function darray_copyto!(B::DArray{TB,NB}, A::DArray{TA,NA}, Binds=parentindices(
     Binds_range = ntuple(i->to_range(pad1range(Binds, i)), Nmax)
     Ainds_range = ntuple(i->to_range(pad1range(Ainds, i)), Nmax)
 
+    # Nothing to copy. Returning here also keeps the chunk ranges below from
+    # being derived from an empty element range, whose `start` can sit past the
+    # end of the array (and so outside the chunk grid).
+    any(isempty, Binds_range) && return B
+
     # Global element offsets
     Binds_offset = ntuple(i->Binds_range[i].start-1, Nmax)
     Ainds_offset = ntuple(i->Ainds_range[i].start-1, Nmax)
