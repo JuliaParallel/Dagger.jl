@@ -104,3 +104,57 @@ end
         end
     end
 end
+
+@testset "tril/triu" begin
+    # Built straight from the definition (`tril` keeps the entries with
+    # `j - i <= k`, `triu` those with `j - i >= k`) rather than from `Base`, so
+    # that the reference stays correct for the extreme `k` below, where `Base`'s
+    # own `tril!`/`triu!` overflow computing `m + k` and `j - k - 1`.
+    band_ref(keep, A, k) = [keep(j - i, k) ? A[i, j] : zero(eltype(A))
+                            for i in axes(A, 1), j in axes(A, 2)]
+
+    @testset "$T $(sz) part=$(part.blocksize)" for T in (Float64, ComplexF64),
+            (sz, part) in (((16, 16), Blocks(4, 4)),    # diagonal follows the partition grid
+                           ((16, 16), Blocks(16, 16)),  # single partition
+                           ((16, 16), Blocks(5, 3)),    # diagonal cuts through partitions
+                           ((12, 20), Blocks(4, 5)),    # wide
+                           ((20, 12), Blocks(7, 4)))    # tall
+        A = rand(T, sz...)
+        DA = distribute(A, part)
+
+        # A `k` past either end of the band keeps all of the matrix or none of
+        # it, as for a `Matrix`
+        @testset "k=$k" for k in (-sz[1]-2):(sz[2]+2)
+            @test collect(tril(DA, k)) == tril(A, k)
+            @test collect(triu(DA, k)) == triu(A, k)
+        end
+        @test tril(DA) isa DMatrix{T}
+        @test collect(tril(DA)) == tril(A)
+        @test collect(triu(DA)) == triu(A)
+
+        # Out-of-place leaves `A` alone and keeps its partitioning
+        @test collect(DA) == A
+        @test tril(DA, 1).partitioning == DA.partitioning
+
+        @testset "k::$(typeof(k))" for k in (UInt(1), Int8(-1), Int8(-128), big(2),
+                                             true, typemax(Int), typemin(Int),
+                                             typemin(Int) + 1, typemax(UInt))
+            @test collect(tril(DA, k)) == band_ref(<=, A, k)
+            @test collect(triu(DA, k)) == band_ref(>=, A, k)
+        end
+
+        # In place, returning the very same `DMatrix`
+        DB = distribute(A, part)
+        @test tril!(DB, 1) === DB
+        @test collect(DB) == tril(A, 1)
+        DC = distribute(A, part)
+        @test triu!(DC, -1) === DC
+        @test collect(DC) == triu(A, -1)
+
+        # No partition is touched one element at a time
+        Dagger.allowscalar(false) do
+            @test collect(tril(DA, 2)) == tril(A, 2)
+            @test collect(triu(DA, -2)) == triu(A, -2)
+        end
+    end
+end
