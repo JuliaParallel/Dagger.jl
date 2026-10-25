@@ -36,7 +36,6 @@ import ScopedValues: ScopedValue, @with, with
 
 
 include("util.jl")
-include("fastpath.jl")
 include("fault-handler.jl")
 include("dynamic.jl")
 
@@ -122,6 +121,7 @@ const COMPAT_PROCS_CACHE = LockedObject(Dagger.BasicLFUCache{Tuple{UInt,UInt},Co
 # sessions): `__init__`'s per-thread callback registrations trigger it.
 function invalidate_compat_procs_cache!()
     @safe_lock_spin1 COMPAT_PROCS_CACHE cache empty!(cache)
+    invalidate_fast_index!()
     return
 end
 # Cache key of a scope. `objectid` of a union scope hashes every member (one `ExactScope` per
@@ -195,6 +195,8 @@ function compatible_processors_ordered(accel, scope, procs::Vector{<:Processor})
     end
     return ordered
 end
+
+include("fastpath.jl")
 
 # N.B. `mutable` (with no field ever assigned) so the 23-field struct has a
 # stable heap identity and is passed by pointer; as an immutable struct it was

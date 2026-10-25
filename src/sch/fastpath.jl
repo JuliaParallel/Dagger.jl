@@ -43,6 +43,44 @@ function build_local_fast(entry, accel)
     return LocalFast(procs, OSProc(me), me, nothing)
 end
 
+# The compatible-set cache (`COMPAT_PROCS_CACHE`) is one frequency-ordered cache behind one lock, and
+# a hit updates the frequency under that lock: every placing thread takes it for every task (4 us at
+# 16 threads, 12-29 us at 64). The fast path reads its entries from a snapshot instead: an immutable-
+# by-convention dictionary that is replaced (copy, then store) when an entry is added, so a lookup
+# takes no lock. It holds the same `CompatEntry`s the cache does, so processor-hierarchy changes
+# (`invalidate_compat_procs_cache!`) empty it too. Bounded: once full, new keys go through the cache.
+mutable struct FastIndex
+    @atomic dict::Dict{Tuple{UInt,UInt},CompatEntry}
+end
+const FAST_INDEX = FastIndex(Dict{Tuple{UInt,UInt},CompatEntry}())
+const FAST_INDEX_LOCK = ReentrantLock()
+const FAST_INDEX_MAX = 2048
+
+function invalidate_fast_index!()
+    lock(FAST_INDEX_LOCK) do
+        @atomic FAST_INDEX.dict = Dict{Tuple{UInt,UInt},CompatEntry}()
+    end
+    return
+end
+
+function fast_compat_entry(accel, scope, procs::Vector{<:Processor})
+    key = (objectid(accel), scope_key(scope))
+    entry = get(@atomic(FAST_INDEX.dict), key, nothing)
+    if entry !== nothing && entry.scope === scope && entry.procs == procs
+        return entry::CompatEntry
+    end
+    entry = compat_entry(accel, scope, procs)
+    lock(FAST_INDEX_LOCK) do
+        dict = @atomic FAST_INDEX.dict
+        if haskey(dict, key) || length(dict) < FAST_INDEX_MAX
+            dict = copy(dict)
+            dict[key] = entry
+            @atomic FAST_INDEX.dict = dict
+        end
+    end
+    return entry
+end
+
 # `entry.fast` is `missing` until first asked
 function local_fast_of(entry, accel)
     fast = @atomic entry.fast
@@ -78,7 +116,7 @@ function local_fast_candidates(state, task, options, procs, accel)::Union{Nothin
     exec = options.exec_scope
     if exec !== nothing
         # The scope was fixed by the caller (Datadeps): it is used as is
-        fast = local_fast_of(compat_entry(accel, exec, procs), accel)
+        fast = local_fast_of(fast_compat_entry(accel, exec, procs), accel)
         fast === nothing && return nothing
         return (fast, exec)
     end
@@ -89,7 +127,7 @@ function local_fast_candidates(state, task, options, procs, accel)::Union{Nothin
             value isa Chunk && !(value.scope isa AnyScope) && return nothing
         end
         scope = unscoped_scope()
-        fast = local_fast_of(compat_entry(accel, scope, procs), accel)
+        fast = local_fast_of(fast_compat_entry(accel, scope, procs), accel)
         fast === nothing && return nothing
         return (fast, scope)
     end
