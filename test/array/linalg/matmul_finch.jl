@@ -11,11 +11,6 @@
 # N.B. Finch precompilation is heavy (several minutes); this test is intended for
 # local validation rather than fast CI.
 
-# Make the test-project environment (which provides Finch) resolvable on the
-# workers, which are launched with Dagger's project.
-const _FINCH_TEST_ENV = abspath(joinpath(@__DIR__, "..", ".."))
-@everywhere pushfirst!(LOAD_PATH, $_FINCH_TEST_ENV)
-
 const FINCH_AVAILABLE = try
     @eval using Finch
     @everywhere using Finch
@@ -56,6 +51,13 @@ else
         DSC = Finch.fspzeros(partC, T, sz)
         mul!(DSC, DSA, DSB)
         @test collect(DSC) ≈ A * B
+
+        # The generic sparse allocator starts with CSC storage. Finch kernels
+        # must handle that destination, including its nonzero previous values.
+        DSC_mixed = similar(DSA)
+        copyto!(DSC_mixed, DSA)
+        mul!(DSC_mixed, DSA, DSB, T(2), T(3))
+        @test collect(DSC_mixed) ≈ 2 * A * B + 3 * A
     end
 
     const FINCH_QUICK_CASES = [
