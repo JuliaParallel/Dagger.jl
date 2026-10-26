@@ -156,6 +156,12 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
     return _distribute_tasks_flat!(queue, nothing)
 end
 
+# N.B. Function barrier: `DTaskPair.spec` has an abstract type, so reading `spec.fargs` (a custom
+# `getproperty`) and dispatching `distribute_task!` on it from the loop are dynamic dispatches on every
+# task; with one dispatch here the body sees the concrete spec (see `eager_launch!`)
+_distribute_one!(queue, state, all_procs, all_scope, spec::DTaskSpec, task, proc_to_scope_lfu, write_num) =
+    distribute_task!(queue, state, all_procs, all_scope, spec, task, spec.fargs, proc_to_scope_lfu, write_num)
+
 # A task whose argument is the result of an earlier task of the region needs that task to exist
 # (`populate_task_info!` fetches it), so everything handed to the async submitter must be submitted first
 _unlaunched_dtask_arg(_arg) = (v = first(unwrap_inout(value(_arg))); v isa DTask && !istaskstarted(v))
@@ -209,7 +215,7 @@ function _distribute_tasks_flat!(queue::DataDepsTaskQueue, aeq)
         spec = pair.spec
         task = pair.task
         aeq === nothing || _flush_for_value_deps!(aeq, spec)
-        write_num = distribute_task!(queue, state, all_procs, all_scope, spec, task, spec.fargs, proc_to_scope_lfu, write_num)
+        write_num = _distribute_one!(queue, state, all_procs, all_scope, spec, task, proc_to_scope_lfu, write_num)
     end
 
     # Copy args from remote to local
