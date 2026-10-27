@@ -141,3 +141,47 @@ end
     @test fetch(Dagger.@spawn propagates=task_props meta=false 1+1) == 2
     @test task_props == Symbol[:meta]
 end
+
+# Tasks waiting in one processor queue are ordered by `priority` among equal occupancies.
+const PRIORITY_LOG = Int[]
+const PRIORITY_LOCK = ReentrantLock()
+const PRIORITY_STARTED = Threads.Atomic{Bool}(false)
+const PRIORITY_GO = Threads.Atomic{Bool}(false)
+function priority_blocker()
+    PRIORITY_STARTED[] = true
+    while !PRIORITY_GO[]
+        sleep(0.005)
+    end
+    return 0
+end
+function priority_record(i::Int)
+    @lock PRIORITY_LOCK push!(PRIORITY_LOG, i)
+    return i
+end
+
+@testset "Task priority" begin
+    sc = Dagger.ExactScope(Dagger.ThreadProc(1, 1))
+    empty!(PRIORITY_LOG)
+    PRIORITY_STARTED[] = false
+    PRIORITY_GO[] = false
+    blocker = Dagger.@spawn scope=sc priority_blocker()
+    while !PRIORITY_STARTED[]
+        sleep(0.005)
+    end
+    # The blocker holds the processor, so the following tasks queue up in submission order
+    neg = Dagger.@spawn scope=sc priority=-5 priority_record(9)      # queued first, but with a priority below the default
+    low = [Dagger.@spawn(scope=sc, priority_record(i)) for i in 1:6]
+    mid = Dagger.@spawn scope=sc priority=3 priority_record(7)
+    high = Dagger.@spawn scope=sc priority=9 priority_record(8)
+    sleep(0.2)
+    PRIORITY_GO[] = true
+    fetch(blocker)
+    foreach(fetch, low)
+    fetch(mid); fetch(high); fetch(neg)
+    @test sort(PRIORITY_LOG) == 1:9
+    @test PRIORITY_LOG[1] == 8
+    @test PRIORITY_LOG[2] == 7
+    @test PRIORITY_LOG[end] == 9
+    @test Dagger.Sch.QueueKey(UInt32(1), 9) < Dagger.Sch.QueueKey(UInt32(1), 0) < Dagger.Sch.QueueKey(UInt32(1), -5)
+    @test Dagger.Sch.QueueKey(UInt32(1), 9) < Dagger.Sch.QueueKey(UInt32(2), 100)     # occupancy still comes first
+end
