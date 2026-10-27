@@ -303,6 +303,23 @@ function select_processors_uniform!(procs, accel::Acceleration,
     return place_processors_uniform!(procs, accel, task, state)
 end
 
+# Called when a task waits for another task (see `Sch.thunk_yield`), around the wait. An acceleration that
+# limits what its running tasks may hold (the MPI rank gate) gives that back here.
+task_blocked(::Acceleration, f) = f()
+
+"""
+    mpi_rank_gate!(on=true; cap, reserve)
+
+(MPI) Turn the rank gate on or off: a ready queue with a concurrency limit and priorities for the tasks a rank runs.
+Without it every ready task starts at once and Julia runs them first come first served, so a flood of long tasks
+delays a small urgent task submitted after it by the whole backlog. With it at most `cap - reserve` ordinary tasks run
+at once (`cap` defaults to the number of default threads, `reserve` to 1), `priority > 0` tasks
+(`Dagger.@spawn priority=1 f(x)`) may use the reserved slot, and waiting tasks get slots by priority, then arrival.
+A task holds a slot only while its function computes: while it waits for another task (`fetch`, `wait`) it gives the
+slot back, so waiting inside a task cannot exhaust the slots. Off by default. Defined by the MPI extension.
+"""
+function mpi_rank_gate! end
+
 # Default processor grid for block assignment of new distributed arrays.
 # Returns `nothing` to let the scheduler choose freely; uniform-execution
 # accelerations (MPI) override this to produce a deterministic assignment
