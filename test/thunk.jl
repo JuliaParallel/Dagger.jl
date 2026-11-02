@@ -454,8 +454,9 @@ end
                               m === nothing ? 0 : parse(Int, m.captures[1])
                           end for mi in Base.specializations(only(methods(Dagger._typed_spawn_owned))))
     spawn_n(k) = fetch(Dagger.@spawn splat_sum([Dagger.@spawn(SplatBox(i)) for i in 1:k]...)).n
-    @test spawn_n(5) == sum(1:5)                                  # a short one goes the typed way ...
-    @test 5 in typed_lengths()                                    # ... (control: the check can see a specialization)
+    kc = Dagger.TYPED_SPAWN_MAX_ARGS                               # the longest task that still goes the typed way
+    @test spawn_n(kc) == sum(1:kc)
+    @test kc in typed_lengths()                                    # (control: the check can see a specialization)
     for k in (Dagger.TYPED_SPAWN_MAX_ARGS + 1, Dagger.TYPED_SPAWN_MAX_ARGS + 4, 14)
         @test spawn_n(k) == sum(1:k)                              # correct ...
         @test !(k in typed_lengths())                             # ... and no typed specialization for that length

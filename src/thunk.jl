@@ -770,6 +770,10 @@ end
 # `_typed_spawn_owned` anew for every distinct tuple of argument types: 80-140 ms for each NEW number of arguments (laptop; ~10x less untyped), seen as a 0.23 s
 # stall of a rank in the first step that needed a longer merge (Barnes-Hut, Otus). Steady state is the same for both paths (11-14 us per task up to 9 arguments).
 # `Val(length(args) > N)` is a compile-time constant, so inference follows only the branch that is taken.
+# N = 8 and not lower on purpose: with N = 2 the Datadeps Cholesky with 16 x 16 tiles (5984 tasks, the kernels vanish) was 10-20 % slower (min 0.060 / 0.067 s against 0.053 / 0.055 s), because
+# the typed path does help a task with 4-7 arguments in steady state. A call whose number of arguments varies at run time (a splat of a data-dependent length) chooses the untyped path itself:
+#     using Base.ScopedValues: @with
+#     @with Dagger.TASK_TYPED => false  Dagger.@spawn merge(parts...)      # 8-12 ms for each new length instead of 55-140 ms
 const TYPED_SPAWN_MAX_ARGS = 8
 typed_spawn_macro(f, task_options::Options, args...; kwargs...) =
     _typed_spawn_branch(Val(length(args) > TYPED_SPAWN_MAX_ARGS), f, task_options, args, kwargs)
