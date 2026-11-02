@@ -55,6 +55,76 @@ function LinearAlgebra.diag(A::DMatrix{T}, k::Integer=0) where T
     return B
 end
 
+function _clamp_band(k::Integer, m::Int, n::Int)
+    # The diagonals of an m-by-n matrix run from -(m-1) to n-1, so any `k` past
+    # either end behaves exactly like the nearest endpoint. Clamping before any
+    # arithmetic keeps the per-partition offsets below from overflowing for an
+    # extreme `k`, and lets a `k` that is unsigned or wider than `Int` be
+    # compared before it is converted.
+    k >= n && return n
+    k <= -m && return -m
+    return Int(k)
+end
+
+# `Base`'s generic `tril!`/`triu!` walk the matrix one element at a time with
+# scalar `setindex!`, which on a `DArray` schedules an operation per element and
+# is an error under `allowscalar!(false)`. Classify each partition against the
+# k-th diagonal instead: a partition lying wholly on the kept side is left
+# alone, one lying wholly on the zeroed side is filled with zeros, and only the
+# partitions the diagonal actually crosses run a local `tril!`/`triu!`.
+#
+# For a partition spanning global rows `rows` and columns `cols`, the offsets
+# `j - i` of the entries it holds run from `first(cols) - last(rows)` up to
+# `last(cols) - first(rows)`, and an offset is local to the partition once it is
+# shifted by `first(cols) - first(rows)`.
+function LinearAlgebra.tril!(A::DMatrix{T}, k::Integer=0) where T
+    m, n = size(A)
+    k = _clamp_band(k, m, n)
+    Asd = A.subdomains
+    Dagger.spawn_datadeps() do
+        for idx in CartesianIndices(A.chunks)
+            rows, cols = indexes(Asd[idx])
+            if last(cols) - first(rows) <= k
+                continue  # wholly on or below the k-th diagonal
+            elseif first(cols) - last(rows) > k
+                Dagger.@spawn fill!(InOut(A.chunks[idx]), zero(T))
+            else
+                Dagger.@spawn LinearAlgebra.tril!(InOut(A.chunks[idx]),
+                                                  k - (first(cols) - first(rows)))
+            end
+        end
+    end
+    return A
+end
+
+function LinearAlgebra.triu!(A::DMatrix{T}, k::Integer=0) where T
+    m, n = size(A)
+    k = _clamp_band(k, m, n)
+    Asd = A.subdomains
+    Dagger.spawn_datadeps() do
+        for idx in CartesianIndices(A.chunks)
+            rows, cols = indexes(Asd[idx])
+            if first(cols) - last(rows) >= k
+                continue  # wholly on or above the k-th diagonal
+            elseif last(cols) - first(rows) < k
+                Dagger.@spawn fill!(InOut(A.chunks[idx]), zero(T))
+            else
+                Dagger.@spawn LinearAlgebra.triu!(InOut(A.chunks[idx]),
+                                                  k - (first(cols) - first(rows)))
+            end
+        end
+    end
+    return A
+end
+
+# `Base`'s out-of-place `tril`/`triu` allocate the result with `similar`, which
+# for a `DArray` re-blocks to `auto_blocks(size)` instead of keeping `A`'s own
+# partitioning, and then fill it either with `copytrito!` (which has no `DArray`
+# method) or with one distributed assignment per column. Copy once and clear the
+# copy in place instead.
+LinearAlgebra.tril(A::DMatrix, k::Integer=0) = LinearAlgebra.tril!(copy(A), k)
+LinearAlgebra.triu(A::DMatrix, k::Integer=0) = LinearAlgebra.triu!(copy(A), k)
+
 # --- BLAS-1 vector operations ---------------------------------------------
 # Efficient, distributed level-1 operations needed by iterative (Krylov)
 # solvers. These run one BLAS-1 kernel per chunk (avoiding the generic
