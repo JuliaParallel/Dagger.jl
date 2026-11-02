@@ -578,6 +578,7 @@ chunktype(t::DTask) = t.metadata.return_type
 # concrete spec type, leaves everything below statically typed.
 eager_launch!(pair::DTaskPair) = _eager_launch!(pair.spec, pair.task)
 function _eager_launch!(spec::DTaskSpec, task::DTask)
+    @nospecialize spec
 
     # Assign a name, if specified
     eager_assign_name!(spec, task)

@@ -766,14 +766,26 @@ function spawn_macro(f, task_options::Options, args...; kwargs...)
     @nospecialize f args kwargs
     return _spawn_owned(f, task_options, args, kwargs)
 end
+# A task with many arguments (above all a variable-length splat, `f(parts...)`) takes the untyped path. The typed path compiles `_eager_launch!`, `_spawn` and
+# `_typed_spawn_owned` anew for every distinct tuple of argument types: 80-140 ms for each NEW number of arguments (laptop; ~10x less untyped), seen as a 0.23 s
+# stall of a rank in the first step that needed a longer merge (Barnes-Hut, Otus). Steady state is the same for both paths (11-14 us per task up to 9 arguments).
+# `Val(length(args) > N)` is a compile-time constant, so inference follows only the branch that is taken.
+const TYPED_SPAWN_MAX_ARGS = 8
 typed_spawn_macro(f, task_options::Options, args...; kwargs...) =
+    _typed_spawn_branch(Val(length(args) > TYPED_SPAWN_MAX_ARGS), f, task_options, args, kwargs)
+_typed_spawn_branch(::Val{false}, f, task_options::Options, args::Tuple, kwargs) =
     _typed_spawn_owned(f, task_options, args, kwargs)
+function _typed_spawn_branch(::Val{true}, f, task_options::Options, args::Tuple, kwargs)
+    @nospecialize f args kwargs
+    return _spawn_owned(f, task_options, args, kwargs)
+end
 # One dispatch onto the concrete `NamedTuple` type: `scoped_options` is only known as `NamedTuple`
 # here, so asserting the type of its `keys` inline (`::NTuple{N,Symbol} where N`) was a runtime
 # subtype query on every spawn made under `with_options`.
 _append_option_names!(propagates::Vector{Symbol}, scoped_options::NamedTuple) =
     append!(propagates, keys(scoped_options))
 function _spawn(args_kwargs, task_options)
+    @nospecialize args_kwargs
     # Get all scoped options and determine which propagate beyond this task
     scoped_options = get_options()::NamedTuple
     # N.B. With no scoped options there is nothing to propagate, and a
