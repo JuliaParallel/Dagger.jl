@@ -1539,3 +1539,12 @@ message limits.
     Test reads and writes across repeated regions, including GPU parents and
     remote worker ownership. Odo passed 18 GPU lifetime assertions and the
     ragged two-rank GPU stencil with uniformity checking enabled.
+
+131. **An eligible GPU scope is not a placement grid.** `uniform_mpi_processors`
+    already respects the ambient CPU/GPU scope. Returning `nothing` from
+    `default_procgrid` for explicit scopes lets hierarchical affinity put every
+    allocation on the rank owning its host input. Always construct the cyclic
+    grid from the scoped uniform processor list. Assert actual chunk owners,
+    not just eligible processors. Before this fix, Odo's two-GCD ensemble
+    allocated every output tile on rank 0 and recorded no kernels on rank 1.
+    Scoped CPU/GPU allocation and restricted-rank tests pass after the fix.

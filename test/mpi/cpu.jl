@@ -60,6 +60,11 @@ const accel = Dagger.current_acceleration()
 include("broadcast.jl")
 include("receive.jl")
 include("callables.jl")
+include("scoped_procgrid.jl")
+@testset "MPI scoped array placement" begin
+    test_scoped_mpi_procgrid(Dagger.scope(mpi_ranks=:))
+    test_scoped_mpi_procgrid(Dagger.scope(mpi_rank=0))
+end
 include(joinpath(@__DIR__, "..", "datadeps", "launch_order.jl"))
 
 mpi_procs() = sort(collect(Dagger.get_processors(MPIExt.MPIClusterProc(comm)));

@@ -37,6 +37,7 @@ using Dagger: In, Out, InOut, Deps
 const MPIExt = Base.get_extension(Dagger, :MPIExt)
 
 include(joinpath(@__DIR__, "..", "util.jl"))
+include(joinpath(@__DIR__, "scoped_procgrid.jl"))
 include(joinpath(@__DIR__, "..", "array", "stencil_defs.jl"))
 include(joinpath(@__DIR__, "..", "array", "sparse_defs.jl"))
 include(joinpath(@__DIR__, "..", "array", "linalg", "matvec_defs.jl"))
@@ -121,6 +122,11 @@ function run_mpi_gpu_suite(cfg)
         @test p.innerProc isa DeviceProc
         @test Dagger.check_uniform(p)
     end
+end
+
+@testset "Scoped GPU array placement" begin
+    test_scoped_mpi_procgrid(all_gpu_scope())
+    test_scoped_mpi_procgrid(gpu_scope(0))
 end
 
 if gpu_key !== nothing

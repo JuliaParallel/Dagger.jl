@@ -2674,17 +2674,10 @@ end
 # construction (the scheduler's measured costs are rank-local and cannot be
 # used for placement decisions under SPMD).
 #
-# This CPU-only grid only applies when the ambient scope is unrestricted
-# (`DefaultScope()`). When the caller has narrowed the scope explicitly (e.g.
-# `with_options(;scope=<gpu scope>)` around a GPU-targeted allocation, as the
-# MPI x GPU stencil suite does), defer to the ambient scope instead by
-# returning `nothing`, mirroring the base (non-MPI) Acceleration's
-# `default_procgrid`: `procgrid_scope` then falls back to `get_compute_scope()`
-# per chunk, so every allocation task's compute_scope matches the datadeps
-# region's `all_scope` and round-robins across the caller's chosen processors.
-# Hard-coding the CPU-only grid unconditionally would otherwise place every
-# chunk on a `ThreadProc`, which conflicts with a GPU-only ambient scope and
-# raises a `SchedulingException`.
+# `uniform_mpi_processors` already filters by the ambient scope, including GPU
+# scopes. Keep an explicit grid there too: without one, hierarchical data
+# affinity can put every allocation on the rank holding the host input array.
+# A scope admitting two GPUs does not by itself distribute array chunks.
 # Only rank 0 runs AOT planners; the others adopt its plan in
 # `uniform_aot_schedule!`, rather than computing one they would then discard.
 Dagger.aot_plans_locally(accel::MPIAcceleration) = MPI.Comm_rank(accel.comm) == 0
@@ -2720,7 +2713,6 @@ function Dagger.uniform_aot_schedule!(accel::MPIAcceleration,
 end
 
 function default_procgrid(accel::MPIAcceleration, nblocks::NTuple{N,Int}) where N
-    Dagger.get_compute_scope() == Dagger.DefaultScope() || return nothing
     return CyclicProcGrid(uniform_mpi_processors(accel), nblocks)
 end
 
