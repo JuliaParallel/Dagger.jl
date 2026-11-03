@@ -1513,3 +1513,12 @@ lesson.
     channels in explicitly installed worker globals: functions are Datadeps
     arguments too, so capturing a `RemoteChannel` in a mutable callable still
     asks the argument mover to move the channel.
+## SC26 follow-up: large typed MPI receives
+
+`MPI.Get_count(status, UInt8)` returns `nothing` when a valid typed message is
+larger than `typemax(Cint)` bytes. Validate an in-place receive with the actual
+`MPI.Buffer` datatype and count. Odo/Cray MPICH with Julia 1.13.1 passed the
+production receive path for 268435456 and 268435457 Float64 elements (2 GiB and
+2 GiB + 8 bytes), plus empty, byte, Float64, complex, and tuple messages.
+This does not extend MPI.Buffer's supported *element* count or serialized-byte
+message limits.

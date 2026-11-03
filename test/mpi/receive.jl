@@ -61,3 +61,18 @@ Base.cconvert(::Type{Cint}, ::InvalidMPIReceiveSource) = throw(MPIReceiveConvers
         end
     end
 end
+
+@testset "In-place receives validate their MPI datatype count" begin
+    # Exercise empty messages and multi-byte/derived element types through the
+    # production receive path, rather than only checking MPI.Get_count itself.
+    for source in (UInt8[], UInt8[1, 2, 3], [1.25, -2.5, 7.0],
+                   ComplexF64[1+2im, 3-4im], [(1.0, 2.0), (3.0, 4.0)])
+        dest = similar(source)
+        request = MPI.Isend(source, MPI.COMM_SELF; dest=0, tag=74)
+        result, inplace = MPIExt.recv_yield!(dest, MPI.COMM_SELF, 0, UInt32(74))
+        MPI.Wait(request)
+        @test inplace
+        @test result === dest
+        @test dest == source
+    end
+end

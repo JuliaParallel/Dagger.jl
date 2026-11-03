@@ -1141,9 +1141,11 @@ function _recv_yield_inplace_raw!(array, comm, my_rank, their_rank, tag)
             if MPI.Get_error(stat) != MPI.SUCCESS
                 error("recv_yield failed with error $(MPI.Get_error(stat))")
             end
-            count = MPI.Get_count(stat, UInt8)
-            @assert count == sizeof(array) "recv_yield_inplace: expected $(sizeof(array)) bytes, got $count"
             buf = MPI.Buffer(array)
+            # Match the receive datatype: a valid element count can describe
+            # more than typemax(Cint) bytes, for which a byte count is undefined.
+            count = MPI.Get_count(stat, buf.datatype)
+            @assert count == buf.count "recv_yield_inplace: expected $(buf.count) datatype elements, got $count"
             req = MPI.Imrecv!(buf, msg)
             __wait_for_request(req, comm, my_rank, their_rank, tag, "recv_yield", "recv")
             return array
