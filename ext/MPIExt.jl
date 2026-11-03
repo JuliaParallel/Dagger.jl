@@ -1863,8 +1863,10 @@ end
 
 # Functions route through the inner processor, so GPU backends can swap
 # kernels for device equivalents (e.g. LAPACK.potrf! -> CUSOLVER.potrf!)
-move(::MPIOSProc, dst::MPIProcessor, x::Union{Function,Type}) = move(OSProc(), dst.innerProc, x)
-move(::MPIOSProc, ::MPIProcessor, x::Chunk{<:Union{Function,Type}}) = poolget(x.handle)
+# Kernel is a zero-field callable, not a subtype of Function. It must remain
+# available on spectators too: Datadeps inspects the moved callable on all ranks.
+move(::MPIOSProc, dst::MPIProcessor, x::Union{Function,Type,Dagger.Kernel}) = move(OSProc(), dst.innerProc, x)
+move(::MPIOSProc, ::MPIProcessor, x::Chunk{<:Union{Function,Type,Dagger.Kernel}}) = poolget(x.handle)
 
 # Out-of-place MPI move for OSProc-labeled Chunks: delegate to the
 # MPIProcessor Chunk path so egress runs on the owner and ingress on dest.
@@ -2302,9 +2304,9 @@ move(src::MPIOSProc, dst::MPIProcessor, x) =
 
 # Functions route through the inner processor, so GPU backends can swap
 # kernels for device equivalents (e.g. BLAS.gemm! -> CUBLAS.gemm!)
-move(src::MPIProcessor, dst::MPIProcessor, x::Union{Function,Type}) =
+move(src::MPIProcessor, dst::MPIProcessor, x::Union{Function,Type,Dagger.Kernel}) =
     move(OSProc(), dst.innerProc, x)
-move(::MPIProcessor, ::MPIProcessor, x::Chunk{<:Union{Function,Type}}) = poolget(x.handle)
+move(::MPIProcessor, ::MPIProcessor, x::Chunk{<:Union{Function,Type,Dagger.Kernel}}) = poolget(x.handle)
 
 function move(src::MPIProcessor, dst::MPIProcessor, x::Chunk)
     if Dagger.Sch.SCHED_MOVE[]

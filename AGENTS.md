@@ -1522,3 +1522,11 @@ production receive path for 268435456 and 268435457 Float64 elements (2 GiB and
 2 GiB + 8 bytes), plus empty, byte, Float64, complex, and tuple messages.
 This does not extend MPI.Buffer's supported *element* count or serialized-byte
 message limits.
+
+129. **Replicate kernel callables during MPI planning.** `Dagger.Kernel` is a
+    zero-field callable struct, not a `Function`. The generic rank-owned move
+    returns `nothing` on spectators; Datadeps then compares a kernel on the
+    owner with `nothing` elsewhere. Treat Kernel like Function/Type in both
+    MPIOSProc and MPIProcessor callable moves. Unseeded and seeded hash probes
+    alone cannot catch this: test moved representations on every rank. Odo
+    passed 24 move checks per rank and tiled GPU tasks with uniformity enabled.
