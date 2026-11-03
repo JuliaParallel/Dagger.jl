@@ -1530,3 +1530,12 @@ message limits.
     MPIOSProc and MPIProcessor callable moves. Unseeded and seeded hash probes
     alone cannot catch this: test moved representations on every rank. Odo
     passed 24 move checks per rank and tiled GPU tasks with uniformity enabled.
+
+130. **Keep ChunkView metadata as a remote handle on Distributed too.** Wrapping
+    a ChunkView in a head-local CPU Chunk invents a CPU origin for a GPU/remote
+    parent. The alias cache can then record the original GPU array as a
+    temporary CPU copy and explicitly free it at region drain. Keep the raw
+    handle; its `memory_space` and endpoint dispatch already follow the parent.
+    Test reads and writes across repeated regions, including GPU parents and
+    remote worker ownership. Odo passed 18 GPU lifetime assertions and the
+    ragged two-rank GPU stencil with uniformity checking enabled.

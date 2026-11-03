@@ -85,10 +85,11 @@ isremotehandle(x::ChunkView) = true
 # can never pass through as its own slot (`slot_rewrap_is_identity`).
 isremotehandle_type(::Type{<:ChunkView}) = true
 
-# Under uniform (SPMD) execution, a ChunkView is replicated metadata on every
-# rank (inner chunk record + slices); wrapping it in a rank-0-owned Chunk
-# would strand the other ranks' inner chunk records, so keep it raw
-datadeps_arg_wrap(arg::ChunkView) = uniform_execution() ? arg : tochunk(arg)
+# A ChunkView is already a remote handle. Wrapping its metadata in a local CPU
+# Chunk gives it a false origin space. In particular, a GPU parent can then be
+# cached as a temporary CPU copy of itself and freed at the end of the region.
+# Keep the original handle and its backing chunk's space on every acceleration.
+datadeps_arg_wrap(arg::ChunkView) = arg
 
 # ChunkView is a remote handle: its move_rewrap accesses the underlying chunk
 # remotely itself, so dispatch directly from the caller

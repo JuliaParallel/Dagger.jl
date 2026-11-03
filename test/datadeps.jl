@@ -3,6 +3,10 @@ import Dagger: aliasing, memory_space
 using LinearAlgebra, Graphs
 
 include("datadeps/launch_order.jl")
+include("datadeps/chunkview_lifetime.jl")
+@testset "ChunkView lifetime on worker $p" for p in workers()
+    Dagger.with_options(test_chunkview_lifetime;scope=Dagger.scope(worker=p))
+end
 
 @testset "Hierarchical timing gates" begin
     # Exercise both the identity slot and the general move_rewrap path. Timing

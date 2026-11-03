@@ -13,6 +13,10 @@ end
 # header for the acceleration/backend matrix they cover.
 include(joinpath(@__DIR__, "array", "sparse_defs.jl"))
 include(joinpath(@__DIR__, "gpu_distributed.jl"))
+include(joinpath(@__DIR__, "datadeps", "chunkview_lifetime.jl"))
+@testset "ChunkView lifetime ($name)" for (name, scope) in GPU_SCOPES
+    Dagger.with_options(test_chunkview_lifetime; scope)
+end
 include(joinpath(@__DIR__, "array", "linalg", "matvec_defs.jl"))
 
 @testset "Dense matvec ($name)" for (name, scope) in GPU_SCOPES
