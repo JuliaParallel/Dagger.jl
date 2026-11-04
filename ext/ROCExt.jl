@@ -262,6 +262,16 @@ struct AllocateUndef{S} end
 (::AllocateUndef{S})(T, dims::Dims{N}) where {S,N} = ROCArray{S,N}(undef, dims)
 Dagger.allocate_array_func(::ROCArrayDeviceProc, ::Dagger.AllocateUndef{S}) where S = AllocateUndef{S}()
 
+# Datadeps establishes replica contents through dependency-ordered copy tasks.
+# Creating the slot itself only needs its shape: transferring the full parent
+# here duplicates later copies and turns halo views into whole-tile transfers.
+Dagger.can_alloc_uninit(::ROCVRAMMemorySpace, ::Type{<:ROCArray{T}}) where {T} = isbitstype(T)
+function Dagger.alloc_uninit(space::ROCVRAMMemorySpace, ::Type{A}, dims::Dims{N}) where {T,N,A<:ROCArray{T,N}}
+    return with_context(space) do
+        _note_alloc!(space.device_id, A(undef, dims))
+    end
+end
+
 # In-place
 # N.B. These methods assume that later operations will implicitly or
 # explicitly synchronize with their associated stream

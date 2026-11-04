@@ -1556,3 +1556,12 @@ message limits.
     recorded subdomains; preserve custom concatenation, structured tile and
     MPI protocols. Use owner-side GPU synchronization/readback. Ragged, empty,
     multidimensional, pointerful-element and raw-tile tests guard the boundary.
+
+133. **Header-only replica allocation is a backend capability.** CUDA opted
+    dense isbits arrays into `can_alloc_uninit`, but ROCm did not. An Odo
+    two-GPU 8192² stencil consequently sent 80 whole 256-MiB parents during
+    slot creation at window 5, before its dependency-ordered halo copies.
+    Opting ROCm in removes those 20 GiB; the validated execution sends only
+    about 30 MiB of raw payload. Allocate on the destination stream and record
+    its allocation event. Preserve the same-space guard (the original must not
+    become uninitialized), and test partial views as well as whole-array reads.

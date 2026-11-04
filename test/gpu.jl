@@ -1130,3 +1130,7 @@ end
         @test_throws ArgumentError Dagger.synchronize(; gpu_sync=:bogus)
     end
 end
+
+if USE_ROCM
+    include(joinpath(@__DIR__, "array", "roc_slots.jl"))
+end
