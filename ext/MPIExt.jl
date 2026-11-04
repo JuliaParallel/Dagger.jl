@@ -1132,27 +1132,16 @@ end
 end
 
 function _recv_yield_inplace_raw!(array, comm, my_rank, their_rank, tag)
-    timer = DeadlockTimer()
-    polls = 0
-
-    while true
-        (got, msg, stat) = MPI.Improbe(their_rank, tag, comm, MPI.Status)
-        if got
-            if MPI.Get_error(stat) != MPI.SUCCESS
-                error("recv_yield failed with error $(MPI.Get_error(stat))")
-            end
-            buf = MPI.Buffer(array)
-            # Match the receive datatype: a valid element count can describe
-            # more than typemax(Cint) bytes, for which a byte count is undefined.
-            count = MPI.Get_count(stat, buf.datatype)
-            @assert count == buf.count "recv_yield_inplace: expected $(buf.count) datatype elements, got $count"
-            req = MPI.Imrecv!(buf, msg)
-            __wait_for_request(req, comm, my_rank, their_rank, tag, "recv_yield", "recv")
-            return array
-        end
-        timer = mpi_deadlock_detect(timer, my_rank, tag, "recv", their_rank)
-        polls = mpi_poll_pause(polls)
-    end
+    # The destination and its capacity are already known. Post the receive
+    # directly instead of using the matched-message path needed for unknown
+    # serialized lengths. Concurrent Improbe/Imrecv corrupts host data on the
+    # tested Cray stack even without Dagger; ordinary Irecv passes that control.
+    buf = MPI.Buffer(array)
+    req = MPI.Irecv!(buf, comm; source=their_rank, tag)
+    stat = __wait_for_request_status(req, comm, my_rank, their_rank, tag, "recv_yield", "recv")
+    count = MPI.Get_count(stat, buf.datatype)
+    @assert count == buf.count "recv_yield_inplace: expected $(buf.count) datatype elements, got $count"
+    return array
 end
 
 function recv_yield_inplace(_value::InplaceInfo, comm, my_rank, their_rank, tag)
@@ -1259,6 +1248,11 @@ function send_yield_serialized(value, comm, my_rank, their_rank, tag)
 end
 
 function __wait_for_request(req, comm, my_rank, their_rank, tag, fn::String, kind::String)
+    __wait_for_request_status(req, comm, my_rank, their_rank, tag, fn, kind)
+    return nothing
+end
+
+function __wait_for_request_status(req, comm, my_rank, their_rank, tag, fn::String, kind::String)
     timer = DeadlockTimer()
     polls = 0
     while true
@@ -1270,7 +1264,7 @@ function __wait_for_request(req, comm, my_rank, their_rank, tag, fn::String, kin
             # Every completed request is this rank's proof of life for the
             # waits running concurrently with it (see `MPI_PROGRESS`).
             note_mpi_progress!()
-            return
+            return status
         end
         timer = mpi_deadlock_detect(timer, my_rank, tag, kind, their_rank)
         polls = mpi_poll_pause(polls)

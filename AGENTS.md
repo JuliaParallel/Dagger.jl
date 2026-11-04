@@ -1565,3 +1565,15 @@ message limits.
     about 30 MiB of raw payload. Allocate on the destination stream and record
     its allocation event. Preserve the same-space guard (the original must not
     become uninitialized), and test partial views as well as whole-array reads.
+
+
+134. **Post known-size typed receives directly.** A standalone MPI.jl reduction
+    on the tested Odo/Cray stack mixes concurrent host payloads through
+    `Improbe`/`Imrecv!`, even with GC disabled. A matched `Irecv!` control passes;
+    this narrows a failing path without identifying a bindings/vendor defect.
+    For in-place buffers, the destination and datatype are already known:
+    prepost into that storage, cooperatively wait, then validate the completed
+    status with the buffer's datatype/count. Keep serialized unknown-length
+    receives and per-stream ownership unchanged. Test mixed sizes/tags under
+    concurrency and GC, retain the real large-workload counterexample, and
+    rerun actual messages above 2 GiB rather than only count-query probes.

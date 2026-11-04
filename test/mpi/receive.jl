@@ -62,6 +62,29 @@ Base.cconvert(::Type{Cint}, ::InvalidMPIReceiveSource) = throw(MPIReceiveConvers
     end
 end
 
+@testset "Concurrent typed receives preserve distinct payloads" begin
+    # Mixed sizes and tags exercise independent streams sharing a communicator.
+    # The multi-node, larger-message stress reproducer is retained separately.
+    for batch in 1:4
+        sources = [fill(Float64(100batch + lane), isodd(lane) ? 131072 : 8192)
+                   for lane in 1:8]
+        destinations = [similar(source) for source in sources]
+        receivers = [Threads.@spawn MPIExt.recv_yield!(destinations[lane],
+                      MPI.COMM_SELF, 0, UInt32(80 + lane)) for lane in 1:8]
+        senders = [Threads.@spawn begin
+            request = MPI.Isend(sources[lane], MPI.COMM_SELF; dest=0, tag=80 + lane)
+            MPIExt.__wait_for_request(request, MPI.COMM_SELF, 0, 0,
+                                      UInt32(80 + lane), "test", "send")
+        end for lane in 1:8]
+        GC.gc(false)
+        results = fetch.(receivers)
+        fetch.(senders)
+        @test all(lane -> results[lane][1] === destinations[lane] &&
+                          results[lane][2], 1:8)
+        @test destinations == sources
+    end
+end
+
 @testset "In-place receives validate their MPI datatype count" begin
     # Exercise empty messages and multi-byte/derived element types through the
     # production receive path, rather than only checking MPI.Get_count itself.
@@ -75,4 +98,8 @@ end
         @test result === dest
         @test dest == source
     end
+    source = [1.0, 2.0]
+    request = MPI.Isend(source, MPI.COMM_SELF; dest=0, tag=75)
+    @test_throws AssertionError MPIExt.recv_yield!(zeros(3), MPI.COMM_SELF, 0, UInt32(75))
+    MPI.Wait(request)
 end
