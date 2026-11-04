@@ -294,6 +294,13 @@ function Base.collect(d::DArray{T,N}; tree=true, copyto=false) where {T,N}
         end
         return _collect_dense(T, Val(N), fetch(result))
     end
+    # Default dense concatenation has a known rectangular result. Copy each
+    # finished host tile into that result once rather than allocating every
+    # level of a concatenation tree. Keep MPI's uniform gather protocol and
+    # custom/structured concatenation on their existing paths.
+    if concat === cat && all(c -> _collect_is_dense_tile(c, Val(N)), a.chunks)
+        return _collect_dense_tiles(a)
+    end
     # Distributed: fetch chunks directly and concat in-process. This avoids
     # routing chunk data through datadeps aliasing, which requires an
     # aliasing-resolvable (e.g. isbits) element type.
@@ -307,6 +314,20 @@ function Base.collect(d::DArray{T,N}; tree=true, copyto=false) where {T,N}
     dimcatfuncs = [(x...) -> concat(x..., dims=i) for i in 1:N]
     tiles = asyncmap(_collect_host_tile, a.chunks)
     return _collect_dense(T, Val(N), treereduce_nd(dimcatfuncs, tiles))
+end
+
+_collect_is_dense_tile(c, ::Val{N}) where {N} = c isa DenseArray{<:Any,N}
+_collect_is_dense_tile(c::Union{Chunk,DTask,Thunk}, ::Val{N}) where {N} =
+    chunktype(c) <: DenseArray{<:Any,N}
+
+function _collect_dense_tiles(a::DArray{T,N}) where {T,N}
+    result = Array{T,N}(undef, size(a))
+    for i in eachindex(a.chunks, a.subdomains)
+        tile = _collect_host_tile(a.chunks[i])
+        ranges = indexes(project(domain(a), a.subdomains[i]))
+        copyto!(view(result, ranges...), tile)
+    end
+    return result
 end
 
 # Host copy of a finished tile for `collect`'s in-process `cat`. GPU `execute!`

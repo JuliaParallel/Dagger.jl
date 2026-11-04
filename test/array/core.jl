@@ -127,3 +127,5 @@ using MemPool
     f = MemPool.FileRef("/tmp/d", Dagger.datasize(x))
     @test Dagger.datasize(f) == sizeof(Int)*10
 end
+
+include("collect_dense.jl")

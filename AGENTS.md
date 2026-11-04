@@ -1548,3 +1548,11 @@ message limits.
     not just eligible processors. Before this fix, Odo's two-GCD ensemble
     allocated every output tile on rank 0 and recorded no kernels on rank 1.
     Scoped CPU/GPU allocation and restricted-rank tests pass after the fix.
+
+132. **Dense collection need not concatenate every tree level.** On Odo,
+    collecting a 2-GiB dense GPU factor allocated about 14 GiB cumulatively on
+    the host: 2 GiB of readback plus 12 GiB in concatenation (including the
+    final result). Copy dense default-cat tiles into the final array using
+    recorded subdomains; preserve custom concatenation, structured tile and
+    MPI protocols. Use owner-side GPU synchronization/readback. Ragged, empty,
+    multidimensional, pointerful-element and raw-tile tests guard the boundary.
