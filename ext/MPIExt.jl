@@ -1696,6 +1696,60 @@ fetch_handle(ref::MPIRef; uniform::Bool=uniform_execution()) = poolget(ref; unif
 Dagger.fetch_local(ref::MPIRef) =
     ref.rank == MPI.Comm_rank(ref.comm) ? poolget(ref; uniform=false) : nothing
 
+function Dagger._collect_uniform(accel::MPIAcceleration, a::Dagger.DArray{T,N}) where {T,N}
+    eligible = a.concat === cat && isbitstype(T) &&
+               all(c -> c isa Chunk && c.handle isa MPIRef &&
+                        c.handle.comm == accel.comm &&
+                        Dagger._collect_is_dense_tile(c, Val(N)), a.chunks)
+    Dagger.@check_uniform eligible
+    Dagger.@check_uniform T
+    Dagger.@check_uniform size(a)
+    Dagger.@check_uniform size(a.chunks)
+    eligible || return Dagger._collect_uniform_tree(a)
+
+    # A prior async region can have finished its kernels while its newest
+    # contents still live in a dirty replica. Preserve the task-graph gather's
+    # read dependency by publishing those writes before reading owner storage.
+    Dagger.synchronize(a)
+
+    # collect returns the complete host array on EVERY rank. Broadcast each
+    # owner-readback tile once and assemble it directly, without task-graph
+    # concatenation intermediates or host->device round trips between levels.
+    result = Array{T,N}(undef, size(a))
+    for i in eachindex(a.chunks, a.subdomains)
+        chunk = a.chunks[i]
+        ranges = Dagger.indexes(Dagger.project(Dagger.domain(a), a.subdomains[i]))
+        Dagger.@check_uniform chunk.handle
+        Dagger.@check_uniform chunktype(chunk)
+        Dagger.@check_uniform ranges
+        tile = mpi_collect_host_tile(accel, chunk)
+        copyto!(view(result, ranges...), tile)
+    end
+    return result
+end
+
+function mpi_collect_host_tile(accel::MPIAcceleration, chunk::Chunk)
+    owner = chunk.handle.rank
+    tile = nothing
+    failure = nothing
+    if MPI.Comm_rank(accel.comm) == owner
+        try
+            value = fetch(chunk; uniform=false)
+            # The wrapper does not own a GPU stream; synchronize/bind the
+            # actual inner processor before owner-side device readback.
+            proc = mpi_inner_proc(chunk.processor)
+            Dagger.gpu_synchronize(proc)
+            tile = Dagger.with_context(() -> Dagger._collect_host_tile_value(value), proc)
+        catch err
+            failure = mpi_wire_exception(err)
+        end
+    end
+    # Publish readback failures before any peer waits for the tile's payload.
+    failure = bcast_yield(accel.comm, owner, to_tag(), failure)
+    failure === nothing || throw(failure)
+    return bcast_yield(accel.comm, owner, to_tag(), tile)
+end
+
 function move!(dep_mod, to_space::MPIMemorySpace, from_space::MPIMemorySpace, to::Chunk, from::Chunk)
     @assert to.handle isa MPIRef && from.handle isa MPIRef "MPIRef expected"
     @assert to.handle.comm == from.handle.comm "MPIRef comm mismatch"

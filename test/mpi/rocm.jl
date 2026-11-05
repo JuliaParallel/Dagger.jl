@@ -52,3 +52,6 @@ run_mpi_gpu_suite((;
         extra = rocm_gpu_direct_check,
     ),
 ))
+
+include("collect_dense.jl")
+test_mpi_dense_collect(Dagger.scope(mpi_ranks=:, rocm_gpu=1))

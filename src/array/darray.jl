@@ -283,16 +283,7 @@ function Base.collect(d::DArray{T,N}; tree=true, copyto=false) where {T,N}
 
     concat = d.concat
     if uniform_execution()
-        # Under SPMD/MPI, gather chunks via a datadeps concat tree so chunk
-        # movement is scheduled uniformly across ranks (rather than a direct
-        # per-chunk `fetch`, which isn't well-defined for rank-owned data).
-        spawn_catfuncs = ntuple(Val(N)) do i
-            (args...) -> Dagger.@spawn _collect_cat(concat, i, map(In, args)...)
-        end
-        result = Dagger.spawn_datadeps() do
-            treereduce_nd(spawn_catfuncs, a.chunks)
-        end
-        return _collect_dense(T, Val(N), fetch(result))
+        return _collect_uniform(current_acceleration(), a)
     end
     # Default dense concatenation has a known rectangular result. Copy each
     # finished host tile into that result once rather than allocating every
@@ -314,6 +305,21 @@ function Base.collect(d::DArray{T,N}; tree=true, copyto=false) where {T,N}
     dimcatfuncs = [(x...) -> concat(x..., dims=i) for i in 1:N]
     tiles = asyncmap(_collect_host_tile, a.chunks)
     return _collect_dense(T, Val(N), treereduce_nd(dimcatfuncs, tiles))
+end
+
+_collect_uniform(::Acceleration, a::DArray) = _collect_uniform_tree(a)
+
+function _collect_uniform_tree(a::DArray{T,N}) where {T,N}
+    # Generic SPMD fallback: keep custom concatenation and structured tiles
+    # in the rank-uniform task graph. Accelerations may specialize dense gather.
+    concat = a.concat
+    spawn_catfuncs = ntuple(Val(N)) do i
+        (args...) -> Dagger.@spawn _collect_cat(concat, i, map(In, args)...)
+    end
+    result = Dagger.spawn_datadeps() do
+        treereduce_nd(spawn_catfuncs, a.chunks)
+    end
+    return _collect_dense(T, Val(N), fetch(result))
 end
 
 _collect_is_dense_tile(c, ::Val{N}) where {N} = c isa DenseArray{<:Any,N}

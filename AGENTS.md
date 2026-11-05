@@ -1577,3 +1577,22 @@ message limits.
     receives and per-stream ownership unchanged. Test mixed sizes/tags under
     concurrency and GC, retain the real large-workload counterexample, and
     rerun actual messages above 2 GiB rather than only count-query probes.
+
+135. **A gather shortcut must publish pending writes before owner readback.**
+    A completed `sync=false` task can leave the newest contents in a dirty
+    remote replica. Replacing MPI collect's Datadeps tree with direct tile
+    readback initially returned zeros after a completed remote task filled its
+    replica with sevens. Call `synchronize(A)` before touching original chunk
+    storage; kernel completion or `fetch(task)` alone does not publish it.
+    Test a completed remote writer without an explicit user drain, on CPU and
+    GPU. Read back only on the owner, synchronize/bind the actual inner GPU
+    processor rather than its MPI wrapper, and broadcast readback failures
+    before peers wait for payloads. Keep the full host result on every rank,
+    and retain the task-tree fallback for custom/structured concatenation.
+
+136. **Size ownership fixtures for processors, not just ranks.** Cyclic array
+    placement walks eligible processors, including every CPU thread per rank.
+    Sixteen tiles cover only the first two ranks in a four-rank/eight-thread
+    setup. Derive the fixture size from `uniform_mpi_processors` before
+    asserting that all eligible ranks own tiles; a small fixed ragged array is
+    a numerical test, not proof that every rank got an allocation.

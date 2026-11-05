@@ -65,6 +65,8 @@ include("scoped_procgrid.jl")
     test_scoped_mpi_procgrid(Dagger.scope(mpi_ranks=:))
     test_scoped_mpi_procgrid(Dagger.scope(mpi_rank=0))
 end
+include("collect_dense.jl")
+test_mpi_dense_collect(Dagger.scope(mpi_ranks=:))
 include(joinpath(@__DIR__, "..", "datadeps", "launch_order.jl"))
 
 mpi_procs() = sort(collect(Dagger.get_processors(MPIExt.MPIClusterProc(comm)));
