@@ -65,10 +65,6 @@ function compatible_processors(accel::Union{Acceleration,Nothing}, scope::Abstra
     # function's contract is `-> Set{Processor}`.
     return Set{Processor}(p for p in comp if accel_matches_proc(accel, p))
 end
-# accel_matches_proc is identically true for DistributedAcceleration; skip the
-# second Set construction
-compatible_processors(accel::DistributedAcceleration, scope::AbstractScope, procs::Vector{<:Processor}) =
-    compatible_processors(scope, procs)
 compatible_processors(accel::Union{Acceleration,Nothing}, scope::AbstractScope=get_compute_scope(), ctx::Context=Sch.eager_context()) =
     compatible_processors(accel, scope, procs(ctx))
 

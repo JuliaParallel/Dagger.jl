@@ -152,3 +152,17 @@ function eager_next_id()
         return remotecall_fetch(eager_next_id, 1)::UInt64
     end
 end
+
+# Under uniform (SPMD) execution, task IDs feed rank-uniform MPI tags, so every rank
+# must allocate the same IDs in the same order. A task that opts out of uniform
+# execution (e.g. `acceleration=DistributedAcceleration()` inside `accelerate!(:mpi)`)
+# is spawned by one rank only; it draws from a separate, disjoint range so that it
+# does not shift the IDs of later uniform tasks.
+const LOCAL_ID_COUNTER = Threads.Atomic{Int}(typemax(Int) ÷ 2)
+function eager_next_id(spec)
+    accel = spec.options.acceleration
+    if accel !== nothing && uniform_execution(current_acceleration()) && !uniform_execution(accel)
+        return UInt64(Threads.atomic_add!(LOCAL_ID_COUNTER, 1))
+    end
+    return eager_next_id()
+end

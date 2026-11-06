@@ -2661,5 +2661,9 @@ accel_matches_proc(accel::MPIAcceleration, proc::MPIOSProc) = true
 accel_matches_proc(accel::MPIAcceleration, proc::MPIClusterProc) = true
 accel_matches_proc(accel::MPIAcceleration, proc::MPIProcessor) = true
 accel_matches_proc(accel::MPIAcceleration, proc) = false
+# A task with `acceleration=DistributedAcceleration()` runs only on this rank, outside
+# SPMD execution: it must not be placed on (or stolen by) an MPI processor, whose
+# execution protocol expects every rank to run the same task.
+Dagger.accel_matches_proc(::Dagger.DistributedAcceleration, ::Union{MPIProcessor,MPIOSProc,MPIClusterProc}) = false
 
 end # module MPIExt

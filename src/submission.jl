@@ -526,7 +526,7 @@ arg_chunktypes(fargs::Vector) =
 
 function eager_spawn(spec::DTaskSpec)
     # Generate new unlaunched DTask
-    uid = eager_next_id()
+    uid = eager_next_id(spec)
     future = ThunkFuture()
     metadata = DTaskMetadata(spec)
     # Propagate inferred return type to options
