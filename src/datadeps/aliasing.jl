@@ -1609,6 +1609,11 @@ direct_uninit_slot(::Acceleration, data, from_proc, to_proc, from_space, to_spac
 function direct_uninit_slot(::DistributedAcceleration, data::Chunk, from_proc, to_proc, from_space, to_space)
     T = chunktype(data)
     isconcretetype(T) && T <: DenseArray || return nothing
+    # A vector can be resized after its chunk recorded its domain (by a task of
+    # an earlier region, in place on its owner), and a slot sized from that
+    # stale domain gets too few or too many elements. Only `move_rewrap`, which
+    # asks the array itself, knows its current length.
+    ndims(T) == 1 && return nothing
     # A wrapper is rebuilt from its children on the destination
     move_rewrap_child_types(T) === nothing || return nothing
     T_dest = move_type(from_proc, to_proc, T)

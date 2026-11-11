@@ -1150,6 +1150,31 @@ function test_datadeps(;args_chunks::Bool,
     @test isapprox(M_dense, expected)
 end
 
+@testset "A resized vector chunk gets a slot of its current length" begin
+    # A slot allocated from the chunk's recorded domain kept the length the
+    # vector had when it was chunked, so a later region on another worker read
+    # 10 elements of a vector resized to 5 and failed its write-back.
+    if nprocs() >= 2
+        @testset "resize to $n" for n in (5, 15)
+            c = Dagger.tochunk(collect(1.0:10.0))
+            Dagger.spawn_datadeps() do
+                Dagger.@spawn scope=Dagger.scope(worker=1) resize!(Dagger.InOut(c), n)
+            end
+            v = copy(fetch(c))
+            @test length(v) == n
+            local t
+            Dagger.spawn_datadeps() do
+                t = Dagger.@spawn scope=Dagger.scope(worker=2) (x -> (length(x), sum(x)))(Dagger.In(c))
+            end
+            @test fetch(t) == (n, sum(v))
+            Dagger.spawn_datadeps() do
+                Dagger.@spawn scope=Dagger.scope(worker=2) (x -> (x .+= 1; nothing))(Dagger.InOut(c))
+            end
+            @test fetch(c) == v .+ 1
+        end
+    end
+end
+
 @testset "Read-only data is copied once per space" begin
     # A copy only adds a replica; only a write makes other replicas stale.
     # Copies used to be decided from the write history alone, which records a
