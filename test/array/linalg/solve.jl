@@ -69,5 +69,31 @@
         LinearAlgebra.ldiv!(chol_A, b_ref)
         LinearAlgebra.ldiv!(chol_DA, Db)
         @test collect(Db) ≈ b_ref rtol=tol
+
+        # `\` must keep the result distributed. `\` routes through
+        # `LinearAlgebra.ldiv`, which stages the right-hand side into a buffer
+        # from `LinearAlgebra._zeros`; when Dagger's `_zeros` methods do not
+        # match, that buffer is a dense `Array`, so `\` silently returns one
+        # and the distribution is lost. Every other test in this file calls
+        # `ldiv!` directly and so never reaches that path -- which is why
+        # JuliaLang/LinearAlgebra.jl#1746, changing `_zeros`' third argument
+        # from the factorization's width to the factorization itself, went
+        # unnoticed here until the allocations testsuite tripped over it.
+        A = rand(T, N, N); A = A'A + I
+        B = rand(T, N, N)
+        b = rand(T, N)
+
+        x = cholesky(DArray(A, Blocks(bs_i, bs_j))) \ DArray(b, Blocks(bs_i))
+        @test x isa DVector{T}
+        @test (wait(x); true)
+        @test collect(x) ≈ A \ b rtol=tol
+
+        X = cholesky(DArray(A, Blocks(bs_i, bs_j))) \ DArray(B, Blocks(bs_i, bs_j))
+        @test X isa DMatrix{T}
+        @test collect(X) ≈ A \ B rtol=tol
+
+        y = lu(DArray(A, Blocks(bs_i, bs_j)), RowMaximum()) \ DArray(b, Blocks(bs_i))
+        @test y isa DVector{T}
+        @test collect(y) ≈ A \ b rtol=tol
     end
 end
