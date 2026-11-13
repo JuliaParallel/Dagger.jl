@@ -132,7 +132,15 @@ function Base.zero(x::DArray{T,N}) where {T,N}
     return _to_darray(a)
 end
 
-# Weird LinearAlgebra dispatch in `\` needs this
+# Weird LinearAlgebra dispatch in `\` needs this. `LinearAlgebra.ldiv`, which
+# `\` calls, stages the right-hand side into a buffer from `_zeros`; for a
+# plain `AbstractVecOrMat` that buffer is a dense `zeros(...)`, so without
+# these the result of `\` comes back as an `Array` with its distribution lost.
+#
+# Julia <= 1.13 passes the width of the factorization as an `Integer`;
+# JuliaLang/LinearAlgebra.jl#1746, in Julia 1.14, changed that third argument
+# to the factorization itself. Both signatures are defined so that one Dagger
+# version spans the change; whichever does not match is simply never called.
 function LinearAlgebra._zeros(::Type{T}, B::DVector, n::Integer) where T
     m = max(size(B, 1), n)
     sz = (m,)
@@ -143,6 +151,10 @@ function LinearAlgebra._zeros(::Type{T}, B::DMatrix, n::Integer) where T
     sz = (m, size(B, 2))
     return zeros(auto_blocks(sz), T, sz)
 end
+LinearAlgebra._zeros(::Type{T}, B::DVector, F::LinearAlgebra.Factorization) where T =
+    LinearAlgebra._zeros(T, B, size(F, 2))
+LinearAlgebra._zeros(::Type{T}, B::DMatrix, F::LinearAlgebra.Factorization) where T =
+    LinearAlgebra._zeros(T, B, size(F, 2))
 
 function Base.view(A::AbstractArray{T,N}, p::Blocks{N}) where {T,N}
     d = ArrayDomain(Base.index_shape(A))
