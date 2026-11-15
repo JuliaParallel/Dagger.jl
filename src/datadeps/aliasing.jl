@@ -1778,7 +1778,10 @@ function move_rewrap(accel, cache::AliasedObjectCache, from_proc::Processor, to_
         @check_uniform(cc.handle)
     end
     return remotecall_endpoint_transfer(accel, from_proc, to_proc, from_space, to_space, child_chunks) do accel, from_proc, to_proc, from_space, to_space, child_chunks
-        children_local = map(c -> move(from_proc, to_proc, c), child_chunks)
+        # Recursion already materialized these children in the destination
+        # space. Reusing the original source processor here mislabels their
+        # handles and can route a destination-owned GPU Chunk to the sender.
+        children_local = map(unwrap, child_chunks)
         v_new = move_rewrap_build(T, children_local, header)
         return tochunk(v_new, to_proc, to_space)
     end

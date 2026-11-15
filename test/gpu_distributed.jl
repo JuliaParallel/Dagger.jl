@@ -1,6 +1,7 @@
 # Included by gpu.jl in every GPU CI job. Both workers select device 1, so
 # this exercises inter-process transfers even on agents with just one GPU.
 using Distributed, Dagger, LinearAlgebra, Test
+include(joinpath(@__DIR__, "array", "gpu_wrapper_move_defs.jl"))
 
 @everywhere begin
     function distributed_gpu_add!(A)
@@ -68,6 +69,11 @@ function test_distributed_gpu(kind, gpu_key)
     @test p1 isa Dagger.gpu_processor(kind)
     @test p2 isa Dagger.gpu_processor(kind)
     scope = Dagger.UnionScope(s1, s2)
+
+    @testset "Rebuild views from destination-owned GPU children" begin
+        test_gpu_wrapper_move(s1,s2)
+        test_gpu_wrapper_move(s2,s1)
+    end
 
     @testset "Deferred regions across workers" begin
         test_gpu_deferred(s1, s2)

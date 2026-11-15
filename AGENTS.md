@@ -1604,3 +1604,12 @@ message limits.
     An absent remote owner is a useful pure regression target: moving code must
     not query or activate its device. Then run actual two-node ROCm Datadeps
     kernels; single-process GPU and uniform MPI gates miss this planning path.
+
+138. **Rewrapped children already belong to the destination.** `move_rewrap`
+    recursively creates/caches children in its destination space before it
+    reconstructs a view there. Moving those Chunks again using the original
+    source processor confuses the handle owner with that source; a two-worker
+    ROCm halo read sent a destination DRef back to its sender and asserted.
+    Unwrap the destination-local children while rebuilding the wrapper. Test
+    partial views in both directions and repeated flat/hierarchical regions;
+    same-worker and CPU moves can conceal the mislabeled second transfer.
