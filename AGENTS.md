@@ -1596,3 +1596,11 @@ message limits.
     setup. Derive the fixture size from `uniform_mpi_processors` before
     asserting that all eligible ranks own tiles; a small fixed ragged array is
     a numerical test, not proof that every rank got an allocation.
+
+137. **Move stateless GPU kernel wrappers as code on Distributed too.**
+    `Kernel` is not a `Function`; ROCm's generic host-to-device adapter therefore
+    tried to bind a remote processor's context on the planner process. Treat
+    Kernel like Function in both direct and Chunk-wrapped callable moves.
+    An absent remote owner is a useful pure regression target: moving code must
+    not query or activate its device. Then run actual two-node ROCm Datadeps
+    kernels; single-process GPU and uniform MPI gates miss this planning path.

@@ -791,9 +791,11 @@ function Dagger.move(from_proc::ROCArrayDeviceProc, to_proc::ROCArrayDeviceProc,
     end
 end
 
-# Adapt generic functions
-Dagger.move(from_proc::CPUProc, to_proc::ROCArrayDeviceProc, x::Function) = x
-Dagger.move(from_proc::CPUProc, to_proc::ROCArrayDeviceProc, x::Chunk{T}) where {T<:Function} =
+# Stateless kernel factories, like functions, are replicated code. Planning
+# can select a remote ROC processor before execution reaches that worker;
+# adapting a Kernel as ordinary data would activate its context locally.
+Dagger.move(from_proc::CPUProc, to_proc::ROCArrayDeviceProc, x::Union{Function,Dagger.Kernel}) = x
+Dagger.move(from_proc::CPUProc, to_proc::ROCArrayDeviceProc, x::Chunk{T}) where {T<:Union{Function,Dagger.Kernel}} =
     Dagger.move(from_proc, to_proc, fetch(x))
 
 # Task execution

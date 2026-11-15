@@ -1132,5 +1132,6 @@ end
 end
 
 if USE_ROCM
+    include(joinpath(@__DIR__, "array", "roc_kernel_move.jl"))
     include(joinpath(@__DIR__, "array", "roc_slots.jl"))
 end
