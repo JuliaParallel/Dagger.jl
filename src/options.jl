@@ -182,8 +182,7 @@ Returns a `Options` with default values filled in for a function call with
 signature `sig`, if the option was previously unspecified in `opts`.
 """
 function populate_defaults!(opts::Options, sig)
-    memo = SIGNATURE_DEFAULT_MEMO[]
-    memo_select!(memo, sig)
+    memo = memo_for(SIGNATURE_DEFAULT_MEMO[], sig)
     maybe_default!(opts, memo, 1, Val{:propagates}(), sig)
     maybe_default!(opts, memo, 2, Val{:processor}(), sig)
     maybe_default!(opts, memo, 3, Val{:compute_scope}(), sig)
@@ -258,7 +257,22 @@ function maybe_default!(opts::Options, memo::SignatureDefaultMemo, idx::Int, ::V
 end
 
 const SIGNATURE_DEFAULT_CACHE = TaskLocalValue{BasicLFUCache{Tuple{UInt,Symbol},Any}}(()->BasicLFUCache{Tuple{UInt,Symbol},Any}(256))
-const SIGNATURE_DEFAULT_MEMO = TaskLocalValue{SignatureDefaultMemo}(SignatureDefaultMemo)
+# Several memos per task, picked by the signature's hash: a task that places the tasks of a
+# Cholesky (potrf, trsm, syrk, gemm interleaved by their completions) sees a different signature
+# every few tasks, and a single memo was refilled from the LFU cache (up to 24 hashed lookups) each
+# time (10 us at 16 threads, 17 us at 64, against 2 us for a repeated signature). Two signatures
+# that share a slot still evict each other, exactly as before.
+const SIGNATURE_MEMO_SLOTS = 8
+struct SignatureDefaultMemos
+    slots::Vector{SignatureDefaultMemo}
+end
+SignatureDefaultMemos() = SignatureDefaultMemos([SignatureDefaultMemo() for _ in 1:SIGNATURE_MEMO_SLOTS])
+@inline function memo_for(memos::SignatureDefaultMemos, sig::Signature)
+    memo = @inbounds memos.slots[1 + Int(sig.hash_nokw % UInt(SIGNATURE_MEMO_SLOTS))]
+    memo_select!(memo, sig)
+    return memo
+end
+const SIGNATURE_DEFAULT_MEMO = TaskLocalValue{SignatureDefaultMemos}(SignatureDefaultMemos)
 
 # SchedulerOptions integration
 

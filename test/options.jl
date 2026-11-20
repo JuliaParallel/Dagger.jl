@@ -75,8 +75,14 @@ end
         # options the caller set are left alone, including ones whose default would differ
         @test Dagger.populate_defaults!(Dagger.Options(; meta=false), int_sig).meta === false
         # a memo hit gives exactly what the cache path gives
-        memo = Dagger.SIGNATURE_DEFAULT_MEMO[]
-        @test memo.valid && memo.hash == int_sig.hash_nokw || memo.hash == flt_sig.hash_nokw
+        memo = Dagger.memo_for(Dagger.SIGNATURE_DEFAULT_MEMO[], int_sig)
+        @test memo.valid && memo.hash == int_sig.hash_nokw
+        # signatures in different slots keep their memos while the others are in use
+        if int_sig.hash_nokw % UInt(Dagger.SIGNATURE_MEMO_SLOTS) != flt_sig.hash_nokw % UInt(Dagger.SIGNATURE_MEMO_SLOTS)
+            Dagger.populate_defaults!(Dagger.Options(), flt_sig)
+            memo = Dagger.memo_for(Dagger.SIGNATURE_DEFAULT_MEMO[], int_sig)
+            @test any(v -> v !== Dagger.DEFAULT_OPTION_UNFILLED, memo.vals)
+        end
         @test Dagger.cached_default_option(Val(:meta), int_sig) === true
     end)
 end
