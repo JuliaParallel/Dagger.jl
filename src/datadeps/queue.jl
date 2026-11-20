@@ -264,6 +264,17 @@ function written_positions(task_arg_ws, deps_vec)
     return something(writes, Int[])
 end
 
+# Per-section time of `distribute_task!` (ns), filled only when `HIER_TIMING` is on and printed by the sequential Phase 4 (MPI) after the region.
+# Diagnostic: written from the planning task only (concurrent partitions of the Distributed path would race on it, harmless for a printout).
+# 1 processor choice, 2 scope, 3 populate_task_info!, 4 history, 5 copy-to, 6 syncdeps, 7 build spec + enqueue, 8 reader/writer tracking
+const DD_SECTIONS = ("schedule", "scope", "populate", "history", "copy-to", "syncdeps", "spec+enqueue", "track")
+const DD_PT = zeros(Int, 8)
+const DD_TASKS = Ref(0)
+const DD_FLUSH_NS = Ref(0)     # final maybe_flush_batch! / close_submitter! of the sequential Phase 4 (close waits for the submitter to drain)
+const DD_CLOSE_NS = Ref(0)
+@inline dd_t0(timing::Bool) = timing ? time_ns() : UInt64(0)
+@inline dd_acc(timing::Bool, i::Int, t0::UInt64) = (timing && (@inbounds DD_PT[i] += Int(time_ns() - t0)); nothing)
+
 function distribute_task!(queue::DataDepsTaskQueue, state::DataDepsState, all_procs, all_scope, spec::DTaskSpec{typed}, task::DTask, fargs, proc_to_scope_lfu, write_num::Int; ownership=nothing) where typed
     @specialize spec fargs
 
@@ -274,6 +285,9 @@ function distribute_task!(queue::DataDepsTaskQueue, state::DataDepsState, all_pr
     end
 
     DATADEPS_CURRENT_TASK[] = task
+    timing = HIER_TIMING[]
+    timing && (DD_TASKS[] += 1)
+    tm = dd_t0(timing)
 
     task_scope = @something(spec.options.compute_scope, spec.options.scope, DefaultScope())
     scheduler = queue.scheduler
@@ -282,6 +296,7 @@ function distribute_task!(queue::DataDepsTaskQueue, state::DataDepsState, all_pr
     our_space = only(memory_spaces(our_proc))
     @check_uniform(our_proc)
     @check_uniform(our_space)
+    dd_acc(timing, 1, tm); tm = dd_t0(timing)
 
     # Query once per task: this is also used for tags and occupancy below.
     uniform = uniform_execution()
@@ -318,6 +333,7 @@ function distribute_task!(queue::DataDepsTaskQueue, state::DataDepsState, all_pr
         throw(Sch.SchedulingException("Scopes are not compatible: $(our_scope.x), $(our_scope.y)"))
     end
 
+    dd_acc(timing, 2, tm); tm = dd_t0(timing)
     tid = task.uid
     # N.B. `with_value` returns a fresh argument rather than mutating; this is
     # required for typed specs, whose `TypedArgument`s disallow `setproperty!`.
@@ -330,6 +346,7 @@ function distribute_task!(queue::DataDepsTaskQueue, state::DataDepsState, all_pr
     # position 1.
     task_arg_ws = populate_task_info!(state, f, spec.fargs, spec, task)
     deps_vec = state.scratch_deps
+    dd_acc(timing, 3, tm); tm = dd_t0(timing)
 
     # Truncate the history for each argument
     for arg_ws in task_arg_ws
@@ -338,6 +355,7 @@ function distribute_task!(queue::DataDepsTaskQueue, state::DataDepsState, all_pr
         end
     end
 
+    dd_acc(timing, 4, tm); tm = dd_t0(timing)
     # Hierarchical scheduling only: for shared backing chunks whose current
     # version was produced by another partition, seed this partition's state so
     # the copy-to below pulls a fresh whole-chunk copy from the true owner (and
@@ -387,6 +405,7 @@ function distribute_task!(queue::DataDepsTaskQueue, state::DataDepsState, all_pr
         remote_args[idx] = arg_remote
     end
     write_num += 1
+    dd_acc(timing, 5, tm); tm = dd_t0(timing)
 
     # Validate that we're not accidentally performing a copy
     for (idx, arg_ws) in enumerate(task_arg_ws)
@@ -428,6 +447,7 @@ function distribute_task!(queue::DataDepsTaskQueue, state::DataDepsState, all_pr
         end
     end
     @dagdebug tid :spawn_datadeps "($(repr(value(f)))) Task has $(length(syncdeps)) syncdeps"
+    dd_acc(timing, 6, tm); tm = dd_t0(timing)
 
     # Launch user's task
     # N.B. Always as an untyped Vector{Argument} spec: the task's return type
@@ -461,6 +481,7 @@ function distribute_task!(queue::DataDepsTaskQueue, state::DataDepsState, all_pr
         end
     end
 
+    dd_acc(timing, 7, tm); tm = dd_t0(timing)
     # Update read/write tracking for arguments
     for (idx, arg_ws) in enumerate(task_arg_ws)
         (arg_ws.may_alias && arg_ws.inplace_move) || continue
@@ -486,6 +507,7 @@ function distribute_task!(queue::DataDepsTaskQueue, state::DataDepsState, all_pr
     end
 
     write_num += 1
+    dd_acc(timing, 8, tm)
 
     DATADEPS_CURRENT_TASK[] = nothing
 
