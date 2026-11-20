@@ -1,7 +1,7 @@
 using Test
 import Dagger: ReusableLinkedList, ReusableDict, ReusableCache
 import Dagger: take_or_alloc!, maybe_take_or_alloc!, maybetake!, putback!
-import Dagger: @reusable_vector, @reusable_dict
+import Dagger: @reusable, @reusable_vector, @reusable_dict
 
 include("reuse-task-cache.jl")
 
@@ -1205,4 +1205,19 @@ end
         @test empty!(current) === current
         @test isempty(current.cache) && isempty(current.freq)
     end
+end
+
+# The task-local cache global is non-const, so without a type assertion in the macro every
+# variable it binds (and all code computed from it) infers as `Any`.
+reuse_test_bound(n) = @reusable :test_reusable_bound Vector{Int} 0 4 n P begin
+    resize!(P, n)
+    length(P)
+end
+reuse_test_bound_vec(n) = @reusable :test_reusable_bound_vec Vector{Int} 0 4 n P begin
+    resize!(P, n)
+    P
+end
+@testset "@reusable binds a concretely typed variable" begin
+    @test (@inferred reuse_test_bound(3)) == 3
+    @test (@inferred reuse_test_bound_vec(3)) isa Vector{Int}
 end
