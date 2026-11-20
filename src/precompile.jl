@@ -9,6 +9,17 @@
     t2 = spawn(+, 1, t1)
     fetch(t2)
 
+    # A small Datadeps region over chunks (the dependencies come from In/InOut/Out): the first region of a
+    # process otherwise compiles the planner, the aliasing analysis and the copy tasks, seconds on a laptop
+    c1 = tochunk(zeros(4, 4))
+    c2 = tochunk(zeros(4, 4))
+    spawn_datadeps() do
+        spawn(copyto!, InOut(c1), In(c2))
+        spawn(copyto!, InOut(c2), In(c1))
+    end
+    fetch(c1); fetch(c2)
+    c1 = nothing; c2 = nothing
+
     # Clean up refs
     t1 = nothing; t2 = nothing
     state = Sch.EAGER_STATE[]
