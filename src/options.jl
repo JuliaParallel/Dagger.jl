@@ -182,50 +182,83 @@ Returns a `Options` with default values filled in for a function call with
 signature `sig`, if the option was previously unspecified in `opts`.
 """
 function populate_defaults!(opts::Options, sig)
-    maybe_default!(opts, Val{:propagates}(), sig)
-    maybe_default!(opts, Val{:processor}(), sig)
-    maybe_default!(opts, Val{:compute_scope}(), sig)
-    maybe_default!(opts, Val{:result_scope}(), sig)
-    maybe_default!(opts, Val{:exec_scope}(), sig)
-    maybe_default!(opts, Val{:single}(), sig)
-    maybe_default!(opts, Val{:proclist}(), sig)
-    maybe_default!(opts, Val{:get_result}(), sig)
-    maybe_default!(opts, Val{:meta}(), sig)
-    maybe_default!(opts, Val{:syncdeps}(), sig)
-    maybe_default!(opts, Val{:time_util}(), sig)
-    maybe_default!(opts, Val{:alloc_util}(), sig)
-    maybe_default!(opts, Val{:occupancy}(), sig)
-    maybe_default!(opts, Val{:checkpoint}(), sig)
-    maybe_default!(opts, Val{:restore}(), sig)
-    maybe_default!(opts, Val{:storage}(), sig)
-    maybe_default!(opts, Val{:storage_root_tag}(), sig)
-    maybe_default!(opts, Val{:storage_leaf_tag}(), sig)
-    maybe_default!(opts, Val{:storage_retain}(), sig)
-    maybe_default!(opts, Val{:name}(), sig)
-    maybe_default!(opts, Val{:stream_input_buffer_amount}(), sig)
-    maybe_default!(opts, Val{:stream_output_buffer_amount}(), sig)
-    maybe_default!(opts, Val{:stream_buffer_type}(), sig)
-    maybe_default!(opts, Val{:stream_max_evals}(), sig)
+    memo = SIGNATURE_DEFAULT_MEMO[]
+    memo_select!(memo, sig)
+    maybe_default!(opts, memo, 1, Val{:propagates}(), sig)
+    maybe_default!(opts, memo, 2, Val{:processor}(), sig)
+    maybe_default!(opts, memo, 3, Val{:compute_scope}(), sig)
+    maybe_default!(opts, memo, 4, Val{:result_scope}(), sig)
+    maybe_default!(opts, memo, 5, Val{:exec_scope}(), sig)
+    maybe_default!(opts, memo, 6, Val{:single}(), sig)
+    maybe_default!(opts, memo, 7, Val{:proclist}(), sig)
+    maybe_default!(opts, memo, 8, Val{:get_result}(), sig)
+    maybe_default!(opts, memo, 9, Val{:meta}(), sig)
+    maybe_default!(opts, memo, 10, Val{:syncdeps}(), sig)
+    maybe_default!(opts, memo, 11, Val{:time_util}(), sig)
+    maybe_default!(opts, memo, 12, Val{:alloc_util}(), sig)
+    maybe_default!(opts, memo, 13, Val{:occupancy}(), sig)
+    maybe_default!(opts, memo, 14, Val{:checkpoint}(), sig)
+    maybe_default!(opts, memo, 15, Val{:restore}(), sig)
+    maybe_default!(opts, memo, 16, Val{:storage}(), sig)
+    maybe_default!(opts, memo, 17, Val{:storage_root_tag}(), sig)
+    maybe_default!(opts, memo, 18, Val{:storage_leaf_tag}(), sig)
+    maybe_default!(opts, memo, 19, Val{:storage_retain}(), sig)
+    maybe_default!(opts, memo, 20, Val{:name}(), sig)
+    maybe_default!(opts, memo, 21, Val{:stream_input_buffer_amount}(), sig)
+    maybe_default!(opts, memo, 22, Val{:stream_output_buffer_amount}(), sig)
+    maybe_default!(opts, memo, 23, Val{:stream_buffer_type}(), sig)
+    maybe_default!(opts, memo, 24, Val{:stream_max_evals}(), sig)
     return opts
 end
-function maybe_default!(opts::Options, ::Val{opt}, sig::Signature) where opt
-    if getfield(opts, opt) === nothing
-        default_opt = get!(SIGNATURE_DEFAULT_CACHE[], (sig.hash_nokw, opt)) do
-            # Julia can splat a Vector{Any} directly, whereas splatting its
-            # view boxes the view and allocates an iteration pair per type.
-            # Most calls have no kwargs: use the original vector in that case.
-            # Keep the kwarg view, without adding a copy on cache hits.
-            if length(sig.sig_nokw) == length(sig.sig)
-                Dagger.default_option(Val{opt}(), sig.sig...)
-            else
-                Dagger.default_option(Val{opt}(), sig.sig_nokw...)
-            end
+function cached_default_option(::Val{opt}, sig::Signature) where opt
+    default_opt = get!(SIGNATURE_DEFAULT_CACHE[], (sig.hash_nokw, opt)) do
+        # Julia can splat a Vector{Any} directly, whereas splatting its
+        # view boxes the view and allocates an iteration pair per type.
+        # Most calls have no kwargs: use the original vector in that case.
+        # Keep the kwarg view, without adding a copy on cache hits.
+        if length(sig.sig_nokw) == length(sig.sig)
+            Dagger.default_option(Val{opt}(), sig.sig...)
+        else
+            Dagger.default_option(Val{opt}(), sig.sig_nokw...)
         end
-        setfield!(opts, opt, default_opt)
     end
+    return default_opt
+end
+
+# One signature's option defaults, kept in a vector. Filling a task's options used to hash a
+# `(signature, option)` tuple into the LFU cache once per unset option (up to 24 times per task);
+# consecutive tasks mostly share a signature, so the common case is now an array read. A slot is
+# filled on first use from the LFU cache (`cached_default_option`, which stays the source of
+# truth and keeps its eviction behaviour), never from a fresh `default_option` call.
+const DEFAULT_OPTION_UNFILLED = Ref{Nothing}(nothing)   # sentinel, compared by identity
+mutable struct SignatureDefaultMemo
+    hash::UInt
+    valid::Bool
+    const vals::Vector{Any}
+end
+SignatureDefaultMemo() = SignatureDefaultMemo(UInt(0), false, fill!(Vector{Any}(undef, 24), DEFAULT_OPTION_UNFILLED))
+function memo_select!(memo::SignatureDefaultMemo, sig::Signature)
+    if !memo.valid || memo.hash != sig.hash_nokw
+        fill!(memo.vals, DEFAULT_OPTION_UNFILLED)
+        memo.hash = sig.hash_nokw
+        memo.valid = true
+    end
+    return
+end
+function maybe_default!(opts::Options, memo::SignatureDefaultMemo, idx::Int, ::Val{opt}, sig::Signature) where opt
+    if getfield(opts, opt) === nothing
+        v = @inbounds memo.vals[idx]
+        if v === DEFAULT_OPTION_UNFILLED
+            v = cached_default_option(Val{opt}(), sig)
+            @inbounds memo.vals[idx] = v
+        end
+        setfield!(opts, opt, v)
+    end
+    return
 end
 
 const SIGNATURE_DEFAULT_CACHE = TaskLocalValue{BasicLFUCache{Tuple{UInt,Symbol},Any}}(()->BasicLFUCache{Tuple{UInt,Symbol},Any}(256))
+const SIGNATURE_DEFAULT_MEMO = TaskLocalValue{SignatureDefaultMemo}(SignatureDefaultMemo)
 
 # SchedulerOptions integration
 
