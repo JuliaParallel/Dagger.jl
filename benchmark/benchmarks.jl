@@ -53,6 +53,10 @@
 #                  cholesky, lu, qr, svd, solve)
 #     - "sparse" : sparse distributed linear algebra (spmv, spgemm, and
 #                  iterative Krylov solve)
+#     - "tasks"  : runtime task-graph overhead (CPU only): pinned/unscoped
+#                  spawns, cross-owner dependent hops, fan-in trees and a
+#                  multi-phase exchange step with microsecond task bodies.
+#                  Opt-in (not in the default set); see BENCHMARK_NTASKS.
 #     - "dtable" : DTables data operations (legacy; opt-in, see below)
 #   Available methods: "raw" (non-Dagger), "dagger" (Dagger).
 #   Available accelerations: "cuda", "amdgpu", "oneapi", "metal", "opencl" (require the relevant packages,
@@ -98,6 +102,8 @@
 #   on every rank, instead of `worker.jl`'s incremental per-benchmark
 #   request/response protocol -- see `run_all_mpi` vs `run_all_external`).
 #   Defaults to "0" (disabled; plain subprocess, worker.jl).
+# - BENCHMARK_NTASKS: Task count of the flat benchmarks in the "tasks" suite.
+#   Defaults to "256".
 # - BENCHMARK_SECONDS: Time budget (seconds) per benchmark. Defaults to "30".
 # - BENCHMARK_SAMPLES: Max samples per benchmark. Defaults to "7".
 # - BENCHMARK_PROC_TIMEOUT: Wall-clock seconds to wait for a single benchmark
