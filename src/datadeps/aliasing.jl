@@ -635,6 +635,10 @@ function set_key_stored!(accel::DistributedAcceleration, cache::AliasedObjectCac
 end
 
 function aliased_object!(f, cache::AliasedObjectCache, x; ainfo=aliasing(cache.accel, x, identity))
+    # `NoAliasing` has no identity: every such value would share one cache key,
+    # so the second distinct argument would be handed the first one's slot.
+    # There is no aliasing to preserve, so each value gets its own copy.
+    (ainfo isa NoAliasing || (ainfo isa AliasingWrapper && ainfo.inner isa NoAliasing)) && return f(x)::Chunk
     x_space = memory_space(x)
     if !is_key_present(cache, x_space, ainfo)
         # Preserve the object's memory-space/processor pairing when inserting
