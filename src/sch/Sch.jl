@@ -121,8 +121,24 @@ function invalidate_compat_procs_cache!()
     @safe_lock_spin1 COMPAT_PROCS_CACHE cache empty!(cache)
     return
 end
+# Cache key of a scope. `objectid` of a union scope hashes every member (one `ExactScope` per
+# thread for the scopes Datadeps hands out), O(threads) work per task: 40 us at 64 threads.
+# A large union is keyed by its length and its first and last member instead: still a function of
+# the *contents*, so the equal union a later Datadeps region builds finds the entry of the earlier
+# one (a key by address does not: every region would add 64 never-hit entries, and once the
+# frequency-ordered cache is full the new, frequency-1 keys are evicted at once, so every task of
+# the region misses). The hit test `entry.scope === scope` compares the members, and a collision
+# of two different unions only replaces the entry. A small union, or any other scope, keeps `objectid`.
+const SCOPE_KEY_UNION_MIN = 8
+scope_key(scope) = objectid(scope)
+function scope_key(scope::Dagger.UnionScope)
+    scopes = scope.scopes
+    n = length(scopes)
+    n > SCOPE_KEY_UNION_MIN || return objectid(scope)
+    return hash(n, hash(objectid(@inbounds(scopes[1])), UInt(objectid(@inbounds(scopes[n])))))
+end
 function compat_entry(accel, scope, procs::Vector{<:Processor})
-    key = (objectid(accel), objectid(scope))
+    key = (objectid(accel), scope_key(scope))
     cached = @safe_lock_spin1 COMPAT_PROCS_CACHE cache begin
         entry = get(cache.cache, key, nothing)
         if entry !== nothing && entry.scope === scope && entry.procs == procs
