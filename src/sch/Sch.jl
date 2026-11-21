@@ -500,29 +500,32 @@ function scheduler_init(ctx, state::ComputeState, d::Thunk, options::SchedulerOp
     end
 end
 
-"""
-    handle_result!(ctx, state, pid, proc, thunk_id, res, metadata)
+function update_cost_model!(state, pid, proc, sig, metadata)
+    lock(state.signature_time_cost) do stc
+        stc[sig] = (metadata.threadtime + get(stc, sig, 0)) ÷ 2
+    end
+    lock(state.signature_alloc_cost) do sac
+        sac[sig] = (metadata.gc_allocd + get(sac, sig, 0)) ÷ 2
+    end
+    if metadata.transfer_rate !== nothing
+        lock(state.worker_transfer_rate) do wtr
+            old_rate = get(get(wtr, pid, Dict{Processor,UInt64}()), proc, UInt64(0))
+            proc_map = get!(wtr, pid) do; Dict{Processor,UInt64}(); end
+            proc_map[proc] = old_rate == 0 ? metadata.transfer_rate :
+                                             (old_rate + metadata.transfer_rate) ÷ 2
+        end
+    end
+    return
+end
 
-Handle one completed task end-to-end: release its reserved pressure, fold its
-cost-model metadata back in, store its result (single-finisher CAS), run its
-checkpoint, finish it (`finish_task!`), and schedule any newly-ready dependents
-**outside** `state.lock` (via `schedule_ready!`).
 
-This is the runner-callable finish entry point. It is invoked both:
-- from `scheduler_run` for results that travel over `state.chan` (cross-worker
-  results, cancellation signals), and
-- directly on the producing worker thread for in-process results (the local
-  fast-path in `DoTaskSpec`), so N worker threads can finish N tasks
-  concurrently.
-
-The only serialized region is the brief `state.lock` critical section; the
-dependent placement runs lock-free and in parallel. `ProcessExitedException`
-(worker death) is *not* handled here — it arrives only over the channel and is
-handled by `scheduler_run`.
-"""
-function handle_result!(ctx, state::ComputeState, pid, proc, thunk_id, res, metadata)
-    ready = Thunk[]
-    proceed = lock(state.lock) do
+# The `state.lock` critical section of `handle_result!`. Returns `nothing` when
+# the result was dropped (untracked task, lost single-finisher CAS), else the
+# task's signature (`missing` without metadata) for the cost-model update.
+# A function, not a `do` block, so nothing is captured and boxed.
+function finish_result_locked!(ctx, state::ComputeState, thunk_id, res, metadata, ready::Vector{Thunk})
+    lock(state.lock)
+    try
         thunk_failed = false
         if res isa Exception
             # A non-fault task error. In allow-errors mode we propagate it to the
@@ -547,58 +550,18 @@ function handle_result!(ctx, state::ComputeState, pid, proc, thunk_id, res, meta
             #      Thunk was GC'd, and the result arrived just after.
             # Ignore it rather than crashing the scheduler.
             @dagdebug thunk_id :take "Ignoring result for untracked or GC'd task"
-            return false
+            return nothing
         end
-        # Release the reserved pressure via the captured counter ref
-        # (capture-the-ref invariant: same Atomic object as was atomic_add!'d
-        # at schedule time, stable even if the worker was removed between
-        # reserve and release).
-        entry = lock(state.running_pressure_refs) do rpr
-            pop!(rpr, thunk_id, nothing)
-        end
-        if entry !== nothing
-            counter_ref, est = entry
-            Threads.atomic_sub!(counter_ref, est)
-        end
-        if metadata !== nothing
-            #to_storage = fetch(node.options.storage)
-            #state.worker_storage_pressure[pid][to_storage] = metadata.storage_pressure
-            #state.worker_storage_capacity[pid][to_storage] = metadata.storage_capacity
-            #state.worker_loadavg[pid] = metadata.loadavg
-            sig = signature(state, node)
-            lock(state.signature_time_cost) do stc
-                stc[sig] = (metadata.threadtime + get(stc, sig, 0)) ÷ 2
-            end
-            lock(state.signature_alloc_cost) do sac
-                sac[sig] = (metadata.gc_allocd + get(sac, sig, 0)) ÷ 2
-            end
-            if metadata.transfer_rate !== nothing
-                lock(state.worker_transfer_rate) do wtr
-                    old_rate = get(get(wtr, pid, Dict{Processor,UInt64}()), proc, UInt64(0))
-                    proc_map = get!(wtr, pid) do; Dict{Processor,UInt64}(); end
-                    proc_map[proc] = old_rate == 0 ? metadata.transfer_rate :
-                                                     (old_rate + metadata.transfer_rate) ÷ 2
-                end
-            end
-        end
-        if res isa Chunk && res.handle isa DRef
-            lock(state.equiv_chunks) do ec
-                existing = get(ec, res.handle, nothing)
-                if existing === nothing || existing.value === nothing
-                    # N.B. The value is a WeakRef: a strong Chunk value would
-                    # root its own key (chunk.handle === key), making the
-                    # WeakKeyDict entry — and the result data behind the DRef —
-                    # immortal
-                    ec[res.handle] = WeakRef(res)
-                end
-            end
-        end
+        # The signature is memoized on the node, which is recycled by
+        # `finish_task!` below: read it now, fold it into the cost model after
+        # unlocking.
+        sig = metadata !== nothing ? signature(state, node) : missing
         won = store_result!(state, node, res; error=thunk_failed)
         if !won
             # The single-finisher CAS lost: another path (cancellation,
             # fault recovery) already stored a result. Discard this one.
             @dagdebug thunk_id :take "Ignoring duplicate result for already-finished task"
-            return false
+            return nothing
         end
         if node.options !== nothing && node.options.checkpoint !== nothing
             try
@@ -611,9 +574,67 @@ function handle_result!(ctx, state::ComputeState, pid, proc, thunk_id, res, meta
         @logstart ctx LogFinish LogFinishId(state.uid, thunk_id) (;thunk_id, result=res)
         finish_task!(ctx, state, node, thunk_failed, ready)
         @logfinish ctx LogFinish LogFinishId(state.uid, thunk_id) (;thunk_id, result=res)
-        return true
+        return sig
+    finally
+        unlock(state.lock)
     end
-    proceed || return
+end
+
+"""
+    handle_result!(ctx, state, pid, proc, thunk_id, res, metadata)
+
+Handle one completed task end-to-end: release its reserved pressure, fold its
+cost-model metadata back in, store its result (single-finisher CAS), run its
+checkpoint, finish it (`finish_task!`), and schedule any newly-ready dependents
+**outside** `state.lock` (via `schedule_ready!`).
+
+This is the runner-callable finish entry point. It is invoked both:
+- from `scheduler_run` for results that travel over `state.chan` (cross-worker
+  results, cancellation signals), and
+- directly on the producing worker thread for in-process results (the local
+  fast-path in `DoTaskSpec`), so N worker threads can finish N tasks
+  concurrently.
+
+The only serialized region is the brief `state.lock` critical section; the
+dependent placement runs lock-free and in parallel. `ProcessExitedException`
+(worker death) is *not* handled here — it arrives only over the channel and is
+handled by `scheduler_run`.
+"""
+function handle_result!(ctx, state::ComputeState, pid, proc, thunk_id, res, metadata)
+    ready = Thunk[]
+    # Work that touches only its own locked maps (not task state) runs before
+    # `state.lock` is taken, so it neither lengthens the critical section nor
+    # waits behind other finishers.
+    #
+    # Release the reserved pressure via the captured counter ref
+    # (capture-the-ref invariant: same Atomic object as was atomic_add!'d
+    # at schedule time, stable even if the worker was removed between
+    # reserve and release). `pop!` makes a double release (cancellation
+    # also releases) harmless.
+    entry = lock(state.running_pressure_refs) do rpr
+        pop!(rpr, thunk_id, nothing)
+    end
+    if entry !== nothing
+        counter_ref, est = entry
+        Threads.atomic_sub!(counter_ref, est)
+    end
+    if res isa Chunk && res.handle isa DRef
+        lock(state.equiv_chunks) do ec
+            existing = get(ec, res.handle, nothing)
+            if existing === nothing || existing.value === nothing
+                # N.B. The value is a WeakRef: a strong Chunk value would
+                # root its own key (chunk.handle === key), making the
+                # WeakKeyDict entry — and the result data behind the DRef —
+                # immortal
+                ec[res.handle] = WeakRef(res)
+            end
+        end
+    end
+    sig = finish_result_locked!(ctx, state, thunk_id, res, metadata, ready)
+    sig === nothing && return
+    # Cost-model feedback, before the dependents are placed (they may share
+    # the signature). Own locks only.
+    sig === missing || update_cost_model!(state, pid, proc, sig, metadata)
 
     # Schedule newly-ready dependents with NO state.lock held — concurrent
     # finishers place their freed dependents in parallel.
