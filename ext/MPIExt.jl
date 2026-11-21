@@ -705,6 +705,14 @@ partition_affinity_id(proc::MPIProcessor) = proc.rank
 partition_affinity_id(proc::MPIOSProc) = proc.rank
 
 function processors(memSpace::MPIMemorySpace)
+    # The sorted list of a space never changes (processors are fixed once the
+    # acceleration is up), and building it sorts by `short_name` strings: 1.2 us
+    # and 63 allocations per call at 4 threads, 23 us and 1086 at 16 (laptop), on
+    # paths that run several times per task (`first(processors(space))` in
+    # planning, copies and frees). So it is built once per space; each call gets
+    # a copy, because callers may modify what they receive.
+    cached = get((@atomic MPI_SPACE_PROCS.table), memSpace, nothing)
+    cached === nothing || return copy(cached::Vector{Processor})
     rawProc = Processor[]
     for innerProc in processors(memSpace.innerSpace)
         push!(rawProc, MPIProcessor(innerProc, memSpace.comm, memSpace.rank))
@@ -718,8 +726,19 @@ function processors(memSpace::MPIMemorySpace)
     # rank-uniform identity (`short_name` of the inner processor) used by
     # `check_uniform`.
     sort!(rawProc; by=p->short_name(p.innerProc))
-    return rawProc
+    lock(MPI_SPACE_PROCS_LOCK) do
+        table = copy(@atomic MPI_SPACE_PROCS.table)
+        table[memSpace] = rawProc
+        @atomic MPI_SPACE_PROCS.table = table
+    end
+    return copy(rawProc)
 end
+# Read without a lock: the table is replaced as a whole
+mutable struct MPISpaceProcsCache
+    @atomic table::Dict{MPIMemorySpace,Vector{Processor}}
+end
+const MPI_SPACE_PROCS = MPISpaceProcsCache(Dict{MPIMemorySpace,Vector{Processor}}())
+const MPI_SPACE_PROCS_LOCK = ReentrantLock()
 
 struct MPIRefID
     tid::UInt32
