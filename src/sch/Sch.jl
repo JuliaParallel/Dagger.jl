@@ -1612,8 +1612,14 @@ struct ProcessorStateDict
     # (without incrementing proc_occupancy) if the ID is present.
     pre_cancelled::Set{Int}
     pre_cancelled_lock::ReentrantLock
+    # Number of tasks waiting in the processor queues of this scheduler (incremented
+    # after a push, decremented after every removal, all under the queue's lock). A
+    # runner with nothing of its own skips the steal scan while it is zero: the scan
+    # locks every other queue, O(threads) per idle wake-up.
+    queued::Threads.Atomic{Int}
     ProcessorStateDict() = new(MemPool.ReadWriteLock(), Dict{Processor,ProcessorState}(),
-                               Threads.Atomic{Int}(0), Set{Int}(), ReentrantLock())
+                               Threads.Atomic{Int}(0), Set{Int}(), ReentrantLock(),
+                               Threads.Atomic{Int}(0))
 end
 const PROCESSOR_TASK_STATE = Dict{UInt64,ProcessorStateDict}()
 
@@ -1702,6 +1708,22 @@ stealing_permitted(proc::Dagger.ThreadProc) = proc.owner != 1 || proc.tid != 1
 proc_has_occupancy(proc_occupancy, task_occupancy) =
     UInt64(task_occupancy) + UInt64(proc_occupancy) <= typemax(UInt32)
 
+# The head of `queue` if `to_proc` may run it and has room for it; the caller holds the lock
+function steal_from_queue!(queue, to_proc, proc_occupancy_cached, queued_counter)
+    length(queue) == 0 && return nothing
+    task, occupancy = first(queue)
+    scope = task.scope::Dagger.AbstractScope
+    accel = something((task.options::Options).acceleration, Dagger.DistributedAcceleration())
+    if Dagger.proc_in_scope(to_proc, scope) && Dagger.accel_matches_proc(accel, to_proc) &&
+       typemax(UInt32) - proc_occupancy_cached >= occupancy
+        # Compatible, steal this task
+        result = popfirst!(queue)
+        Threads.atomic_sub!(queued_counter, 1)
+        return result
+    end
+    return nothing
+end
+
 function start_processor_runner!(istate::ProcessorInternalState, uid::UInt64, return_queue::RemoteChannel, start_event::Base.Event)
     to_proc = istate.proc
     proc_run_task = @task begin
@@ -1711,6 +1733,7 @@ function start_processor_runner!(istate::ProcessorInternalState, uid::UInt64, re
         tasks = istate.tasks
         proc_occupancy = istate.proc_occupancy
         time_pressure = istate.time_pressure
+        queued_counter = proc_states(uid).queued
 
         wid = root_worker_id(to_proc)
         work_to_do = false
@@ -1754,6 +1777,7 @@ function start_processor_runner!(istate::ProcessorInternalState, uid::UInt64, re
                     return (nothing, false)
                 end
                 queue_result = popfirst!(queue)
+                Threads.atomic_sub!(queued_counter, 1)
                 return (queue_result, length(queue) > 0)
             end
             if task_and_occupancy === nothing
@@ -1778,9 +1802,24 @@ function start_processor_runner!(istate::ProcessorInternalState, uid::UInt64, re
                 # from a random start over a version-cached snapshot: fair
                 # enough, and allocation-free per attempt)
                 # TODO: Prioritize stealing from busiest processors
+                # Nothing queued anywhere: no victim can have work, skip the scan
+                # (it locks every other queue)
+                if queued_counter[] == 0
+                    @maybelog ctx timespan_finish(ctx, :proc_steal_local, (;uid, worker=wid, processor=to_proc), nothing)
+                    continue
+                end
                 states_vec = states_snapshot!(STATES_CACHE_TLV[], proc_states(uid))
                 nstates = length(states_vec)
                 start_idx = nstates <= 1 ? 1 : rand(1:nstates)
+                # Our own occupancy, read once per scan rather than once per victim
+                # FIXME: We need to lock two queues to compare occupancies
+                lock(istate.queue)
+                proc_occupancy_cached = try
+                    proc_occupancy[]
+                finally
+                    unlock(istate.queue)
+                end
+                task_and_occupancy = nothing
                 for state_offset in 0:(nstates-1)
                     state_idx = start_idx + state_offset
                     state_idx > nstates && (state_idx -= nstates)
@@ -1789,27 +1828,16 @@ function start_processor_runner!(istate::ProcessorInternalState, uid::UInt64, re
                     if other_istate.proc === to_proc
                         continue
                     end
-                    # FIXME: We need to lock two queues to compare occupancies
-                    proc_occupancy_cached = lock(istate.queue) do _
-                        proc_occupancy[]
-                    end
-                    task_and_occupancy = lock(other_istate.queue) do queue
-                        if length(queue) == 0
-                            return nothing
-                        end
-                        task, occupancy = first(queue)
-                        scope = task.scope::Dagger.AbstractScope
-                        accel = something((task.options::Options).acceleration, Dagger.DistributedAcceleration())
-                        if Dagger.proc_in_scope(to_proc, scope) && Dagger.accel_matches_proc(accel, to_proc) &&
-                           typemax(UInt32) - proc_occupancy_cached >= occupancy
-                            # Compatible, steal this task
-                            return popfirst!(queue)
-                        end
-                        return nothing
+                    # N.B. Explicit lock/unlock: a `do` closure per victim allocated
+                    lock(other_istate.queue)
+                    task_and_occupancy = try
+                        steal_from_queue!(Dagger.payload(other_istate.queue), to_proc, proc_occupancy_cached, queued_counter)
+                    finally
+                        unlock(other_istate.queue)
                     end
                     if task_and_occupancy !== nothing
                         from_proc = other_istate.proc
-                        thunk_id = task.thunk_id
+                        thunk_id = first(task_and_occupancy).thunk_id
                         @dagdebug thunk_id :processor "Stolen from $from_proc by $to_proc"
                         @maybelog ctx timespan_finish(ctx, :proc_steal_local, (;uid, worker=wid, processor=to_proc), (;from_proc, thunk_id))
                         # TODO: Keep stealing until we hit full occupancy?
@@ -2061,6 +2089,7 @@ function do_tasks(to_proc, return_queue, tasks)
     ctx_vars = first(tasks).ctx_vars::NamedTuple
     ctx = Dagger.log_context(ctx_vars.log_sink, ctx_vars.profile)
     uid = first(tasks).sch_uid
+    queued_counter = proc_states(uid).queued
     start_event = nothing
     state = proc_state!(uid, to_proc) do
         # Initialize the processor state and runner
@@ -2128,6 +2157,7 @@ function do_tasks(to_proc, return_queue, tasks)
             end
             should_launch || continue
             push!(queue, task => occupancy)
+            Threads.atomic_add!(queued_counter, 1)
             @logfinish ctx LogEnqueue LogEnqueueId(uid, to_proc, thunk_id) nothing
             @dagdebug thunk_id :processor "Enqueued task"
         end

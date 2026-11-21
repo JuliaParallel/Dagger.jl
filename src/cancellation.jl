@@ -269,6 +269,7 @@ function _cancel!(state, tid, force, graceful, halt_sch)
                             any_cancelled = true
                             push!(istate.cancelled, tid_q)
                             delete!(raw_queue, task_spec)
+                            Threads.atomic_sub!(states.queued, 1)
                             # Clean up TASKS_RUNNING so re-submission works if needed
                             lock(Dagger.Sch.TASK_SYNC) do
                                 pop!(Dagger.Sch.TASKS_RUNNING, tid_q, nothing)
