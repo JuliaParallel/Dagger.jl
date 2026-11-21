@@ -784,6 +784,39 @@ function fill_costs!(cost_vec, procs, wtr, pressures, tx_costs, est_time_util, h
     return all_equal
 end
 
+# How many of the cheapest candidates `order_candidates!` ranks exactly.
+const PLACEMENT_SELECT = 4
+
+# The scheduler tries candidates in order and nearly always takes the first, so a
+# full shuffle plus a full sort (O(np log np) per task, growing with the thread
+# count) is more than it needs. Rotate by a random offset (fair for equal costs)
+# and select only the cheapest few into the front; the tail keeps rotation order,
+# and the first minimum in rotation order wins ties, so ties stay random.
+# N.B. A plain function: inside the `@reusable` block `best`/`bc` were captured
+# and reassigned, i.e. boxed, and every comparison became a dynamic dispatch.
+function order_candidates!(P::Vector{Int}, cost_vec::Vector{Float64}, all_equal::Bool)
+    np = length(P)
+    off = rand(1:np)
+    @inbounds for idx in 1:np
+        k = off + idx
+        P[idx] = k > np ? k - np : k
+    end
+    all_equal && return
+    @inbounds for j in 1:min(np - 1, PLACEMENT_SELECT)
+        best = j
+        bc = cost_vec[P[j]]
+        for k in (j+1):np
+            ck = cost_vec[P[k]]
+            if ck < bc
+                best = k
+                bc = ck
+            end
+        end
+        P[j], P[best] = P[best], P[j]
+    end
+    return
+end
+
 """
     estimate_task_costs!(sorted_procs, costs, state, procs, task; sig=nothing)
 
@@ -880,9 +913,13 @@ candidate lookups cost about 130 us for 16 threads and grew with the thread coun
     # but-fair order that sorting would leave us with anyway.
     @reusable :estimate_task_costs_P Vector{Int} 0 4 np P begin
         resize!(P, np)
-        copyto!(P, 1:np)
-        randperm!(P)
-        all_equal || sort!(P, by=i->@inbounds(cost_vec[i]))
+        if costs === nothing
+            order_candidates!(P, cost_vec, all_equal)
+        else
+            copyto!(P, 1:np)
+            randperm!(P)
+            all_equal || sort!(P, by=i->@inbounds(cost_vec[i]))
+        end
         for idx in 1:np
             @inbounds sorted_procs[idx] = procs[P[idx]]
         end
