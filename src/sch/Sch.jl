@@ -1651,6 +1651,9 @@ mutable struct ProcessorInternalState
     # Free-list of reset `TaskSpec`s (with their `data` vectors and `Argument`
     # cells) for reuse by `fire_tasks!`. Guarded by `queue`'s lock.
     spec_pool::Vector{TaskSpec}
+    # True from the moment the runner starts looking for work until it takes a task: `do_tasks` wakes
+    # only runners that are parked, because one that is not will look at the queues again by itself
+    parked::Threads.Atomic{Bool}
 end
 struct ProcessorState
     state::ProcessorInternalState
@@ -1778,6 +1781,10 @@ function start_processor_runner!(istate::ProcessorInternalState, uid::UInt64, re
             # runner creation
             ctx = istate.ctx
 
+            # From here until a task is taken, this runner is looking for work: a task enqueued
+            # from now on is seen by the dequeue/steal attempt below or wakes the doorbell
+            istate.parked[] = true
+
             # Wait for new tasks
             if !work_to_do
                 @dagdebug nothing :processor "Waiting for tasks"
@@ -1881,6 +1888,7 @@ function start_processor_runner!(istate::ProcessorInternalState, uid::UInt64, re
             end
 
             @label execute
+            istate.parked[] = false
             task, task_occupancy = task_and_occupancy
             thunk_id = task.thunk_id
             time_util = task.est_time_util
@@ -2112,6 +2120,9 @@ end
 Executes a batch of tasks on `to_proc`, returning their results through
 `return_queue`.
 """
+# Rotates where `do_tasks` starts looking for a runner to wake, so that the same runners are not always the thieves
+const KICK_CURSOR = Threads.Atomic{Int}(0)
+
 function do_tasks(to_proc, return_queue, tasks)
     @dagdebug nothing :processor "Enqueuing task batch" batch_size=length(tasks)
 
@@ -2132,7 +2143,8 @@ function do_tasks(to_proc, return_queue, tasks)
                                         Set{Int}(),
                                         Dict{Int,Dagger.CancelToken}(),
                                         Ref(false),
-                                        TaskSpec[])
+                                        TaskSpec[],
+                                        Threads.Atomic{Bool}(false))
         start_event = Base.Event()
         runner = start_processor_runner!(istate, uid, return_queue, start_event)
         @static if VERSION < v"1.9"
@@ -2193,17 +2205,54 @@ function do_tasks(to_proc, return_queue, tasks)
 
     # Kick other processors to make them steal
     # TODO: Alternatively, automatically balance work instead of blindly enqueueing
-    for other_state in states_snapshot!(STATES_CACHE_TLV[], proc_states(uid))
-        other_istate = other_state.state
-        if other_istate.proc === to_proc
-            continue
+    #
+    # A task whose scope is an `ExactScope` can run on that one processor only (`proc_in_scope` is
+    # `proc == scope.processor`), so nobody can steal it and a kick would be wasted. Every kick wakes
+    # a runner that then scans the queues of all the others, so with T threads each enqueued task
+    # cost O(T) wake-ups and O(T^2) queue probes: pinned tasks went from ~8000 to ~5500 tasks/s
+    # between 32 and 64 threads.
+    all_pinned = true
+    for task in tasks
+        if !((task.scope::Dagger.AbstractScope) isa Dagger.ExactScope)
+            all_pinned = false
+            break
         end
+    end
+    all_pinned && return nothing
+    # Wake the runners that could take one of these tasks, at most one per task. Waking every
+    # processor made each enqueued task cost T wake-ups, each followed by a scan that locks the
+    # queues of all T processors: O(T^2) lock operations per task, which collapsed the throughput
+    # of unscoped tasks at 32 threads and more. A runner that is not parked will look at the
+    # queues again by itself (see `ProcessorInternalState.parked`), and one that cannot take any
+    # of the tasks (scope, acceleration, free occupancy) would only go back to sleep.
+    states_vec = states_snapshot!(STATES_CACHE_TLV[], proc_states(uid))
+    nstates = length(states_vec)
+    nkick = 0
+    maxkick = length(tasks)
+    start_idx = nstates <= 1 ? 1 : mod1(Threads.atomic_add!(KICK_CURSOR, 1), nstates)
+    for state_offset in 0:(nstates-1)
+        state_idx = start_idx + state_offset
+        state_idx > nstates && (state_idx -= nstates)
+        other_istate = (@inbounds states_vec[state_idx]).state
+        other_istate.proc === to_proc && continue
         # A kick only makes the runner try to steal (see `start_processor_runner!`);
         # one that may not steal wakes up to do nothing. Under MPI that is every
         # processor of every rank, so each enqueued task would otherwise wake
         # `ranks x threads` runners on every rank.
         stealing_permitted(other_istate.proc) || continue
-        notify(other_istate.reschedule)
+        other_istate.parked[] || continue
+        free = typemax(UInt32) - other_istate.proc_occupancy[]
+        for task in tasks
+            scope = task.scope::Dagger.AbstractScope
+            accel = something((task.options::Options).acceleration, Dagger.DistributedAcceleration())
+            if Dagger.proc_in_scope(other_istate.proc, scope) && Dagger.accel_matches_proc(accel, other_istate.proc) &&
+               free >= task.est_occupancy
+                notify(other_istate.reschedule)
+                nkick += 1
+                break
+            end
+        end
+        nkick >= maxkick && break
     end
     @dagdebug nothing :processor "Kicked processors"
 end
