@@ -343,15 +343,14 @@ end
 function _cleanup_proc(uid, log_sink)
     empty!(CHUNK_CACHE) # FIXME: Should be keyed on uid!
     states = proc_states(uid)
-    MemPool.lock_read(states.lock) do
-        for (proc, state) in states.dict
-            istate = state.state
-            istate.done[] = true
-            notify(istate.reschedule)
-        end
+    for (proc, state) in (@atomic states.snap)
+        istate = state.state
+        istate.done[] = true
+        notify(istate.reschedule)
     end
     MemPool.lock(states.lock) do
         empty!(states.dict)
+        @atomic states.snap = Dict{Processor,ProcessorState}()
         Threads.atomic_add!(states.version, 1)
     end
 end
@@ -1645,10 +1644,16 @@ struct ProcessorState
     runner::Task
 end
 
-const PROCESSOR_TASK_STATE_LOCK = MemPool.ReadWriteLock()
-struct ProcessorStateDict
-    lock::MemPool.ReadWriteLock
-    dict::Dict{Processor,ProcessorState}
+# Both tables below are read on every task (several times: placement, enqueue, completion) by every thread, and written
+# only when a scheduler or a processor appears or goes away. A read lock is an atomic read-modify-write on one shared
+# cache line, so with many threads the readers queued behind each other (Fulda, gemm 4096/128, 64 threads: 600 of 618
+# samples of `do_tasks` were in `maybe_proc_state`, and 64 threads were slower than 32). Readers therefore take no lock:
+# writers (under `lock`, as before) build a new immutable-by-convention Dict and publish it with one atomic store.
+const PROCESSOR_TASK_STATE_LOCK = ReentrantLock()      # writers of PROCESSOR_TASK_STATE only
+mutable struct ProcessorStateDict
+    lock::MemPool.ReadWriteLock                        # writers of `dict` / `snap` (readers use `snap`)
+    dict::Dict{Processor,ProcessorState}               # the writers' master copy
+    @atomic snap::Dict{Processor,ProcessorState}       # published copy for lock-free readers; never mutated after publishing
     # Bumped on every insert into `dict`; lets hot paths (steal/kick loops)
     # cache a values snapshot and re-collect only when membership changed
     version::Threads.Atomic{Int}
@@ -1662,30 +1667,31 @@ struct ProcessorStateDict
     # runner with nothing of its own skips the steal scan while it is zero: the scan
     # locks every other queue, O(threads) per idle wake-up.
     queued::Threads.Atomic{Int}
-    ProcessorStateDict() = new(MemPool.ReadWriteLock(), Dict{Processor,ProcessorState}(),
+    ProcessorStateDict() = new(MemPool.ReadWriteLock(), Dict{Processor,ProcessorState}(), Dict{Processor,ProcessorState}(),
                                Threads.Atomic{Int}(0), Set{Int}(), ReentrantLock(),
                                Threads.Atomic{Int}(0))
 end
-const PROCESSOR_TASK_STATE = Dict{UInt64,ProcessorStateDict}()
+mutable struct ProcessorStateTable
+    @atomic table::Dict{UInt64,ProcessorStateDict}
+end
+const PROCESSOR_TASK_STATE = ProcessorStateTable(Dict{UInt64,ProcessorStateDict}())
 
 function proc_states(uid::UInt64=Dagger.get_tls().sch_uid)
-    states = MemPool.@lock_read PROCESSOR_TASK_STATE_LOCK begin
-        get(PROCESSOR_TASK_STATE, uid, nothing)
+    states = get(@atomic(PROCESSOR_TASK_STATE.table), uid, nothing)
+    states === nothing || return states
+    return lock(PROCESSOR_TASK_STATE_LOCK) do
+        cur = @atomic PROCESSOR_TASK_STATE.table
+        existing = get(cur, uid, nothing)
+        existing === nothing || return existing
+        dict = ProcessorStateDict()
+        new = copy(cur); new[uid] = dict
+        @atomic PROCESSOR_TASK_STATE.table = new
+        return dict
     end
-    if states === nothing
-        states = MemPool.lock(PROCESSOR_TASK_STATE_LOCK) do
-            dict = ProcessorStateDict()
-            PROCESSOR_TASK_STATE[uid] = dict
-            return dict
-        end
-    end
-    return states
 end
 function proc_states_values(uid::UInt64=Dagger.get_tls().sch_uid)
     states = proc_states(uid)
-    return MemPool.@lock_read states.lock begin
-        collect(values(states.dict))
-    end
+    return collect(values(@atomic states.snap))
 end
 
 """
@@ -1704,9 +1710,7 @@ StatesCache() = StatesCache(-1, ProcessorState[])
 function states_snapshot!(cache::StatesCache, states::ProcessorStateDict)
     version = states.version[]
     if cache.version != version
-        cache.values = MemPool.@lock_read states.lock begin
-            collect(values(states.dict))
-        end
+        cache.values = collect(values(@atomic states.snap))
         cache.version = version
     end
     return cache.values
@@ -1718,15 +1722,14 @@ end
 const STATES_CACHE_TLV = Dagger.TaskLocalValue{StatesCache}(()->StatesCache())
 function proc_state!(f, uid::UInt64, proc::Processor)
     states = proc_states(uid)
-    state = MemPool.@lock_read states.lock begin
-        get(states.dict, proc, nothing)
-    end
+    state = get(@atomic(states.snap), proc, nothing)
     if state === nothing
         state = MemPool.lock(states.lock) do
             existing = get(states.dict, proc, nothing)
             existing !== nothing && return existing
             new_state = f()::ProcessorState
             states.dict[proc] = new_state
+            @atomic states.snap = copy(states.dict)
             Threads.atomic_add!(states.version, 1)
             return new_state
         end
@@ -1736,9 +1739,7 @@ end
 proc_state!(f, proc::Processor) = proc_state!(f, Dagger.get_tls().sch_uid, proc)
 function maybe_proc_state(uid::UInt64, proc::Processor)
     states = proc_states(uid)
-    return MemPool.lock_read(states.lock) do
-        return get(states.dict, proc, nothing)
-    end
+    return get(@atomic(states.snap), proc, nothing)
 end
 maybe_proc_state(proc::Processor) = maybe_proc_state(Dagger.get_tls().sch_uid, proc)
 proc_state(uid::UInt64, proc::Processor) = something(maybe_proc_state(uid, proc))
