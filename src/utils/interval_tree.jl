@@ -1,22 +1,43 @@
+# A treap: a binary search tree on `span_start` that is kept balanced by random node priorities
+# (a node's priority is never smaller than its children's). Memory spans arrive in address order
+# very often (arrays and tiles allocated one after another), and an unbalanced tree then degrades to a
+# linked list: inserting 16000 increasing spans cost 34 us each against 0.1 us for the same spans
+# shuffled, and a Datadeps region over many tiles spent 40-85 % of its planning time in `insert!`.
+#
+# The priorities come from a per-tree counter, not from the span: the shape of a tree must be the same on
+# every MPI rank that performs the same inserts (the order in which `iterate`/`find_overlapping!` return
+# spans follows the shape, and ranks must plan identically), and spans carry rank-local addresses.
+# Equal starts may therefore sit on either side of each other after a rotation; only `delete!` searched for
+# an exact span and it looks on both sides for ties.
 mutable struct IntervalNode{M,E}
     span::M
     max_end::E  # Maximum end value in this subtree
+    prio::UInt64
     left::Union{IntervalNode{M,E}, Nothing}
     right::Union{IntervalNode{M,E}, Nothing}
 
-    IntervalNode(span::M) where M <: MemorySpan = new{M,UInt64}(span, span_end(span), nothing, nothing)
-    IntervalNode(span::LocalMemorySpan) = new{LocalMemorySpan,UInt64}(span, span_end(span), nothing, nothing)
-    IntervalNode(span::ManyMemorySpan{N}) where N = new{ManyMemorySpan{N},ManyPair{N}}(span, span_end(span), nothing, nothing)
-    IntervalNode(span::LocatorMemorySpan{T}) where T = new{LocatorMemorySpan{T},UInt64}(span, span_end(span), nothing, nothing)
+    IntervalNode(span::M) where M <: MemorySpan = new{M,UInt64}(span, span_end(span), UInt64(0), nothing, nothing)
+    IntervalNode(span::LocalMemorySpan) = new{LocalMemorySpan,UInt64}(span, span_end(span), UInt64(0), nothing, nothing)
+    IntervalNode(span::ManyMemorySpan{N}) where N = new{ManyMemorySpan{N},ManyPair{N}}(span, span_end(span), UInt64(0), nothing, nothing)
+    IntervalNode(span::LocatorMemorySpan{T}) where T = new{LocatorMemorySpan{T},UInt64}(span, span_end(span), UInt64(0), nothing, nothing)
 end
 
 mutable struct IntervalTree{M,E}
     root::Union{IntervalNode{M,E}, Nothing}
+    seq::UInt64   # number of nodes created so far: the source of node priorities
 
-    IntervalTree{M}() where M<:MemorySpan = new{M,UInt64}(nothing)
-    IntervalTree{LocalMemorySpan}() = new{LocalMemorySpan,UInt64}(nothing)
-    IntervalTree{ManyMemorySpan{N}}() where N = new{ManyMemorySpan{N},ManyPair{N}}(nothing)
-    IntervalTree{LocatorMemorySpan{T}}() where T = new{LocatorMemorySpan{T},UInt64}(nothing)
+    IntervalTree{M}() where M<:MemorySpan = new{M,UInt64}(nothing, UInt64(0))
+    IntervalTree{LocalMemorySpan}() = new{LocalMemorySpan,UInt64}(nothing, UInt64(0))
+    IntervalTree{ManyMemorySpan{N}}() where N = new{ManyMemorySpan{N},ManyPair{N}}(nothing, UInt64(0))
+    IntervalTree{LocatorMemorySpan{T}}() where T = new{LocatorMemorySpan{T},UInt64}(nothing, UInt64(0))
+end
+
+# splitmix64: a deterministic, well-mixed priority for the n-th node of a tree
+@inline function _node_priority(n::UInt64)
+    z = n + 0x9e3779b97f4a7c15
+    z = (z ⊻ (z >> 30)) * 0xbf58476d1ce4e5b9
+    z = (z ⊻ (z >> 27)) * 0x94d049bb133111eb
+    return z ⊻ (z >> 31)
 end
 
 # Construct interval tree from unsorted set of spans
@@ -104,47 +125,73 @@ function update_max_end!(node::IntervalNode)
     node.max_end = max_end
 end
 
+# Rotations that keep the search order and restore `max_end` of the two nodes whose children changed
+function _rotate_right!(node::IntervalNode{M,E}) where {M,E}
+    l = node.left::IntervalNode{M,E}
+    node.left = l.right
+    l.right = node
+    update_max_end!(node)
+    update_max_end!(l)
+    return l
+end
+function _rotate_left!(node::IntervalNode{M,E}) where {M,E}
+    r = node.right::IntervalNode{M,E}
+    node.right = r.left
+    r.left = node
+    update_max_end!(node)
+    update_max_end!(r)
+    return r
+end
+
+# Insert `new` below `node` and return the root of that subtree; expected depth is O(log n)
+function _treap_insert!(node::Union{IntervalNode{M,E},Nothing}, new::IntervalNode{M,E}) where {M,E}
+    node === nothing && return new
+    if span_start(new.span) <= span_start(node.span)
+        node.left = _treap_insert!(node.left, new)
+        if (node.left::IntervalNode{M,E}).prio > node.prio
+            return _rotate_right!(node)
+        end
+    else
+        node.right = _treap_insert!(node.right, new)
+        if (node.right::IntervalNode{M,E}).prio > node.prio
+            return _rotate_left!(node)
+        end
+    end
+    update_max_end!(node)
+    return node
+end
+
 # Insert a span into the interval tree
 function Base.insert!(tree::IntervalTree{M,E}, span::M) where {M,E}
     if isempty(span)
         return span
     end
-
-    if tree.root === nothing
-        tree.root = IntervalNode(span)
-        update_max_end!(tree.root)
-        return span
-    end
-
-    # Track the path for updating max_end after insertion
-    path = Vector{IntervalNode{M,E}}()
-    current = tree.root
-
-    # Traverse to find the insertion point
-    while current !== nothing
-        push!(path, current)
-        if span_start(span) <= span_start(current.span)
-            if current.left === nothing
-                current.left = IntervalNode(span)
-                break
-            end
-            current = current.left
-        else
-            if current.right === nothing
-                current.right = IntervalNode(span)
-                break
-            end
-            current = current.right
-        end
-    end
-
-    # Update max_end for all ancestors (process in reverse order)
-    while !isempty(path)
-        node = pop!(path)
-        update_max_end!(node)
-    end
-
+    node = IntervalNode(span)
+    node.prio = _node_priority(tree.seq)
+    tree.seq += 1
+    tree.root = _treap_insert!(tree.root, node)
     return span
+end
+
+# The node holding exactly `span`, with its ancestors pushed on `path` (left empty when there is none).
+# Equal starts can be on either side of a node (rotations), so a tie is searched on both.
+function _find_exact!(path::Vector{IntervalNode{M,E}}, node::Union{IntervalNode{M,E},Nothing}, span::M) where {M,E}
+    node === nothing && return nothing
+    push!(path, node)
+    ns = span_start(node.span)
+    s = span_start(span)
+    if ns == s && span_len(node.span) == span_len(span)
+        return node
+    end
+    found = nothing
+    if s <= ns
+        found = _find_exact!(path, node.left, span)
+    end
+    if found === nothing && s >= ns
+        found = _find_exact!(path, node.right, span)
+    end
+    found === nothing && pop!(path)
+    return found
 end
 
 # Remove a specific span from the tree (split as needed)
@@ -155,20 +202,7 @@ function Base.delete!(tree::IntervalTree{M,E}, span::M) where {M,E}
 
     # Search for target node, keeping track of path
     path = Vector{IntervalNode{M,E}}()
-    current = tree.root
-    target = nothing
-    while current !== nothing
-        push!(path, current)
-        is_exact = span_start(current.span) == span_start(span) && span_len(current.span) == span_len(span)
-        if is_exact
-            target = current
-            break
-        elseif span_start(span) <= span_start(current.span)
-            current = current.left
-        else
-            current = current.right
-        end
-    end
+    target = _find_exact!(path, tree.root, span)
 
     if target === nothing
         return span

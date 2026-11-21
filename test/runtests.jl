@@ -24,6 +24,7 @@ tests = [
     ("Uniform Placement", "uniform-placement.jl"),
     ("Processor Grids", "procgrid.jl"),
     ("Memory Spaces", "memory-spaces.jl"),
+    ("Interval Tree", "interval_tree.jl"),
     ("Logging", "logging.jl"),
     ("Checkpointing", "checkpoint.jl"),
     ("Scopes", "scopes.jl"),
