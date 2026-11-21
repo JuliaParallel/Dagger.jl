@@ -457,8 +457,35 @@ function call_signature_key(@nospecialize(f), @nospecialize(arg_types::Tuple))
     return Tuple{typeof(f), arg_types...}
 end
 
-cached_return_type(@nospecialize(f), @nospecialize(arg_types::Tuple)) =
-    cached_return_type(call_signature_key(f, arg_types), f, arg_types)
+# A direct-mapped, lock-free front cache for `cached_return_type`: forming the signature key (`Tuple{typeof(f), arg_types...}`, a
+# dynamic `apply_type`) and looking it up under a global lock was 9 % of the Datadeps planner's own time per task (41 of 447
+# samples, gemm 4096/128). The slot is chosen from the `objectid`s of the types, and a hit must be `===` in `typeof(f)` and in
+# the whole argument-type tuple, so a collision only costs a miss. Slots hold an immutable entry, replaced as a whole (a
+# racing writer can only lose an entry). Same staleness caveat as `RETURN_TYPE_CACHE`: `promote_op` is a pure function of the
+# signature.
+struct ReturnTypeEntry
+    ftype::Any
+    argtypes::Any
+    rt::Any
+end
+const RETURN_TYPE_FAST = Vector{Any}(nothing, 1 << 12)
+@inline function return_type_fast_slot(@nospecialize(f), @nospecialize(arg_types::Tuple))
+    h = UInt(objectid(typeof(f)))
+    for T in arg_types
+        h = (h ⊻ UInt(objectid(T))) * 0x9e3779b97f4a7c15
+    end
+    return Int((h >> 20) & UInt(length(RETURN_TYPE_FAST) - 1)) + 1
+end
+function cached_return_type(@nospecialize(f), @nospecialize(arg_types::Tuple))
+    idx = return_type_fast_slot(f, arg_types)
+    e = @inbounds RETURN_TYPE_FAST[idx]
+    if e isa ReturnTypeEntry && e.ftype === typeof(f) && e.argtypes === arg_types
+        return e.rt::Type
+    end
+    rt = cached_return_type(call_signature_key(f, arg_types), f, arg_types)
+    @inbounds RETURN_TYPE_FAST[idx] = ReturnTypeEntry(typeof(f), arg_types, rt)
+    return rt
+end
 function cached_return_type(@nospecialize(key), @nospecialize(f), @nospecialize(arg_types::Tuple))
     key === nothing && return Base.promote_op(f, arg_types...)
     # `@safe_lock1`, not `lock(...) do`: the closure captures `key`/`f`/`arg_types`

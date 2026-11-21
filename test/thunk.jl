@@ -425,3 +425,18 @@ end
         @test Dagger.fetch_all(fetch(t; raw=true)) == 2
     end
 end
+
+@testset "cached_return_type: lock-free front cache" begin
+    g1(x) = x + 1; g2(x, y) = x * y; g3(x::Int) = string(x)
+    sigs = Any[(g1, (Int,)), (g1, (Float64,)), (g2, (Int, Int)), (g2, (Float64, Int)), (g3, (Int,)), (g1, (Matrix{Float64},))]
+    for _ in 1:3, (f, ats) in sigs
+        @test Dagger.cached_return_type(f, ats) == Base.promote_op(f, ats...)
+    end
+    # far more signatures than slots: every answer must stay exact (a collision is a miss, never a wrong hit)
+    for i in 1:6000
+        T = NTuple{i % 17 + 1, Int}
+        @test Dagger.cached_return_type(identity, (T,)) == T
+    end
+    # an argument type of Union{} (an upstream task inferred never to return) is answered, not cached wrongly
+    @test Dagger.cached_return_type(g1, (Union{},)) == Base.promote_op(g1, Union{})
+end
