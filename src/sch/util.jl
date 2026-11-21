@@ -722,9 +722,11 @@ const EMPTY_TRANSFER_RATES = Dict{Processor,UInt64}()
     # Find all Chunks
     chunks = @reusable_vector :estimate_task_costs_chunks Union{Chunk,Nothing} nothing 32
     for input in task.inputs
-        if Dagger.valuetype(input) <: Chunk
-            push!(chunks, Dagger.value(input)::Chunk)
-        end
+        # `isa` on the value, not `<:` on its runtime type: `Chunk` is parametric, and the
+        # subtype query went through the type-matching machinery for every input of
+        # every scheduled task
+        v = Dagger.value(input)
+        v isa Chunk && push!(chunks, v)
     end
 
     # Estimate the cost of executing the task itself
