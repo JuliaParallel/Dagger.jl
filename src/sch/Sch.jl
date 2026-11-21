@@ -1534,6 +1534,9 @@ end
     empty!(to_send)
 end
 
+# Number of batches whose `do_tasks` threw (reported to the scheduler as a failure of the batch's first task). Read by tests.
+const FIRE_FAILURES = Threads.Atomic{Int}(0)
+
 struct FireTaskSpec
     init_proc::Processor
     return_chan::RemoteChannel
@@ -1547,6 +1550,9 @@ function (ets::FireTaskSpec)()
     ctx_vars = first_task.ctx_vars::NamedTuple
     ctx = Dagger.log_context(ctx_vars.log_sink, ctx_vars.profile)
     uid = first_task.sch_uid
+    # Read before `do_tasks` hands the specs over: afterwards the first one may already be recycled
+    # (its `thunk_id` reset to 0, or reused by another task), and a failure must be reported under the id it belongs to.
+    first_thunk_id = first_task.thunk_id
 
     proc = ets.init_proc
     chan = ets.return_chan
@@ -1561,10 +1567,10 @@ function (ets::FireTaskSpec)()
         end
     catch err
         bt = catch_backtrace()
-        # FIXME: Catch the correct task ID
-        thunk_id = first_task.thunk_id
+        # FIXME: Catch the correct task ID (this is the first of the batch, not necessarily the one that failed)
+        Threads.atomic_add!(FIRE_FAILURES, 1)
         if isopen(chan)
-            put!(chan, TaskResult(pid, proc, thunk_id, CapturedException(err, bt), nothing))
+            put!(chan, TaskResult(pid, proc, first_thunk_id, CapturedException(err, bt), nothing))
         end
     finally
         @logfinish ctx LogFire LogFireId(uid, pid) nothing
@@ -2123,6 +2129,10 @@ Executes a batch of tasks on `to_proc`, returning their results through
 # Rotates where `do_tasks` starts looking for a runner to wake, so that the same runners are not always the thieves
 const KICK_CURSOR = Threads.Atomic{Int}(0)
 
+# Test hook: called by `do_tasks` right after it enqueued a batch, i.e. from the moment on at which another runner may take, run and
+# recycle the specs. Tests set it to a sleep to make that window wide; `nothing` (the default) costs one load and compare per batch.
+const AFTER_ENQUEUE_HOOK = Ref{Any}(nothing)
+
 function do_tasks(to_proc, return_queue, tasks)
     @dagdebug nothing :processor "Enqueuing task batch" batch_size=length(tasks)
 
@@ -2164,6 +2174,14 @@ function do_tasks(to_proc, return_queue, tasks)
         istate.ctx = ctx
     end
     states = proc_states(uid)
+    # What the wake-up decision below needs is read here, while `do_tasks` still owns each spec. The
+    # moment a spec is in the queue another runner may take it, run it and recycle it
+    # (`reset_task_spec!` sets `scope` and `options` to `nothing`), so reading `tasks` again after the
+    # enqueue loop saw `nothing` and stale occupancies (a `TypeError` in the `scope` assertion, on
+    # few threads with many short tasks).
+    kick_scopes = @reusable_vector :do_tasks_kick_scopes Dagger.AbstractScope nothing 32
+    kick_accels = @reusable_vector :do_tasks_kick_accels Dagger.Acceleration nothing 32
+    kick_occupancies = @reusable_vector :do_tasks_kick_occupancies UInt32 UInt32(0) 32
     lock(istate.queue) do queue
         for task in tasks
             thunk_id = task.thunk_id
@@ -2196,12 +2214,17 @@ function do_tasks(to_proc, return_queue, tasks)
                 end
             end
             should_launch || continue
+            push!(kick_scopes, task.scope::Dagger.AbstractScope)
+            push!(kick_accels, something((task.options::Options).acceleration, Dagger.DistributedAcceleration()))
+            push!(kick_occupancies, occupancy)
             push!(queue, task => occupancy)
             @logfinish ctx LogEnqueue LogEnqueueId(uid, to_proc, thunk_id) nothing
             @dagdebug thunk_id :processor "Enqueued task"
         end
     end
     notify(istate.reschedule)
+    hook = AFTER_ENQUEUE_HOOK[]
+    hook === nothing || hook()
 
     # Kick other processors to make them steal
     # TODO: Alternatively, automatically balance work instead of blindly enqueueing
@@ -2212,13 +2235,16 @@ function do_tasks(to_proc, return_queue, tasks)
     # cost O(T) wake-ups and O(T^2) queue probes: pinned tasks went from ~8000 to ~5500 tasks/s
     # between 32 and 64 threads.
     all_pinned = true
-    for task in tasks
-        if !((task.scope::Dagger.AbstractScope) isa Dagger.ExactScope)
+    for scope in kick_scopes
+        if !(scope isa Dagger.ExactScope)
             all_pinned = false
             break
         end
     end
-    all_pinned && return nothing
+    if all_pinned
+        empty!(kick_scopes); empty!(kick_accels); empty!(kick_occupancies)
+        return nothing
+    end
     # Wake the runners that could take one of these tasks, at most one per task. Waking every
     # processor made each enqueued task cost T wake-ups, each followed by a scan that locks the
     # queues of all T processors: O(T^2) lock operations per task, which collapsed the throughput
@@ -2228,7 +2254,7 @@ function do_tasks(to_proc, return_queue, tasks)
     states_vec = states_snapshot!(STATES_CACHE_TLV[], proc_states(uid))
     nstates = length(states_vec)
     nkick = 0
-    maxkick = length(tasks)
+    maxkick = length(kick_scopes)
     start_idx = nstates <= 1 ? 1 : mod1(Threads.atomic_add!(KICK_CURSOR, 1), nstates)
     for state_offset in 0:(nstates-1)
         state_idx = start_idx + state_offset
@@ -2242,11 +2268,11 @@ function do_tasks(to_proc, return_queue, tasks)
         stealing_permitted(other_istate.proc) || continue
         other_istate.parked[] || continue
         free = typemax(UInt32) - other_istate.proc_occupancy[]
-        for task in tasks
-            scope = task.scope::Dagger.AbstractScope
-            accel = something((task.options::Options).acceleration, Dagger.DistributedAcceleration())
+        for idx in eachindex(kick_scopes)
+            scope = @inbounds kick_scopes[idx]
+            accel = @inbounds kick_accels[idx]
             if Dagger.proc_in_scope(other_istate.proc, scope) && Dagger.accel_matches_proc(accel, other_istate.proc) &&
-               free >= task.est_occupancy
+               free >= @inbounds(kick_occupancies[idx])
                 notify(other_istate.reschedule)
                 nkick += 1
                 break
@@ -2254,6 +2280,7 @@ function do_tasks(to_proc, return_queue, tasks)
         end
         nkick >= maxkick && break
     end
+    empty!(kick_scopes); empty!(kick_accels); empty!(kick_occupancies)
     @dagdebug nothing :processor "Kicked processors"
 end
 

@@ -891,3 +891,36 @@ end
     end
     @inferred order!(zeros(Int, 8), rand(8), false)
 end
+
+@testset "Batch enqueue does not read a recycled spec" begin
+    # `do_tasks` used to read each `TaskSpec` again after enqueueing it, to decide whom to wake. A runner can run and
+    # recycle a short task before that (`scope` and `options` become `nothing`), which threw a TypeError in the scope
+    # assertion. The window is tiny on a fast machine, so the test widens it through the hook that `do_tasks` calls right
+    # after the enqueue; a runner on another thread then recycles the spec while `do_tasks` still sleeps.
+    nthr = Threads.nthreads()
+    tiny(i) = i + 1
+    scopes = [Dagger.ExactScope(Dagger.ThreadProc(1, t)) for t in 1:nthr]
+    function run_many(n)
+        ts = DTask[]
+        for i in 1:n
+            t = i % 3 == 0 ? Dagger.@spawn(tiny(i)) : Dagger.@spawn(scope=scopes[mod1(i, nthr)], tiny(i))
+            push!(ts, t)
+        end
+        return all(i -> fetch(ts[i]) == i + 1, eachindex(ts))
+    end
+    failures0 = Dagger.Sch.FIRE_FAILURES[]
+    @test run_many(2000)       # without the hook: smoke test
+    if nthr >= 2
+        Dagger.Sch.AFTER_ENQUEUE_HOOK[] = () -> Libc.systemsleep(0.002)
+        try
+            @test run_many(300)
+        finally
+            Dagger.Sch.AFTER_ENQUEUE_HOOK[] = nothing
+        end
+        # The error is reported under the id of a recycled spec, so it does not always fail a task the test waits for;
+        # count the batches that threw instead.
+        @test Dagger.Sch.FIRE_FAILURES[] == failures0
+    else
+        @test_skip run_many(300)    # one thread: nothing else can run while do_tasks sleeps
+    end
+end
