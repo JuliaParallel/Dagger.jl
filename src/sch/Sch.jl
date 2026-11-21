@@ -1074,10 +1074,22 @@ concurrently across threads.
     # N.B. Explicit lock/try/finally rather than a `do`-closure: the closure
     # captured `scheduled`/`best_loc`/`best_spec` (all assigned in the loop
     # above), which forced a Core.Box for each per call.
+    # The common task (no `restore` callback) is only marked running under the lock; its spec is
+    # built and launched after the lock is released, which is most of what this section did.
+    fire_unlocked = false
+    fire_chans = nothing
     lock(state.lock)
     try
         if scheduled
-            fire_tasks!(ctx, best_loc, [best_spec], state, restore_ready)
+            if task.options.restore === nothing
+                @atomic task.running = true
+                task.running_on = best_loc.gproc
+                @assert !has_result(state, task)
+                fire_chans = state.worker_chans[root_worker_id(best_loc.gproc)]
+                fire_unlocked = true
+            else
+                fire_tasks!(ctx, best_loc, [best_spec], state, restore_ready)
+            end
         else
             ex = SchedulingException("No processors available, try widening scope")
             set_failed!(state, task; ex)
@@ -1091,6 +1103,7 @@ concurrently across threads.
     finally
         unlock(state.lock)
     end
+    fire_unlocked && fire_tasks!(ctx, best_loc, [best_spec], state, restore_ready, true, fire_chans)
     schedule_ready!(state, restore_ready, procs)
 end
 
@@ -1298,7 +1311,12 @@ function reset_task_spec!(task::TaskSpec)
     return task
 end
 
-@reuse_scope function fire_tasks!(ctx, task_loc::ScheduleTaskLocation, task_specs::Vector{ScheduleTaskSpec}, state, ready::Vector{Thunk})
+# `premarked`: the caller already marked every thunk running (under `state.lock`) and looked up
+# the destination worker's channels (`chans`), and none has a `restore` callback, so this
+# builds and launches the specs without holding the lock. Cancellation copes with a thunk
+# that is marked running but not yet registered at its processor (`pre_cancelled`), a window
+# the asynchronous launch below always had.
+@reuse_scope function fire_tasks!(ctx, task_loc::ScheduleTaskLocation, task_specs::Vector{ScheduleTaskSpec}, state, ready::Vector{Thunk}, premarked::Bool=false, chans=nothing)
     gproc, proc = task_loc.gproc, task_loc.proc
     to_send = @reusable_vector :fire_tasks!_to_send Union{TaskSpec,Nothing} nothing 1024
 
@@ -1328,16 +1346,18 @@ end
 
     for task_spec in task_specs
         thunk = task_spec.task
-        @atomic thunk.running = true
-        thunk.running_on = gproc
+        if !premarked
+            @atomic thunk.running = true
+            thunk.running_on = gproc
+        end
         # N.B. `running_count` was already incremented for `thunk` when it was
         # placed into a `ready_out` buffer (see `schedule_dependents!` /
         # `reschedule_syncdeps!` / `start_state`) — not here — so that the
         # increment always happens-before the decrement of whatever finishing
         # thunk made `thunk` ready, closing a race where `running_count` could
         # transiently read as 0 while `thunk` was still awaiting firing.
-        @assert !has_result(state, thunk)
-        if thunk.options.restore !== nothing
+        premarked || @assert !has_result(state, thunk)
+        if !premarked && thunk.options.restore !== nothing
             try
                 result = @invokelatest thunk.options.restore(thunk)
                 if result isa Chunk
@@ -1414,7 +1434,7 @@ end
         end
         @assert (options.single === nothing) || (pid == options.single)
         # TODO: Set `sch_handle.tid.ref` to the right `DRef`
-        sch_handle = SchedulerHandle(ThunkID(thunk.id, nothing), state.worker_chans[pid]...)
+        sch_handle = SchedulerHandle(ThunkID(thunk.id, nothing), (chans === nothing ? state.worker_chans[pid] : chans)...)
 
         # TODO: De-dup common fields (log_sink, uid, etc.)
         ctx_vars = (log_sink=ctx.log_sink, profile=ctx.profile)
