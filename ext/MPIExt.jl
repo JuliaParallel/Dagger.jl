@@ -2425,7 +2425,28 @@ function mpi_execute_bcast_plan(f, args, proc::MPIProcessor)
     return (; need_type_bcast=false, nothrow, inferred)
 end
 
+# A task that is not part of a Datadeps region (no tag option) generates ref ids only while it
+# is moved to and executed on its processor, never during planning, so once `execute!` returns
+# nobody takes another id for its thunk id and its sub-counter is dead. Without this the table
+# grew by one entry per task until the next Datadeps `wait_all`, which a program that only uses
+# `@spawn` never reaches. Datadeps tasks (tagged) keep the later cleanup: their planning shares
+# the key with their execution, and reclaiming between the two would collide on sub-ids.
 function execute!(proc::MPIProcessor, f, args...; kwargs...)
+    if Dagger.in_task()
+        opts = Dagger.get_tls().task_spec.options
+        if opts !== nothing && opts.tag === nothing
+            tid = sch_handle().thunk_id.id
+            try
+                return mpi_execute_body(proc, f, args...; kwargs...)
+            finally
+                mpi_cleanup_tid(tid)
+            end
+        end
+    end
+    return mpi_execute_body(proc, f, args...; kwargs...)
+end
+
+function mpi_execute_body(proc::MPIProcessor, f, args...; kwargs...)
     local_rank = MPI.Comm_rank(proc.comm)
     islocal = local_rank == proc.rank
     inplace_move = f === move!

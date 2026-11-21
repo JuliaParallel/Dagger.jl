@@ -2,6 +2,8 @@
 # progress at different speeds. Check actual execution, scopes, and locality.
 mpi_spawn_location(x=nothing) = (MPI.Comm_rank(MPI.COMM_WORLD), Threads.threadid(), x)
 mpi_spawn_value() = (sleep(0.05); 42)
+mpi_spawn_value_fast(i) = 42 + i - i
+mpi_spawn_checked(i::Int) = i > 0 ? i : error("negative")
 
 function check_spawn_placements(tasks, allowed, value=nothing)
     placements = Dagger.Processor[]
@@ -83,4 +85,25 @@ end
             Dagger.check_uniformity!(true)
         end
     end
+end
+
+# The ref-id bookkeeping of a task that is not part of a Datadeps region is dropped when the
+# task is done; it used to grow by one entry per task for the whole session
+reftid_size() = lock(d -> length(d), MPIExt._MPIREF_TID)
+@testset "Ref-id table does not grow with plain tasks" begin
+    cpus = filter(p -> p.innerProc isa Dagger.ThreadProc, mpi_procs())
+    foreach(fetch, [Dagger.@spawn(mpi_spawn_value_fast(i)) for i in 1:8])   # warm up
+    MPI.Barrier(comm)
+    before = reftid_size()
+    # unscoped, pinned to every rank in turn, and a body that may throw
+    foreach(wait, [Dagger.@spawn(mpi_spawn_value_fast(i)) for i in 1:100])
+    foreach(wait, [Dagger.@spawn(scope=Dagger.ExactScope(cpus[mod1(i, length(cpus))]), mpi_spawn_value_fast(i)) for i in 1:100])
+    foreach(wait, [Dagger.@spawn(mpi_spawn_checked(i)) for i in 1:100])
+    MPI.Barrier(comm)
+    # Nothing is left behind by 300 tasks (a few entries may belong to tasks still finishing)
+    @test reftid_size() - before < 20
+    # and ids are still uniform afterwards
+    t = Dagger.@spawn mpi_spawn_value_fast(1)
+    @test fetch(t) == 42
+    @test allequal(MPI.Allgather(Int(t.uid), comm))
 end
