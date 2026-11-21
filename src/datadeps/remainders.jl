@@ -110,6 +110,17 @@ function compute_remainder_for_arg!(state::DataDepsState,
         all_local && return NoAliasing(), 0
     end
 
+    # A copy leaves the history holding only the copy into its destination, so
+    # the walk below sees a replica made by an earlier copy as "owned" by that
+    # destination and copies the same, unchanged data back (and forth) every
+    # time another space reads it. `arg_current` knows better: it lists every
+    # space holding a fully-current replica (a task write resets it, a copy
+    # extends it). Only entries it has recorded are trusted.
+    current = get(state.arg_current, arg_w, nothing)
+    if current !== nothing && target_space in current
+        return NoAliasing(), 0
+    end
+
     # Whole-object containers (e.g. `DSparseArray`) reallocate their entire
     # storage on every write, so they can never be *partially* current in a
     # memory space -- the whole object is current in exactly one space: the most

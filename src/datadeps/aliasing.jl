@@ -1290,6 +1290,22 @@ function add_writer!(state::DataDepsState, arg_w::ArgumentWrapper, dest_space::M
     state.ainfos_owner[ainfo] = task=>write_num
     empty!(state.ainfos_readers[ainfo])
 
+    # A copy into an argument that has no currency record yet starts from the
+    # origin only if nothing was written elsewhere (an overlapping write shows
+    # up in the history merged into this argument). Decide before the history
+    # is cleared below.
+    origin_current = false
+    if copied && !haskey(state.arg_current, arg_w)
+        origin = state.arg_origin[arg_w.arg]
+        origin_current = true
+        for entry in state.arg_history[arg_w]
+            if entry.space != origin
+                origin_current = false
+                break
+            end
+        end
+    end
+
     # Clear the history for this target, since this is a new write event
     empty!(state.arg_history[arg_w])
 
@@ -1329,8 +1345,11 @@ function add_writer!(state::DataDepsState, arg_w::ArgumentWrapper, dest_space::M
         # Copy: the destination joins the current set; the source (and any
         # other current replica) stays current, and since a copy only moves
         # already-canonical bytes, overlapping arguments are unaffected
-        current = get!(state.arg_current, arg_w) do
-            Set{MemorySpace}((state.arg_origin[arg_w.arg],))
+        current = get(state.arg_current, arg_w, nothing)
+        if current === nothing
+            current = Set{MemorySpace}()
+            origin_current && push!(current, state.arg_origin[arg_w.arg])
+            state.arg_current[arg_w] = current
         end
         push!(current, dest_space)
     end
