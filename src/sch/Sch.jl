@@ -1594,6 +1594,10 @@ mutable struct ProcessorInternalState
     # Free-list of reset `TaskSpec`s (with their `data` vectors and `Argument`
     # cells) for reuse by `fire_tasks!`. Guarded by `queue`'s lock.
     spec_pool::Vector{TaskSpec}
+    # The scheduler's queued-task counter (`ProcessorStateDict.queued`, shared by all runners of
+    # one scheduler), kept here so the hot paths read a field instead of taking the
+    # states-dict lock to find it
+    queued::Threads.Atomic{Int}
 end
 struct ProcessorState
     state::ProcessorInternalState
@@ -1733,7 +1737,7 @@ function start_processor_runner!(istate::ProcessorInternalState, uid::UInt64, re
         tasks = istate.tasks
         proc_occupancy = istate.proc_occupancy
         time_pressure = istate.time_pressure
-        queued_counter = proc_states(uid).queued
+        queued_counter = istate.queued
 
         wid = root_worker_id(to_proc)
         work_to_do = false
@@ -2089,7 +2093,6 @@ function do_tasks(to_proc, return_queue, tasks)
     ctx_vars = first(tasks).ctx_vars::NamedTuple
     ctx = Dagger.log_context(ctx_vars.log_sink, ctx_vars.profile)
     uid = first(tasks).sch_uid
-    queued_counter = proc_states(uid).queued
     start_event = nothing
     state = proc_state!(uid, to_proc) do
         # Initialize the processor state and runner
@@ -2104,7 +2107,8 @@ function do_tasks(to_proc, return_queue, tasks)
                                         Set{Int}(),
                                         Dict{Int,Dagger.CancelToken}(),
                                         Ref(false),
-                                        TaskSpec[])
+                                        TaskSpec[],
+                                        proc_states(uid).queued)
         start_event = Base.Event()
         runner = start_processor_runner!(istate, uid, return_queue, start_event)
         @static if VERSION < v"1.9"
@@ -2116,6 +2120,7 @@ function do_tasks(to_proc, return_queue, tasks)
         notify(start_event)
     end
     istate = state.state
+    queued_counter = istate.queued
     # Refresh the runner's logging Context: the runner re-reads `istate.ctx`
     # every loop iteration, so log-sink toggles take effect at the next
     # enqueued batch. Plain (non-atomic) store: a racing runner iteration
