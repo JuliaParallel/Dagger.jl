@@ -17,11 +17,29 @@ abstract type Processor end
 const PROCESSOR_CALLBACKS = Dict{Symbol,Any}()
 const OSPROC_PROCESSOR_CACHE = LockedObject(Dict{Int,Set{Processor}}())
 
+# Pids whose processor hierarchy is in `OSPROC_PROCESSOR_CACHE`, readable without a lock: the
+# set is never mutated after it is published, only replaced (under the cache's lock).
+# `OSProc(pid)` checked the cache under `@safe_lock1` (a lock plus disabling and re-enabling
+# finalizers) on every construction, and `get_parent(::ThreadProc)` constructs one each time,
+# several times per candidate processor and task: with 64 threads that was hundreds of lock
+# operations per task.
+mutable struct KnownOSProcs
+    @atomic pids::Set{Int}
+end
+const OSPROC_KNOWN = KnownOSProcs(Set{Int}())
+function osproc_mark_known!(pid::Int, known::Bool)
+    # caller holds OSPROC_PROCESSOR_CACHE's lock
+    pids = copy(@atomic OSPROC_KNOWN.pids)
+    known ? push!(pids, pid) : delete!(pids, pid)
+    @atomic OSPROC_KNOWN.pids = pids
+    return
+end
+
 add_processor_callback!(func, name::String) =
     add_processor_callback!(func, Symbol(name))
 function add_processor_callback!(func, name::Symbol)
     Dagger.PROCESSOR_CALLBACKS[name] = func
-    @safe_lock1 OSPROC_PROCESSOR_CACHE cache delete!(cache, myid())
+    @safe_lock1 OSPROC_PROCESSOR_CACHE cache (delete!(cache, myid()); osproc_mark_known!(myid(), false))
     @safe_lock1 CPU_SPACE_PROCESSORS_CACHE cache delete!(cache, myid())
     Sch.invalidate_compat_procs_cache!()
 end
@@ -29,7 +47,7 @@ delete_processor_callback!(name::String) =
     delete_processor_callback!(Symbol(name))
 function delete_processor_callback!(name::Symbol)
     delete!(Dagger.PROCESSOR_CALLBACKS, name)
-    @safe_lock1 OSPROC_PROCESSOR_CACHE cache delete!(cache, myid())
+    @safe_lock1 OSPROC_PROCESSOR_CACHE cache (delete!(cache, myid()); osproc_mark_known!(myid(), false))
     @safe_lock1 CPU_SPACE_PROCESSORS_CACHE cache delete!(cache, myid())
     Sch.invalidate_compat_procs_cache!()
 end
@@ -110,11 +128,15 @@ computations.
 struct OSProc <: Processor
     pid::Int
     function OSProc(pid::Int=myid())
+        pid in (@atomic OSPROC_KNOWN.pids) && return new(pid)
         if !(@safe_lock1 OSPROC_PROCESSOR_CACHE cache haskey(cache, pid))
             procs = remotecall_fetch(get_processor_hierarchy, pid)
             @safe_lock1 OSPROC_PROCESSOR_CACHE cache begin
                 cache[pid] = procs
+                osproc_mark_known!(pid, true)
             end
+        else
+            @safe_lock1 OSPROC_PROCESSOR_CACHE cache (haskey(cache, pid) && osproc_mark_known!(pid, true))
         end
         return new(pid)
     end
@@ -124,6 +146,7 @@ function get_processors(proc::OSProc)
     @safe_lock1 OSPROC_PROCESSOR_CACHE cache begin
         if !haskey(cache, proc.pid)
             cache[proc.pid] = remotecall_fetch(get_processor_hierarchy, proc.pid)
+            osproc_mark_known!(proc.pid, true)
         end
         cache[proc.pid]
     end
