@@ -57,6 +57,10 @@
 #                  spawns, cross-owner dependent hops, fan-in trees and a
 #                  multi-phase exchange step with microsecond task bodies.
 #                  Opt-in (not in the default set); see BENCHMARK_NTASKS.
+#     - "metg"   : Task Bench task graphs (CPU only): a compute-bound kernel
+#                  swept from large tasks to small ones, whose timings give
+#                  METG, the minimum effective task granularity. Opt-in (not in
+#                  the default set); see BENCHMARK_METG_*.
 #     - "dtable" : DTables data operations (legacy; opt-in, see below)
 #   Available methods: "raw" (non-Dagger), "dagger" (Dagger).
 #   Available accelerations: "cuda", "amdgpu", "oneapi", "metal", "opencl" (require the relevant packages,
@@ -104,6 +108,27 @@
 #   Defaults to "0" (disabled; plain subprocess, worker.jl).
 # - BENCHMARK_NTASKS: Task count of the flat benchmarks in the "tasks" suite.
 #   Defaults to "256".
+# - BENCHMARK_METG_TYPE: Dependence pattern(s) of the "metg" suite's task
+#   graphs, comma-separated: trivial, no_comm, stencil_1d, stencil_1d_periodic,
+#   fft, nearest, spread, all_to_all. Defaults to "stencil_1d".
+# - BENCHMARK_METG_STEPS: Timesteps of a "metg" task graph. Defaults to "1000"
+#   (Task Bench's); fewer make a cheaper, noisier first look.
+# - BENCHMARK_METG_WIDTH: Tasks per timestep. Defaults to the number of
+#   processors.
+# - BENCHMARK_METG_ITER: Kernel iterations per task of the "metg" sweep, as
+#   exponents of two: a Julia expression evaluating to an integer or an iterable
+#   of integers. Defaults to "8:26": 2^26 down to 2^8, the sweep of most of Task
+#   Bench's METG experiments. The sweep has to reach from tasks large enough to
+#   run efficiently down to tasks too small to; one benchmark is created per
+#   exponent.
+# - BENCHMARK_METG_RADIX: Dependencies per task of the nearest and spread
+#   patterns. Defaults to "5".
+# - BENCHMARK_METG_PLACEMENT: "pinned" (every column of the graph on one
+#   processor, in contiguous blocks) or "unscoped" (the scheduler places every
+#   task). Defaults to "pinned".
+# - BENCHMARK_METG_LAUNCH: "task" (one `Dagger.@spawn` per task) or "bulk"
+#   (each timestep inside `Dagger.spawn_bulk`, which hands it to the scheduler
+#   as one batch). Defaults to "task".
 # - BENCHMARK_SECONDS: Time budget (seconds) per benchmark. Defaults to "30".
 # - BENCHMARK_SAMPLES: Max samples per benchmark. Defaults to "7".
 # - BENCHMARK_PROC_TIMEOUT: Wall-clock seconds to wait for a single benchmark
