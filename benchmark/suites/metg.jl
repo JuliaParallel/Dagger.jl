@@ -13,7 +13,9 @@
 # task depending on tasks of the previous timestep, in which each task validates
 # its inputs and runs the compute-bound kernel for `iter` iterations. `iter` is
 # swept from large to small, one benchmark per value. One more benchmark runs a
-# long kernel task on every processor at once: the FLOP/s reference.
+# long kernel task on every processor at once: the FLOP/s reference. Several
+# identical graphs can run at once, which gives every processor more than one
+# task per timestep; Task Bench reports METG for one graph and for four.
 #
 # The trials are ordinary timings of whole graphs. `benchmark/metg.jl` runs this
 # suite and derives the efficiency curve and METG from them; the BENCHMARK_METG_*
@@ -141,6 +143,7 @@ const metg_types = Symbol.(strip.(split(get(ENV, "BENCHMARK_METG_TYPE", "stencil
 const metg_steps = parse(Int, get(ENV, "BENCHMARK_METG_STEPS", "1000"))
 const metg_width = parse(Int, get(ENV, "BENCHMARK_METG_WIDTH", "0"))
 const metg_radix = parse(Int, get(ENV, "BENCHMARK_METG_RADIX", "5"))
+const metg_ngraphs = parse.(Int, strip.(split(get(ENV, "BENCHMARK_METG_NGRAPHS", "1"), ',')))
 const metg_exponents = let parsed = eval(Meta.parse(get(ENV, "BENCHMARK_METG_ITER", "8:26")))
     sort!(unique!(Int[parsed...]))
 end
@@ -168,9 +171,10 @@ function metg_graph(dependence::Symbol, timesteps, max_width, radix, iterations)
 end
 
 # Group key of a graph's sweep. `benchmark/metg.jl` parses it.
-function metg_label(g::TBGraph, placement, launch)
+function metg_label(g::TBGraph, ngraphs, placement, launch)
     label = String(g.dependence)
     g.dependence in (:nearest, :spread) && (label *= " radix=$(g.radix)")
+    ngraphs > 1 && (label *= " graphs=$ngraphs")
     label *= " steps=$(g.timesteps) width=$(g.max_width) $placement"
     launch == "bulk" && (label *= " bulk")
     return label
@@ -181,7 +185,8 @@ metg_spawn(g, t, p, inputs, scopes::Vector{Dagger.ExactScope}) =
 metg_spawn(g, t, p, inputs, ::Nothing) =
     Dagger.@spawn tb_execute_point(g, t, p, inputs...)
 
-# Launches timestep `t`, whose point `p` reads `prev[d + 1]` for every dependency `d`
+# Launches timestep `t` of one graph, whose point `p` reads `prev[d + 1]` for
+# every dependency `d`
 function metg_launch_row(g::TBGraph, t::Int, prev::Vector{Dagger.DTask}, scopes)
     row = Vector{Dagger.DTask}(undef, g.max_width)
     deps = Int[]
@@ -196,30 +201,39 @@ function metg_launch_row(g::TBGraph, t::Int, prev::Vector{Dagger.DTask}, scopes)
     end
     return row
 end
+# Launches timestep `t` of every graph, `prev` holding each graph's previous
+# timestep. The graphs are independent copies of `g` and advance together, as in
+# Task Bench's Legion implementation.
+metg_launch_step(g::TBGraph, t::Int, prev::Vector{Vector{Dagger.DTask}}, scopes) =
+    Vector{Dagger.DTask}[metg_launch_row(g, t, row, scopes) for row in prev]
 # The same, handing the timestep to the scheduler as one batch
-metg_launch_row_bulk(g::TBGraph, t::Int, prev::Vector{Dagger.DTask}, scopes) =
-    Dagger.spawn_bulk(() -> metg_launch_row(g, t, prev, scopes))::Vector{Dagger.DTask}
+metg_launch_step_bulk(g::TBGraph, t::Int, prev::Vector{Vector{Dagger.DTask}}, scopes) =
+    Dagger.spawn_bulk(() -> metg_launch_step(g, t, prev, scopes))::Vector{Vector{Dagger.DTask}}
 
-# Launches the whole graph and returns the tasks that nothing depends on. Only
-# those are kept: earlier timesteps are released as the graph advances.
-function metg_launch(g::TBGraph, scopes, bulk::Bool)
+# Launches `ngraphs` graphs and returns the tasks that nothing depends on. Only
+# those are kept: earlier timesteps are released as the graphs advance.
+function metg_launch(g::TBGraph, ngraphs::Int, scopes, bulk::Bool)
     # Every pattern with dependencies has each point read its own column, so the
     # last timestep transitively depends on all tasks; without dependencies no
     # task depends on any other
     independent = isempty(tb_dependencies!(Int[], g, 1, 0))
     sinks = Dagger.DTask[]
-    prev = Dagger.DTask[]
+    prev = [Dagger.DTask[] for _ in 1:ngraphs]
     for t in 0:g.timesteps-1
-        prev = bulk ? metg_launch_row_bulk(g, t, prev, scopes) : metg_launch_row(g, t, prev, scopes)
-        (independent || t == g.timesteps - 1) && append!(sinks, prev)
+        prev = bulk ? metg_launch_step_bulk(g, t, prev, scopes) : metg_launch_step(g, t, prev, scopes)
+        if independent || t == g.timesteps - 1
+            for row in prev
+                append!(sinks, row)
+            end
+        end
     end
     return sinks
 end
 
-# The timed operation. Like Task Bench's clock, it covers launching the graph as
-# well as running it.
-function metg_run!(out::Base.RefValue{Vector{Dagger.DTask}}, g::TBGraph, scopes, bulk::Bool)
-    sinks = metg_launch(g, scopes, bulk)
+# The timed operation. Like Task Bench's clock, it covers launching the graphs
+# as well as running them.
+function metg_run!(out::Base.RefValue{Vector{Dagger.DTask}}, g::TBGraph, ngraphs::Int, scopes, bulk::Bool)
+    sinks = metg_launch(g, ngraphs, scopes, bulk)
     foreach(wait, sinks)
     out[] = sinks
     return nothing
@@ -227,9 +241,9 @@ end
 
 # Task Bench validates every run: the inputs inside each task (a failure there
 # fails every task downstream), the final outputs here.
-function metg_check(g::TBGraph, sinks::Vector{Dagger.DTask})
-    first_step = g.timesteps - length(sinks) ÷ g.max_width
-    expected = [(t, p) for t in first_step:g.timesteps-1 for p in 0:g.max_width-1]
+function metg_check(g::TBGraph, ngraphs::Int, sinks::Vector{Dagger.DTask})
+    first_step = g.timesteps - length(sinks) ÷ (ngraphs * g.max_width)
+    expected = [(t, p) for t in first_step:g.timesteps-1 for _ in 1:ngraphs for p in 0:g.max_width-1]
     fetch.(sinks) == expected || error("Task Bench graph ($(g.dependence)) produced wrong output")
     return nothing
 end
@@ -249,6 +263,7 @@ function metg_suite(_ctx; method, accels)
     metg_launch_mode in ("task", "bulk") || error("BENCHMARK_METG_LAUNCH must be `task` or `bulk`")
     !isempty(metg_exponents) && all(e -> 0 <= e <= 60, metg_exponents) ||
         error("BENCHMARK_METG_ITER must select exponents of two between 0 and 60")
+    all(>=(1), metg_ngraphs) || error("BENCHMARK_METG_NGRAPHS must be positive")
 
     # CPU processors in the tasks suite's order: identical on every rank, with
     # every owner's (worker's / rank's) processors contiguous
@@ -277,21 +292,22 @@ function metg_suite(_ctx; method, accels)
             teardown = (foreach(fetch, out[]); out = nothing; @everywhere GC.gc()))
     end
 
-    for dependence in metg_types
+    for dependence in metg_types, ngraphs in metg_ngraphs
         graph(iterations; timesteps=metg_steps) = metg_graph(dependence, timesteps, width, metg_radix, iterations)
+        label = metg_label(graph(1), ngraphs, metg_placement, metg_launch_mode)
         # A few timesteps at a tiny size reach every dependence set
         probe = graph(1; timesteps=min(metg_steps, tb_max_dependence_sets(graph(1)) + 2))
-        supported(() -> (out = Ref{Vector{Dagger.DTask}}(); metg_run!(out, probe, scopes, bulk); metg_check(probe, out[])),
-                  "metg/$dependence") || continue
+        supported(() -> (out = Ref{Vector{Dagger.DTask}}(); metg_run!(out, probe, ngraphs, scopes, bulk);
+                         metg_check(probe, ngraphs, out[])), "metg/$label") || continue
         sweep = BenchmarkGroup()
         for exponent in metg_exponents
             g = graph(1 << exponent)
             sweep["iter=2^$(lpad(exponent, 2, '0'))"] = @benchmarkable(
-                metg_run!(out, $g, $scopes, $bulk),
+                metg_run!(out, $g, $ngraphs, $scopes, $bulk),
                 setup = (out = Ref{Vector{Dagger.DTask}}()),
-                teardown = (metg_check($g, out[]); out = nothing; @everywhere GC.gc()))
+                teardown = (metg_check($g, $ngraphs, out[]); out = nothing; @everywhere GC.gc()))
         end
-        sub[metg_label(graph(1), metg_placement, metg_launch_mode)] = sweep
+        sub[label] = sweep
     end
 
     suite = BenchmarkGroup()

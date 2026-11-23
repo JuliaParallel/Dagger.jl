@@ -116,6 +116,9 @@
 #   (Task Bench's); fewer make a cheaper, noisier first look.
 # - BENCHMARK_METG_WIDTH: Tasks per timestep. Defaults to the number of
 #   processors.
+# - BENCHMARK_METG_NGRAPHS: Number of identical "metg" task graphs run at once,
+#   which gives every processor that many tasks per timestep; comma-separated
+#   for a sweep of each (Task Bench charts 1 and 4). Defaults to "1".
 # - BENCHMARK_METG_ITER: Kernel iterations per task of the "metg" sweep, as
 #   exponents of two: a Julia expression evaluating to an integer or an iterable
 #   of integers. Defaults to "8:26": 2^26 down to 2^8, the sweep of most of Task

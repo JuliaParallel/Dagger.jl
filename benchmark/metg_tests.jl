@@ -60,7 +60,8 @@ end
     @test result.cores == 4
     @test result.peak_flops ≈ 1.4e10
     @test 1e3 * result.metg ≈ 8.104545170115738
-    @test result.sweep == (; dependence="stencil_1d", radix=nothing, steps=100, width=4, placement="pinned", bulk=false)
+    @test result.sweep == (; dependence="stencil_1d", radix=nothing, graphs=1, steps=100, width=4,
+                             placement="pinned", bulk=false)
     text = String(take!(io))
     @test occursin("metg / dagger / owners=2 procs=4 / stencil_1d steps=100 width=4 pinned", text)
     @test occursin("400 tasks per run, charged to 1 node(s) x 4 cores", text)
@@ -96,6 +97,33 @@ end
         @test result.sweep.radix == "5" && result.sweep.placement == "unscoped" && result.sweep.bulk
         @test result.cores == 2
         @test basename(result.logpath) == "dagger_unscoped_bulk_ngraphs_1_type_nearest_radix_5_nodes_2.log"
+    end
+
+    # Several graphs at once: four times the tasks and FLOPs in the same elapsed
+    # time. Expected values from chart_metg.py -g 4 on the log written below.
+    four = [(key(iter(p); group="stencil_1d graphs=4 steps=100 width=4 pinned"), ns(p.elapsed)) for p in METG_TEST_POINTS]
+    io = IOBuffer()
+    result = only(metg_report(io, four; peak=5.6e10))
+    @test result.sweep.graphs == 4
+    @test 1e3 * result.metg ≈ 2.0261362925289346
+    @test occursin("1600 tasks per run in 4 graphs, charged to 1 node(s) x 4 cores", String(take!(io)))
+    @test 1e3 * only(metg_report(devnull, four; peak=:sweep)).metg ≈ 1.9942105263157894
+    @test 1e3 * only(metg_report(devnull, four; peak=4e10, threshold=0.8)).metg ≈ 2.1618755319401446
+    mktempdir() do dir
+        result = only(metg_report(devnull, four; peak=5.6e10, logdir=dir))
+        @test basename(result.logpath) == "dagger_ngraphs_4_type_stencil_1d_nodes_1.log"
+        log = read(result.logpath, String)
+        runs = sum(p -> length(p.elapsed), METG_TEST_POINTS)
+        # chart_metg.py reads every graph's configuration and one set of totals per run
+        @test count(r"^\s*Task Graph \d:$"m, log) == 4 * runs
+        @test count(r"^\s*Iterations: \d+$"m, log) == 4 * runs
+        @test count("Elapsed Time", log) == runs
+        @test occursin(r"^Total Tasks 1600$"m, log) && occursin(r"^Total FLOPs 214748467200$"m, log)
+        radix = [(key(iter(p); group="spread radix=5 graphs=2 steps=100 width=4 unscoped"), ns(p.elapsed))
+                 for p in METG_TEST_POINTS]
+        result = only(metg_report(devnull, radix; logdir=dir))
+        @test result.sweep.radix == "5" && result.sweep.graphs == 2
+        @test basename(result.logpath) == "dagger_unscoped_ngraphs_2_type_spread_radix_5_nodes_1.log"
     end
 
     # Several sweeps of one run share its reference

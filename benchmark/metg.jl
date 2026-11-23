@@ -67,7 +67,7 @@
 # - BENCHMARK_METG_THRESHOLD: Efficiency threshold. Defaults to "0.5".
 # - BENCHMARK_METG_LOGDIR: When set, every sweep is also written there as a log
 #   in Task Bench's report format, named as its chart scripts expect
-#   (dagger_ngraphs_1_type_<type>_nodes_<nodes>.log), for charting next to other
+#   (dagger_ngraphs_<n>_type_<type>_nodes_<nodes>.log), for charting next to other
 #   systems. The report then gives the scripts/chart_metg.py command that
 #   repeats this analysis on the log.
 
@@ -148,23 +148,29 @@ function metg_print_table(io::IO, table)
 end
 
 # A sweep in Task Bench's report format, one report per sample, with the lines
-# chart_metg.py reads
+# chart_metg.py reads: the configuration of every graph, then the totals
 function metg_write_log(path, sweep, points)
-    tasks = sweep.steps * sweep.width
+    tasks = sweep.graphs * sweep.steps * sweep.width
     open(path, "w") do io
         for p in sort(points; by=p -> p.iterations, rev=true), elapsed in p.elapsed
             flops = tasks * metg_flops_per_task(p.iterations)
             print(io, """
                 Running Task Benchmark
                   Configuration:
-                    Task Graph 1:
-                      Time Steps: $(sweep.steps)
-                      Max Width: $(sweep.width)
-                      Dependence Type: $(sweep.dependence)
-                      Kernel:
-                        Type: compute_bound
-                        Iterations: $(p.iterations)
-                      Output Bytes: 16
+                """)
+            for graph in 1:sweep.graphs
+                print(io, """
+                        Task Graph $graph:
+                          Time Steps: $(sweep.steps)
+                          Max Width: $(sweep.width)
+                          Dependence Type: $(sweep.dependence)
+                          Kernel:
+                            Type: compute_bound
+                            Iterations: $(p.iterations)
+                          Output Bytes: 16
+                    """)
+            end
+            print(io, """
                 Total Tasks $tasks
                 Total FLOPs $flops
                 Total Bytes 0
@@ -178,7 +184,7 @@ function metg_write_log(path, sweep, points)
 end
 
 # Group key of a sweep, as suites/metg.jl `metg_label` writes it
-const METG_SWEEP_KEY = r"^(\w+?)(?: radix=(\d+))? steps=(\d+) width=(\d+) (pinned|unscoped)( bulk)?$"
+const METG_SWEEP_KEY = r"^(\w+?)(?: radix=(\d+))?(?: graphs=(\d+))? steps=(\d+) width=(\d+) (pinned|unscoped)( bulk)?$"
 
 """
     metg_report(io, leaves; nodes=1, cores=nothing, peak=nothing, threshold=0.5, logdir=nothing)
@@ -209,9 +215,9 @@ function metg_report(io::IO, leaves; nodes::Int=1, cores=nothing, peak=nothing, 
         m = match(METG_SWEEP_KEY, label)
         procs = match(r"procs=(\d+)", layout)
         (m === nothing || procs === nothing) && error("Unrecognized metg benchmark group: $(join(key, " / "))")
-        sweep = (; dependence=String(m[1]), radix=m[2], steps=parse(Int, m[3]), width=parse(Int, m[4]),
-                   placement=String(m[5]), bulk=m[6] !== nothing)
-        tasks = sweep.steps * sweep.width
+        sweep = (; dependence=String(m[1]), radix=m[2], graphs=m[3] === nothing ? 1 : parse(Int, m[3]),
+                   steps=parse(Int, m[4]), width=parse(Int, m[5]), placement=String(m[6]), bulk=m[7] !== nothing)
+        tasks = sweep.graphs * sweep.steps * sweep.width
         ncores = cores === nothing ? parse(Int, procs[1]) ÷ nodes : cores
         ncores >= 1 || error("BENCHMARK_METG_NODES ($nodes) exceeds the $(procs[1]) processors of $(join(key, " / "))")
 
@@ -228,7 +234,8 @@ function metg_report(io::IO, leaves; nodes::Int=1, cores=nothing, peak=nothing, 
         table = metg_table(points; tasks, nodes, cores=ncores, peak_flops)
         println(io)
         println(io, "metg / ", join(key, " / "))
-        println(io, "  $tasks tasks per run, charged to $nodes node(s) x $ncores cores")
+        println(io, "  $tasks tasks per run", sweep.graphs == 1 ? "" : " in $(sweep.graphs) graphs",
+                ", charged to $nodes node(s) x $ncores cores")
         if peak_flops === nothing
             println(io, "  efficiency relative to the largest tasks of the sweep",
                     peak === :sweep ? "" : " (no reference run among the results)")
@@ -253,11 +260,11 @@ function metg_report(io::IO, leaves; nodes::Int=1, cores=nothing, peak=nothing, 
         logpath = nothing
         if logdir !== nothing
             name = "dagger" * (sweep.placement == "pinned" ? "" : "_$(sweep.placement)") * (sweep.bulk ? "_bulk" : "") *
-                "_ngraphs_1_type_$(sweep.dependence)" * (sweep.radix === nothing ? "" : "_radix_$(sweep.radix)") *
+                "_ngraphs_$(sweep.graphs)_type_$(sweep.dependence)" * (sweep.radix === nothing ? "" : "_radix_$(sweep.radix)") *
                 "_nodes_$nodes.log"
             logpath = metg_write_log(joinpath(mkpath(logdir), name), sweep, points)
             println(io, "  Task Bench log: $logpath")
-            println(io, "    scripts/chart_metg.py -g 1 -n $nodes -c $ncores -t $threshold",
+            println(io, "    scripts/chart_metg.py -g $(sweep.graphs) -n $nodes -c $ncores -t $threshold",
                     peak_flops === nothing ? "" : " --peak-compute-bandwidth $peak_flops", " $logpath")
         end
         push!(results, (; method, layout, label, sweep, nodes, cores=ncores, peak_flops, table, metg, logpath))
