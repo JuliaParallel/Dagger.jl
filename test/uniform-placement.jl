@@ -116,3 +116,23 @@ Dagger.compatible_processors(::UniformPlacementAccel, ::Dagger.AbstractScope, pr
     @test Dagger.Sch.compatible_processors_ordered(accel, scope, grown) == grown
     Dagger.Sch.invalidate_compat_procs_cache!()
 end
+
+# `ordered` is filled without the cache lock: threads that race on a fresh entry may each sort the
+# set, and every one of them must see a complete, canonical vector (never a partial or stale one).
+@testset "compatible_processors_ordered is safe to race on a fresh entry" begin
+    accel = UniformPlacementAccel()
+    scope = Dagger.AnyScope()
+    procs = Dagger.Processor[RankProc(r, 1) for r in 3:-1:0]
+    want = Dagger.Processor[RankProc(r, 1) for r in 0:3]
+    for _ in 1:200
+        Dagger.Sch.invalidate_compat_procs_cache!()
+        go = Threads.Atomic{Bool}(false)
+        tasks = [Threads.@spawn begin
+            while !go[]; end
+            Dagger.Sch.compatible_processors_ordered(accel, scope, procs)
+        end for _ in 1:max(2, Threads.nthreads())]
+        go[] = true
+        @test all(==(want), fetch.(tasks))
+    end
+    Dagger.Sch.invalidate_compat_procs_cache!()
+end

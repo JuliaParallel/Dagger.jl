@@ -99,12 +99,14 @@ completion handler (via `schedule_dependents!`) so there is no central ready que
 # guards against objectid reuse after GC and keeps the scope alive so its id
 # cannot be recycled while the entry lives.
 # One cached (accel, scope, procs) lookup. `ordered` is the same set in the
-# acceleration's canonical order, built on first use by uniform placement.
+# acceleration's canonical order, built on first use by uniform placement. It is
+# filled without the cache lock, so it is atomic: the release store publishes the
+# fully built vector to a thread that reads it with an acquire load.
 mutable struct CompatEntry
     const scope::Any
     const procs::Vector{Processor}
     const compat::Set{Processor}
-    ordered::Union{Nothing,Vector{Processor}}
+    @atomic ordered::Union{Nothing,Vector{Processor}}
 end
 const COMPAT_PROCS_CACHE = LockedObject(Dagger.BasicLFUCache{Tuple{UInt,UInt},CompatEntry}(256))
 # Drop all cached compatible-processor sets. Called whenever the processor
@@ -165,10 +167,12 @@ vector is shared: callers must not mutate it.
 """
 function compatible_processors_ordered(accel, scope, procs::Vector{<:Processor})
     entry = compat_entry(accel, scope, procs)
-    ordered = entry.ordered
+    ordered = @atomic :acquire entry.ordered
     if ordered === nothing
+        # Two threads may both get here and sort the same set; the result is
+        # deterministic, so whichever store lands last is equal to the other.
         ordered = Dagger.sort_processors_canonical!(Vector{Processor}(collect(entry.compat)), accel)
-        entry.ordered = ordered
+        @atomic :release entry.ordered = ordered
     end
     return ordered
 end
