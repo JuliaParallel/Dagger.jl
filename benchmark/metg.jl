@@ -48,11 +48,11 @@
 # ----------------------------------
 # - Sampling is the orchestrator's: an unrecorded warm-up run, then up to
 #   BENCHMARK_SAMPLES samples within BENCHMARK_SECONDS, instead of min(s + 1, 5)
-#   repetitions of the s-th `iter`. The warm-up keeps compilation out of the
-#   timings; Task Bench's implementations are compiled ahead of time. A full
-#   sweep takes a while: the largest tasks run for minutes per sample at 1000
-#   timesteps, so under MPI raise BENCHMARK_PROC_TIMEOUT, which bounds the whole
-#   run there.
+#   repetitions of the s-th `iter`. The warm-up is Task Bench's practice too:
+#   its MPI, Legion and HPX implementations run the graph once before the run
+#   they time. A full sweep takes a while: the largest tasks run for minutes per
+#   sample at 1000 timesteps, so under MPI raise BENCHMARK_PROC_TIMEOUT, which
+#   bounds the whole run there.
 # - chart_metg.py also rejects a log whose repetition count drops at the
 #   threshold (a sign of a truncated batch job). Time-budgeted sampling can do
 #   that legitimately, so the check is not applied here.
