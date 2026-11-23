@@ -60,7 +60,8 @@
 #     - "metg"   : Task Bench task graphs (CPU only): a compute-bound kernel
 #                  swept from large tasks to small ones, whose timings give
 #                  METG, the minimum effective task granularity. Opt-in (not in
-#                  the default set); see BENCHMARK_METG_*.
+#                  the default set); `benchmark/metg.jl` runs it and derives the
+#                  efficiency curve and METG. See BENCHMARK_METG_*.
 #     - "dtable" : DTables data operations (legacy; opt-in, see below)
 #   Available methods: "raw" (non-Dagger), "dagger" (Dagger).
 #   Available accelerations: "cuda", "amdgpu", "oneapi", "metal", "opencl" (require the relevant packages,
@@ -129,6 +130,8 @@
 # - BENCHMARK_METG_LAUNCH: "task" (one `Dagger.@spawn` per task) or "bulk"
 #   (each timestep inside `Dagger.spawn_bulk`, which hands it to the scheduler
 #   as one batch). Defaults to "task".
+# - BENCHMARK_METG_NODES, _CORES, _PEAK_FLOPS, _THRESHOLD, _LOGDIR: Settings of
+#   the analysis in `benchmark/metg.jl`; see its header.
 # - BENCHMARK_SECONDS: Time budget (seconds) per benchmark. Defaults to "30".
 # - BENCHMARK_SAMPLES: Max samples per benchmark. Defaults to "7".
 # - BENCHMARK_PROC_TIMEOUT: Wall-clock seconds to wait for a single benchmark

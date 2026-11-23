@@ -15,9 +15,9 @@
 # swept from large to small, one benchmark per value. One more benchmark runs a
 # long kernel task on every processor at once: the FLOP/s reference.
 #
-# The trials are ordinary timings of whole graphs, from which the efficiency
-# curve and METG follow; the BENCHMARK_METG_* variables are described in
-# `benchmark/benchmarks.jl`.
+# The trials are ordinary timings of whole graphs. `benchmark/metg.jl` runs this
+# suite and derives the efficiency curve and METG from them; the BENCHMARK_METG_*
+# variables are described in `benchmark/benchmarks.jl`.
 #
 # As in the tasks suite, placement is explicit (`ExactScope`) unless the
 # benchmark is asked to be about placement, and timed runs `wait`. Since `wait`
@@ -95,7 +95,7 @@
 
     # `execute_kernel_compute`: 64 doubles, `a = a * a + a` on each of them per
     # iteration, held in 16 four-wide vectors as on the kernel's AVX2 path.
-    # A task is credited with 2 * 64 * iterations + 64 FLOPs
+    # `benchmark/metg.jl` credits a task with 2 * 64 * iterations + 64 FLOPs
     # (`count_flops_per_task`), so the loop has to run at the C kernel's speed
     # for the efficiency to be comparable. The FMA is therefore explicit:
     # written on tuples of scalars it is left to the auto-vectorizer, which
@@ -167,7 +167,7 @@ function metg_graph(dependence::Symbol, timesteps, max_width, radix, iterations)
     return TBGraph(dependence, timesteps, max_width, radix, period, iterations)
 end
 
-# Group key of a graph's sweep
+# Group key of a graph's sweep. `benchmark/metg.jl` parses it.
 function metg_label(g::TBGraph, placement, launch)
     label = String(g.dependence)
     g.dependence in (:nearest, :spread) && (label *= " radix=$(g.radix)")
