@@ -800,6 +800,7 @@ candidate lookups cost about 130 us for 16 threads and grew with the thread coun
 """
 @reuse_scope function estimate_task_costs!(sorted_procs, costs, state, procs, task; sig=nothing)
     np = length(procs)
+    np == 0 && return   # nothing to rank: the caller reports "No processors available"
     if np == 1
         # Nothing to rank: the costs only exist to order the candidates, and a
         # scan of the task's chunks to order one of them is pure overhead. This
