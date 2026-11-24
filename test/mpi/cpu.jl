@@ -147,6 +147,7 @@ end
 
 include("spawn.jl")
 include("noaliasing_args.jl")
+include("nonconcrete_fields.jl")
 
 @testset "Datadeps" begin
 
