@@ -1023,3 +1023,40 @@ lesson.
     and MPI paths. When diagnosing MPI uniformity errors, check for an earlier
     task failure that left ranks on different operations. Compare the actual
     Julia versions behind rolling CI labels such as `pre`.
+
+96. **`type_may_alias(T) == false` is a promise, and a non-concrete field
+   cannot make it.** Datadeps passes such values through untracked, with no
+   reader/writer ordering. `type_may_alias` used to answer `false` for any
+   abstract, `Union`, or untyped field type, so `struct Box; v::AbstractVector;
+   end` was silently untracked: an `In(b)` reader ran concurrently with the
+   `InOut(b)` writer and saw the old data, while the same struct with
+   `v::Vector{Float64}` was ordered correctly. Such a type must be checked per
+   value (`type_alias_depends_on_value` / `value_may_alias`). And a tracked value
+   with *no memory spans* is a hazard in its own right: its aliasing carries no
+   address, so every such value has an equal aliasing (`NoAliasing`, an empty
+   `CombinedAliasing`), and the aliased-object cache, keyed by aliasing, hands one
+   argument's slot to the next. Under MPI, `S(1)` and `S(2)` of `struct S; x;
+   end` reached tasks as `S(2), S(2)`. Pass span-less values through untracked
+   rather than giving them slots. The ordering bug reproduces with threads in
+   one process; the slot collision reproduced only under MPI.
+
+83. **Equal memory spans can belong to different argument values.** With
+   default aliasing, `Part(1, v)` and `Part(2, v)` of
+   `struct Part; id::Int; data::Vector{Float64}; end` have the same spans.
+   An `In(Part(2, v))` reader correctly waited for an `InOut(Part(1, v))`
+   writer, then received `id == 1` because `aliased_object!` reused the
+   writer's entire `Chunk`. This reproduced on one process with both
+   Datadeps planners. Slot reuse must preserve wrapper metadata while
+   sharing the backing storage. A guard for `NoAliasing()` alone does not
+   address this case, and it cannot restore dependencies for buffers hidden
+   by an `aliasing` override that returns `NoAliasing()`.
+
+84. **An untracked argument needs an empty dependency range.** A placeholder
+   `DataDepsTaskDependency` with both flags false still constructs an
+   `ArgumentWrapper` and checks its identity hash across MPI ranks. Two ranks
+   can hold equivalent `Part` values with vector fields and produce different
+   hashes, so `check_uniformity!(true)` rejects a plain input even when
+   `type_may_alias(::Type{Part}) = false`. Keeping `TaskArgInfo.arg` with an
+   empty range avoids the check and lets normal task transport pass the
+   argument through. Both planners passed a two-rank probe with plain values
+   and upstream task results produced on the opposite rank.
