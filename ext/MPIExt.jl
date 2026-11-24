@@ -2432,15 +2432,13 @@ end
 # `@spawn` never reaches. Datadeps tasks (tagged) keep the later cleanup: their planning shares
 # the key with their execution, and reclaiming between the two would collide on sub-ids.
 function execute!(proc::MPIProcessor, f, args...; kwargs...)
-    if Dagger.in_task()
-        opts = Dagger.get_tls().task_spec.options
-        if opts !== nothing && opts.tag === nothing
-            tid = sch_handle().thunk_id.id
-            try
-                return mpi_execute_body(proc, f, args...; kwargs...)
-            finally
-                mpi_cleanup_tid(tid)
-            end
+    opts = Dagger.get_tls().task_spec.options
+    if opts !== nothing && opts.tag === nothing
+        tid = sch_handle().thunk_id.id
+        try
+            return mpi_execute_body(proc, f, args...; kwargs...)
+        finally
+            mpi_cleanup_tid(tid)
         end
     end
     return mpi_execute_body(proc, f, args...; kwargs...)
