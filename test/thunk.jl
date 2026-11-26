@@ -64,6 +64,22 @@ end
     @test Dagger.Sch.EAGER_CONTEXT[] === nothing
     @test fetch(Dagger.@spawn 1+1) == 2
     @test Dagger.Sch.EAGER_CONTEXT[] !== nothing
+    @testset "halting the scheduler by cancellation is not reported as an error" begin
+        # `cancel!(;halt_sch=true)` ends the eager scheduler's own task with an
+        # `InterruptException`; that used to be printed as "Error in eager scheduler".
+        path, io = mktemp()
+        try
+            redirect_stderr(io) do
+                Dagger.cancel!(;halt_sch=true)
+            end
+            close(io)
+            @test !occursin("Error in eager scheduler", read(path, String))
+        finally
+            rm(path; force=true)
+        end
+        Dagger.Sch.EAGER_CONTEXT[] = nothing
+        @test fetch(Dagger.@spawn 1+1) == 2
+    end
     @testset "per-call" begin
         x = 2
         a = @spawn x + x

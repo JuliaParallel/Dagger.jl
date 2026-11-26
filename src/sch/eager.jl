@@ -53,6 +53,11 @@ function init_eager()
     catch err
         # Scheduler halting is considered normal
         err isa SchedulerHaltedException && return
+        # So is a halt requested by `cancel!(; halt_sch=true)`: the eager task
+        # then fails with the cancellation's `InterruptException`, which is the
+        # expected result, not an error of the scheduler.
+        state = EAGER_STATE[]
+        state !== nothing && state.halt_cancelled[] && return
 
         iob = IOContext(IOBuffer(), :color=>true)
         println(iob, "Error in eager scheduler:")
