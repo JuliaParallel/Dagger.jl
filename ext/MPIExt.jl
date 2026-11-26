@@ -2955,6 +2955,46 @@ function mpi_union_scope_processor(scope::Dagger.UnionScope)
     return proc
 end
 
+# The processors of a single-rank union scope in the order the owner's scheduler sees them
+# (`select_processors_uniform!`: the canonical order), so that a rank which elides the task
+# can stamp its placeholder with the processor the owner will pick: under uniform execution
+# that is the candidate at `mod(id - 1, n) + 1` (`select_processors_uniform!`; the owner rank
+# is either the whole candidate list or not in it, so no preferred block shortens it).
+# `mpi_union_scope_processor` names a fixed member, which gives the right rank but, on a
+# non-owner, another thread than the owner's: the placeholder and the real result then
+# disagreed on `chunk.processor`. Same content-keyed, lock-free cache as above.
+const MPI_UNION_ORDER_CACHE = MPIUnionScopeCache(Dict{UInt,Tuple{Any,Any}}())
+const MPI_UNION_ORDER_CACHE_LOCK = ReentrantLock()
+function mpi_union_scope_ordered(accel::MPIAcceleration, scope::Dagger.UnionScope)::Union{Nothing,Vector{Processor}}
+    key = mpi_union_key(scope)
+    hit = get((@atomic MPI_UNION_ORDER_CACHE.table), key, nothing)
+    hit !== nothing && hit[1] === scope && return hit[2]::Union{Nothing,Vector{Processor}}
+    ordered = nothing
+    if mpi_union_scope_processor(scope) !== nothing
+        ordered = Processor[sc.processor for sc in scope.scopes]
+        unique!(ordered)
+        # Without a task: the canonical order only, no rotation
+        Dagger.select_processors_uniform!(ordered, accel)
+    end
+    lock(MPI_UNION_ORDER_CACHE_LOCK) do
+        old = @atomic MPI_UNION_ORDER_CACHE.table
+        table = length(old) >= 256 ? Dict{UInt,Tuple{Any,Any}}() : copy(old)
+        table[key] = (scope, ordered)
+        @atomic MPI_UNION_ORDER_CACHE.table = table
+    end
+    return ordered
+end
+
+# The processor the owner's scheduler will run task `uid` on, when its scope names one
+# rank; `proc` (the scope's fixed member) otherwise
+function mpi_planned_processor(accel::MPIAcceleration, opts::Options, proc::MPIProcessor, uid)::MPIProcessor
+    scope = mpi_task_scope(opts)
+    scope isa Dagger.UnionScope || return proc
+    ordered = mpi_union_scope_ordered(accel, scope)
+    ordered === nothing && return proc
+    return ordered[mod(Int(uid) - 1, length(ordered)) + 1]::MPIProcessor
+end
+
 # At spawn time the scheduler has not yet filled in the execution or result scope
 function mpi_task_processor(opts::Options)::Union{Nothing,MPIProcessor}
     (opts.exec_scope === nothing && opts.result_scope === nothing) || return nothing
@@ -3152,7 +3192,9 @@ function Dagger.elide_task!(accel::MPIAcceleration, spec, task)
         mpi_arg_participates(Dagger.value(arg), local_rank) && return false
     end
     mpi_chunk_scopes_fit(opts, fargs) || return false
-    # The placeholder `execute!` stamps on a non-owner, with the id it would get
+    # The placeholder `execute!` stamps on a non-owner, with the id it would get, on the
+    # processor the owner will run it on
+    proc = mpi_planned_processor(accel, opts, proc, task.uid)
     space = memory_space(nothing, proc)::MPIMemorySpace
     # N.B. `execute!` first takes a ref id for the task's tag when the task has no
     # tag option (`to_tag()`), so the result chunk is the second id of its task.

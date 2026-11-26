@@ -53,6 +53,10 @@ elide_where() = (MPI.Comm_rank(MPI.COMM_WORLD), Threads.threadid())   # concrete
             @test all(w -> w[1] == target, where)
             @test length(unique(last.(where))) >= min(2, Threads.nthreads())
             @test count(t -> t.stub !== nothing, tasks) == (rank == target ? 0 : 16)
+            # A spectator's placeholder names the processor the owner ran the task on (it used to name a fixed
+            # member of the scope, so the ranks disagreed on `chunk.processor`)
+            stamped = [(p.rank, p.innerProc.tid) for p in (fetch(t; raw=true).processor for t in tasks)]
+            @test allequal(MPI.Allgather(hash(stamped), comm))
             # a chain across two rank-level scopes, and a failure
             a = Dagger.@spawn scope=Dagger.scope(mpi_rank=0) elide_inc(1)
             b = Dagger.@spawn scope=Dagger.scope(mpi_rank=nranks-1) elide_add(a, 10)
