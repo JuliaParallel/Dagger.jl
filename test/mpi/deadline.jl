@@ -6,7 +6,9 @@ function within(f, secs::Real, what::AbstractString)
     watchdog = Threads.@spawn begin
         if timedwait(() -> done[], float(secs); pollint=0.05) !== :ok
             Core.println("[$(MPI.Comm_rank(MPI.COMM_WORLD))] Test Failed: TIMEOUT after $(secs) s in: $what")
-            MPI.Abort(MPI.COMM_WORLD, 1)
+            # leave at once: the other ranks cannot make progress without this one, and a normal exit
+            # would wait for the very task that is stuck
+            ccall(:_exit, Cvoid, (Cint,), 1)
         end
     end
     try

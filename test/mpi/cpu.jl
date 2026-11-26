@@ -151,6 +151,7 @@ include("noaliasing_args.jl")
 @testset "Datadeps" begin
 
 include("threads.jl")
+include("streaming.jl")
 
 @testset "Uniform chunk creation" begin
     Random.seed!(1)
