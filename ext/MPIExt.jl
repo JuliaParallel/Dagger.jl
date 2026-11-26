@@ -1527,7 +1527,7 @@ const BCAST_RELAY_HEARTBEAT_ITERS = 1000
 # forward the raw bytes to this rank's tree children, then deliver the payload.
 # Forwarding is NOT gated by datadeps task dispatch — that is what breaks the
 # forwarder wait-cycle.
-function bcast_relay_loop(state::BcastState)
+function bcast_relay_loop(state::BcastState, spin_iters::Int=BCAST_RELAY_SPIN_ITERS)
     comm = state.bcast_comm
     rank = MPI.Comm_rank(comm)
     sz = MPI.Comm_size(comm)
@@ -1543,7 +1543,7 @@ function bcast_relay_loop(state::BcastState)
             got, msg, stat = MPI.Improbe(MPI.ANY_SOURCE, MPI.ANY_TAG, comm, MPI.Status)
             if !got
                 idle += 1
-                if idle <= BCAST_RELAY_SPIN_ITERS || !may_backoff
+                if idle <= spin_iters || !may_backoff
                     yield()
                 else
                     # N.B. `Libc.systemsleep`, not `sleep`: `sleep` parks the
@@ -1603,7 +1603,11 @@ function start_bcast_relay!(accel_comm::MPI.Comm)
     # migratable relay competes with the tasks for the only free thread and hung the delegation test at
     # 4 ranks x 2 threads, so there it keeps the creator's thread.
     migratable = Threads.nthreads(:default) >= 4
-    t = Task(() -> bcast_relay_loop(state))
+    # A migratable relay that spins on `yield()` wakes another thread with every call (the task goes back to
+    # the shared queue), which keeps most of a rank's threads out of sleep; it sleeps between probes at once.
+    # One that stays on the driver's thread shares that thread and must yield to the tasks there.
+    spin_iters = migratable ? 0 : BCAST_RELAY_SPIN_ITERS
+    t = Task(() -> bcast_relay_loop(state, spin_iters))
     if migratable
         Dagger.set_task_migratable!(t)
     else
