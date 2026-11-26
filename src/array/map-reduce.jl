@@ -30,8 +30,7 @@ function stage(ctx::Context, node::Map)
     else
         # Non-uniform (e.g. Distributed) execution: spawn directly, without
         # datadeps. This avoids forcing datadeps aliasing analysis on the chunk
-        # element type, which is unsupported for non-isbits eltypes (e.g. the
-        # `OnlineStats` accumulators produced by `mean`/`var`/`std`).
+        # element type, which is unsupported for non-isbits eltypes.
         for i in eachindex(domains)
             inps = map(x->chunks(x)[i], inputs)
             thunks[i] = Dagger.@spawn map(f, inps...)
@@ -151,7 +150,6 @@ end
 #### High-Level MapReduce
 
 import Statistics: mean, var, std
-import OnlineStats
 
 Base.mapreduce(f::Function, op::Function, x::DArray; dims=nothing, init=Base._InitialValue()) =
     _mapreduce_maybesync(f, nothing, op, x, dims, init)
@@ -200,25 +198,21 @@ _extrema_outer(x::Extrema, y::Extrema) =
 _mapped_type(f, ::typeof(_extrema_inner), ::Type{T}) where T =
     Extrema{Base._return_type(f, Tuple{T})}
 
-function _onlinestats_mapreduce(f, x::DArray{T}, ::Type{S}; dims=nothing) where {T,S}
-    _f(x) = fit!(S(T), f(x))
-    init = S(T)
-    return _onlinestats_finish(mapreduce(_f, merge, x; dims, init), dims)
-end
-_onlinestats_finish(result, ::Union{Nothing,Colon}) = OnlineStats.value(result)
-_onlinestats_finish(result, ::Union{Int,Dims}) = map(_onlinestats_value, result)
-_onlinestats_value(o) = OnlineStats.value(o)
-# `value(::Variance)` multiplies by a `Float64` `NaN` when it has no finite
-# mean, so it infers as `Union{S,Float64}` for any other precision
-_onlinestats_value(o::OnlineStats.Variance{T,S}) where {T,S} = convert(S, OnlineStats.value(o))
-
+# Built from `sum`, so these run wherever `sum` does (GPU partitions included)
 mean(x::DArray; dims=nothing) = mean(identity, x; dims)
-mean(f::Function, x::DArray; dims=nothing) =
-    _onlinestats_mapreduce(f, x, OnlineStats.Mean; dims)
+function mean(f::Function, x::DArray; dims=nothing)
+    n = dims isa Union{Nothing,Colon} ? length(x) : prod(d->size(x, d), dims)
+    return map(s->s / n, sum(f, x; dims))
+end
 
 var(x::DArray; dims=nothing) = var(identity, x; dims)
-var(f::Function, x::DArray; dims=nothing) =
-    _onlinestats_mapreduce(f, x, OnlineStats.Variance; dims)
+function var(f::Function, x::DArray; dims=nothing)
+    n = dims isa Union{Nothing,Colon} ? length(x) : prod(d->size(x, d), dims)
+    m = mean(f, x; dims)
+    # A scalar mean needs no temporary; per-slice means broadcast against `x`
+    ss = dims isa Union{Nothing,Colon} ? sum(y->abs2(f(y) - m), x) : sum(abs2, f.(x) .- m; dims)
+    return map(s->s / (n - 1), ss)
+end
 
 std(x::DArray; dims=nothing) = std(identity, x; dims)
 std(f::Function, x::DArray; dims=nothing) =

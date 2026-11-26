@@ -34,6 +34,10 @@ end
         @test collect(sum(DA; dims=1)) ≈ sum(A; dims=1)
         @test collect(maximum(DA; dims=2)) == maximum(A; dims=2)
         @test collect(extrema(DA; dims=1)) == extrema(A; dims=1)
+        @test mean(DA) ≈ mean(A)
+        @test var(DA) ≈ var(A)
+        @test collect(mean(DA; dims=1)) ≈ mean(A; dims=1)
+        @test collect(std(DA; dims=2)) ≈ std(A; dims=2)
     end
 end
 
