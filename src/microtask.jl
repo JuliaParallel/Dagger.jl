@@ -22,6 +22,11 @@ struct LightFailed
     ex::Any
 end
 
+"""
+    LightTask
+
+The handle returned by [`@light`](@ref). Supports `wait`, `fetch` and `istaskdone`.
+"""
 mutable struct LightTask
     f::Any
     args::Any

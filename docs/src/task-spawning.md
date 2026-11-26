@@ -474,3 +474,40 @@ nt2_task = Dagger.@spawn (;a=1, b=3)
 getprop_task_from_dtask = Dagger.@spawn nt2_task.b
 @assert fetch(getprop_task_from_dtask) == fetch(nt2_task).b
 ```
+
+## Light tasks
+
+`Dagger.@spawn` does a lot for each task: it picks a processor, applies scopes
+and options, moves data and works across workers. For many tiny tasks in one
+process (a few microseconds of work each) that overhead dominates. `Dagger.@light`
+is an additive, opt-in alternative for exactly that case. It returns a
+[`LightTask`](@ref) that is handed to Julia's own scheduler once its
+dependencies are done.
+
+```julia
+using Dagger
+
+a = Dagger.@light sum(1:10)
+b = Dagger.@light a + 1          # `a` is a dependency and is passed as its value
+c = Dagger.@light a * b
+@assert fetch(c) == 55 * 56
+
+# `DTask`s can be dependencies of light tasks
+d = Dagger.@spawn sum(1:10)
+e = Dagger.@light d + 1
+@assert fetch(e) == 56
+
+# A light task can be turned into a `DTask`
+@assert fetch(Dagger.light_to_dtask(c)) == 55 * 56
+```
+
+A light task has no scopes, options, processors, chunks, Datadeps, logging
+events or cancellation, and it does not work with MPI or multiple workers: it
+always runs in the process that created it. Use `Dagger.@spawn` whenever you
+need any of those. A failure in a light task (or in a `DTask` it depends on)
+is rethrown by `fetch`, and fails the light tasks that depend on it.
+
+`Dagger.light_to_dtask` waits for the light task in the calling task before it
+creates the `DTask`. A `DTask` that blocked on a light task could occupy the
+processor that the light task's own dependencies need, which can deadlock on
+one or two threads.
