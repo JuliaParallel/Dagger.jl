@@ -2777,6 +2777,52 @@ end
 
 Dagger.with_rank_local(f) = Dagger.with_acceleration(f, mpi_rank_local_acceleration())
 
+# --- Location transparency of rank scopes ----------------------------------------------------------------------------------
+# `Dagger.scope(mpi_rank=r)` is a union of `ExactScope`s of the WORLD processors of rank r. Inside a rank-local graph (comm
+# COMM_SELF, which only knows its own processors) a scope that names this rank's world processors must mean the same processors
+# of that graph. The scheduler asks `localize_scope` before it matches the scope; the common cases (a graph that is not the
+# rank-local one) return at the first test.
+const MPI_LOCAL_PROC_MAP = LockedObject(Dict{MPI.Comm,Dict{Any,Any}}())
+function mpi_local_proc_map(comm::MPI.Comm)
+    lock(MPI_LOCAL_PROC_MAP) do maps
+        get!(maps, comm) do
+            m = Dict{Any,Any}()
+            for p in Dagger.get_processors(MPIOSProc(comm, MPI.Comm_rank(comm)))
+                p isa MPIProcessor && (m[p.innerProc] = p)
+            end
+            m
+        end
+    end
+end
+mpi_localize_scope(accel::MPIAcceleration, s::Dagger.AbstractScope) = s
+function mpi_localize_scope(accel::MPIAcceleration, s::Dagger.ExactScope)
+    p = s.processor
+    (p isa MPIProcessor && p.comm == MPI.COMM_WORLD && p.rank == MPI.Comm_rank(MPI.COMM_WORLD)) || return s
+    lp = get(mpi_local_proc_map(accel.comm), p.innerProc, nothing)
+    return lp === nothing ? s : Dagger.ExactScope(lp)
+end
+function mpi_localize_scope(accel::MPIAcceleration, s::MPIProcessScope)
+    (s.comm == MPI.COMM_WORLD && s.rank == MPI.Comm_rank(MPI.COMM_WORLD)) ? MPIProcessScope(accel.comm, MPI.Comm_rank(accel.comm)) : s
+end
+function mpi_localize_scope(accel::MPIAcceleration, s::Dagger.UnionScope)
+    mine = Dagger.AbstractScope[]
+    changed = false
+    for m in s.scopes
+        l = mpi_localize_scope(accel, m)
+        if l !== m
+            changed = true; push!(mine, l)
+        elseif !(m isa Dagger.ExactScope && m.processor isa MPIProcessor && m.processor.comm == MPI.COMM_WORLD)
+            push!(mine, m)
+        end   # else: a world processor of another rank, which this graph cannot run
+    end
+    # members of other ranks stay out: a union over several ranks keeps what this graph can run
+    return changed ? Dagger.UnionScope(mine) : s
+end
+function Dagger.localize_scope(accel::MPIAcceleration, scope::Dagger.AbstractScope)
+    accel.comm == MPI.COMM_SELF || return scope
+    return mpi_localize_scope(accel, scope)
+end
+
 # A chunk of this rank's rank-local graph, relabelled as a chunk of the world owned by this rank
 # (same data, no copy); `id` is the world id that every rank reserved for it.
 function mpi_adopt_chunk(c::Chunk, id::MPIRefID, ::Type{T}) where {T}

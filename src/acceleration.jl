@@ -102,6 +102,17 @@ the other accelerations have no such notion.
 function with_rank_local end
 
 """
+    localize_scope(accel, scope) -> scope
+
+Called by the scheduler on the scope a task asks for, before the scope is matched against the processors of the
+task's graph. A scope that names "this rank" means the same in every graph: inside a rank-local graph (see
+[`with_rank_local`](@ref)) the MPI extension rewrites a scope of the own rank's processors in the shared graph
+to the corresponding processors of the rank-local graph; a scope of another rank is left alone (and so matches
+nothing). Identity for every other acceleration.
+"""
+localize_scope(::Acceleration, scope) = scope
+
+"""
     per_rank(f, T)
 
 SPMD operation (every rank calls it, from the driver task): every rank runs `f()` as a
