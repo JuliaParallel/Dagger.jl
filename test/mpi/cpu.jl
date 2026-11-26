@@ -148,6 +148,7 @@ end
 include("spawn.jl")
 include("noaliasing_args.jl")
 include("free_threads.jl")
+include("relay.jl")
 
 @testset "Datadeps" begin
 

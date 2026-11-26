@@ -1595,8 +1595,20 @@ function start_bcast_relay!(accel_comm::MPI.Comm)
     lock(BCAST_STATES) do states
         states[accel_comm] = state
     end
+    # The relay is a polling loop that keeps a thread busy. From 4 default threads on it is migratable: a
+    # `Task` made on a thread-bound task (the driver, once Distributed has used `@async`) starts on its
+    # creator's thread even with `sticky = false`, and a driver parked in a blocking MPI call (an
+    # `MPI.Allgather` or `Barrier` in user code) would then stop it from forwarding the broadcasts the other
+    # ranks wait for: a cross-rank cycle that hung the full MPI suite across two nodes. Below 4 threads a
+    # migratable relay competes with the tasks for the only free thread and hung the delegation test at
+    # 4 ranks x 2 threads, so there it keeps the creator's thread.
+    migratable = Threads.nthreads(:default) >= 4
     t = Task(() -> bcast_relay_loop(state))
-    t.sticky = false
+    if migratable
+        Dagger.set_task_migratable!(t)
+    else
+        t.sticky = false
+    end
     schedule(t)
     Dagger.Sch.errormonitor_tracked("mpi_bcast_relay", t)
     state.relay = t
