@@ -2552,6 +2552,14 @@ function mpi_execute_body(proc::MPIProcessor, f, args...; kwargs...)
         return tochunk(nothing, proc, space; type=dest_type)
     end
 
+    # A communicator of one rank (a one-rank job, or a rank-local graph): nobody to tell about the
+    # status, the type or the space of the result, so there is nothing to plan or to broadcast
+    if MPI.Comm_size(proc.comm) == 1
+        result = mpi_execute_inner(proc, f, raw_args...; kwargs...)
+        space = mpi_result_space(result, proc)
+        return tochunk(result, proc, space; type=typeof(result))
+    end
+
     plan = mpi_execute_bcast_plan(f, args, proc)
 
     # Concrete + nothrow: type/space known locally and the call cannot throw,

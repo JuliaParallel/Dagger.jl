@@ -102,3 +102,15 @@ end
     end
     MPI.Barrier(comm)
 end
+
+# In a job of one rank every task is on a communicator of one rank: nobody to tell about its
+# status or result type, so none is sent. The result must still be right, and a failure rethrown.
+if nranks == 1
+    @testset "Task on a one-rank communicator" begin
+        @test fetch(Dagger.@spawn(free_quick(41))) == 42
+        @test fetch(Dagger.@spawn(identity(nothing))) === nothing
+        t = Dagger.@spawn(error("one-rank failure"))
+        @test_throws Exception fetch(t)
+        @test fetch(Dagger.@spawn(free_quick(1))) == 2   # still working afterwards
+    end
+end
