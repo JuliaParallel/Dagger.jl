@@ -1,6 +1,6 @@
 import Base.Sort: Forward, Ordering, lt
 
-import StatsBase: fit!, sample
+import StatsBase: sample
 
 
 function getmedians(x, n)
