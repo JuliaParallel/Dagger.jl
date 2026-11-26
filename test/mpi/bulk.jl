@@ -6,6 +6,7 @@ bulk_mark(i) = (bulk_hits[i] += 1; nothing)
 bulk_gate(n) = n
 bulk_mark_with(i, n) = (i <= n && (bulk_hits[i] += 1); nothing)
 bulk_report() = (count(==(1), bulk_hits), count(>(1), bulk_hits), count(==(0), bulk_hits))
+bulk_item(i) = [i]
 
 @testset "Dynamic loop under MPI" begin
     last_rank = MPI.Comm_size(comm) - 1
@@ -33,8 +34,10 @@ MPI.Barrier(comm)
     MPI.Barrier(comm)
     if MPI.Comm_size(comm) > 1
         @test_throws ArgumentError Dagger.dynamic_for(i -> nothing, 60)
+        @test_throws ArgumentError Dagger.dynamic_reduce(bulk_item, vcat, 30; init=Int[], chunk=1)
     else
         @test sum(Dagger.dynamic_for(i -> nothing, 60)) == 60
+        @test Dagger.dynamic_reduce(bulk_item, vcat, 30; init=Int[], chunk=1) == collect(1:30)
         @test Dagger.local_scope() isa Dagger.UnionScope
     end
 end
@@ -75,6 +78,8 @@ MPI.Barrier(comm)
         nth >= 3 && @test seen[1] == 0
         @test count(>(0), seen) == ws
         @test sum(seen) == 60
+        r = Dagger.dynamic_reduce(i -> (bulk_seen_work(i); [i]), vcat, 40; init=Int[], chunk=1, workers=ws, scope=Dagger.scope(mpi_rank=owner))
+        @test r == collect(1:40)
     end
 end
 MPI.Barrier(comm)

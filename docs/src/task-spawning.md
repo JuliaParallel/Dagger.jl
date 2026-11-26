@@ -349,7 +349,9 @@ end
 
 All workers share the counter, so they must run in one process. The default
 scope is the current worker's processors; under MPI pass a scope inside one
-rank, e.g. `scope=Dagger.scope(mpi_rank=r)`.
+rank, e.g. `scope=Dagger.scope(mpi_rank=r)`. [`Dagger.dynamic_reduce`](@ref)
+reduces `f(i, args...)` with an operator in a fixed combination order, so a
+floating-point result does not depend on the number of workers or on timing.
 
 ## Different ways to spawn tasks
 

@@ -91,6 +91,8 @@ Sch.get_dag_ids
 ```@docs
 dynamic_for
 dynamic_for_async
+dynamic_reduce
+dynamic_reduce_async
 local_scope
 loop_worker_scopes
 ```

@@ -4,7 +4,7 @@
     local_scope() -> AbstractScope
 
 The scope of all processors that belong to this process in the current acceleration: the default scope of
-[`dynamic_for_async`](@ref), whose workers share one counter and so must all run in
+[`dynamic_for_async`](@ref) and [`dynamic_reduce_async`](@ref), whose workers share one counter and so must all run in
 this process. Distributed: the worker's processors. MPI: the processors of this rank when the graph has one rank only; in a
 graph shared by several ranks it throws, because a per-rank scope would make the ranks disagree: pass
 `scope=Dagger.scope(mpi_rank=r)`.
@@ -60,7 +60,8 @@ _worker_scope(scope, ::Int) = scope
 """
     dynamic_for_async(f, n::Integer, args...; chunk=nothing, workers=Threads.nthreads(), scope=nothing) -> Vector{DTask}
 
-Start `f(i, args...)` for every `i` in `1:n` as `workers` self-scheduling tasks and return them.
+Start `f(i, args...)` for every `i` in `1:n` (empty when `n <= 0`) as `workers` self-scheduling tasks and return them.
+`workers` and `chunk` must be positive (`ArgumentError` otherwise).
 The result of each task is the number of indices that worker took, so `fetch.(tasks)` shows how
 the loop was balanced (the entries add up to `n`).
 `args` are ordinary task arguments: a `DTask` or a `Chunk` among them is waited for and
@@ -82,9 +83,10 @@ once; the order of iterations is unspecified.
 function dynamic_for_async(f, n::Integer, args...; chunk::Union{Nothing,Integer}=nothing,
                            workers::Integer=Threads.nthreads(), scope=nothing)
     n = Int(n)
+    workers >= 1 || throw(ArgumentError("workers must be positive"))
+    chunk === nothing || chunk >= 1 || throw(ArgumentError("chunk must be positive"))
     workers = max(1, min(Int(workers), n))
     chunk = Int(something(chunk, max(1, cld(n, 4 * workers))))
-    chunk >= 1 || throw(ArgumentError("chunk must be positive"))
     scope = scope === nothing ? local_scope() : scope
     scope isa AbstractVector || (scope = loop_worker_scopes(scope, workers))
     next = Threads.Atomic{Int}(0)
@@ -103,3 +105,67 @@ function dynamic_for(f, n::Integer, args...; kwargs...)
     tasks = dynamic_for_async(f, n, args...; kwargs...)
     return Int[fetch(t) for t in tasks]
 end
+
+
+# Folds the values of one chunk of indices in index order; the chunk's partial result goes to `parts[c]`
+function _dynamic_reduce_worker(next::Threads.Atomic{Int}, parts::Vector{Any}, f, op, n::Int, chunk::Int, nchunks::Int, args...)
+    while true
+        c = Threads.atomic_add!(next, 1) + 1
+        c > nchunks && break
+        lo = (c - 1) * chunk
+        hi = min(lo + chunk, n)
+        acc = f(lo + 1, args...)
+        for i in (lo + 2):hi
+            acc = op(acc, f(i, args...))
+        end
+        parts[c] = acc
+    end
+    return nothing
+end
+
+"""
+    dynamic_reduce_async(f, op, n::Integer, args...; init, chunk=nothing, workers=Threads.nthreads(), scope=nothing) -> DTask
+
+Reduce `f(i, args...)` over `i in 1:n` with `op`, on `workers` self-scheduling tasks like
+[`dynamic_for_async`](@ref); returns a `DTask` whose value is the result. **The combination order is fixed**: the
+indices are cut into chunks of `chunk` (default `cld(n, 64)`, independent of `workers`), each chunk is folded in index
+order, and the chunk results are folded in chunk order starting from `init`. So the result does not depend on which
+worker took which chunk, on the number of workers, or on timing: a floating-point sum is bitwise the same on every
+run (and on every rank that computes it). It does depend on `chunk`, as any reduction tree does: keep it fixed
+when states are compared byte for byte. `op` need not be commutative; `n == 0` returns `init` (an `ArgumentError`
+without one). `f` must be thread-safe.
+"""
+function dynamic_reduce_async(f, op, n::Integer, args...; init=nothing, chunk::Union{Nothing,Integer}=nothing,
+                              workers::Integer=Threads.nthreads(), scope=nothing)
+    n = max(Int(n), 0)
+    workers >= 1 || throw(ArgumentError("workers must be positive"))
+    chunk === nothing || chunk >= 1 || throw(ArgumentError("chunk must be positive"))
+    if n == 0
+        init === nothing && throw(ArgumentError("dynamic_reduce of an empty range needs `init`"))
+        return Dagger.@spawn identity(init)
+    end
+    chunk = Int(something(chunk, max(1, cld(n, 64))))
+    nchunks = cld(n, chunk)
+    workers = max(1, min(Int(workers), nchunks))
+    scope = scope === nothing ? local_scope() : scope
+    scope isa AbstractVector || (scope = loop_worker_scopes(scope, workers))
+    next = Threads.Atomic{Int}(0)
+    parts = Vector{Any}(undef, nchunks)
+    tasks = DTask[Dagger.@spawn(scope=_worker_scope(scope, w), _dynamic_reduce_worker(next, parts, f, op, n, chunk, nchunks, args...)) for w in 1:workers]
+    return Dagger.@spawn(scope=_worker_scope(scope, 1), _dynamic_reduce_finish(op, parts, init, tasks...))
+end
+# The tasks are arguments only to order this after them
+function _dynamic_reduce_finish(op, parts::Vector{Any}, init, _workers...)
+    acc = init === nothing ? parts[1] : op(init, parts[1])
+    for c in 2:length(parts)
+        acc = op(acc, parts[c])
+    end
+    return acc
+end
+
+"""
+    dynamic_reduce(f, op, n::Integer, args...; kwargs...)
+
+[`dynamic_reduce_async`](@ref) and wait for the result.
+"""
+dynamic_reduce(f, op, n::Integer, args...; kwargs...) = fetch(dynamic_reduce_async(f, op, n, args...; kwargs...))
