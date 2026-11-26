@@ -35,6 +35,9 @@ function sparse_suite(ctx; method, accels)
     @assert accel == "cpu" || haskey(GPU_BACKENDS, accel) "Unknown backend"
 
     T = benchmark_eltype()
+    # Driver-local allocation counts require the same tile placement in both
+    # revisions. Seed the untimed fixtures too, so sparse structure is fixed.
+    fixture_assignment = benchmark_assignment()
     atol, rtol = T(1e-8), T(1e-6)
     # Target a fixed number of nonzeros per row, so density shrinks with N and
     # the nonzero count stays ~O(N).
@@ -48,17 +51,17 @@ function sparse_suite(ctx; method, accels)
     # operation present on one revision but not the other simply won't be
     # compared. This self-heals once the baseline gains the feature.
     spmv_ok = supported("sparse/spmv (S*x)") do
-        S = distribute(sprand(T, 8, 8, 0.5), Blocks(4, 4))
-        x = distribute(rand(T, 8), Blocks(4))
+        S = distribute(sprand(Random.Xoshiro(1234), T, 8, 8, 0.5), Blocks(4, 4), fixture_assignment)
+        x = distribute(rand(Random.Xoshiro(4321), T, 8), Blocks(4), fixture_assignment)
         wait(S * x)
     end
     spgemm_ok = supported("sparse/spgemm (S*S)") do
-        S = distribute(sprand(T, 8, 8, 0.5), Blocks(4, 4))
+        S = distribute(sprand(Random.Xoshiro(1234), T, 8, 8, 0.5), Blocks(4, 4), fixture_assignment)
         wait(S * S)
     end
     cg_ok = KRYLOV_AVAILABLE && isdefined(Dagger, :cg) && supported("sparse/cg solve") do
-        A = distribute(laplacian_1d(T, 8), Blocks(4, 4))
-        rhs = distribute(rand(T, 8), Blocks(4))
+        A = distribute(laplacian_1d(T, 8), Blocks(4, 4), fixture_assignment)
+        rhs = distribute(rand(Random.Xoshiro(4321), T, 8), Blocks(4), fixture_assignment)
         wait(first(Dagger.cg(A, rhs; atol=atol, rtol=rtol, itmax=50)))
     end
 
@@ -72,23 +75,23 @@ function sparse_suite(ctx; method, accels)
         # SpMV: sparse matrix tiles, dense vectors.
         if spmv_ok && fits_budget(sparse_bytes(N; nmats=2, density=density, T=T))
             sub["spmv (S*x)"] = @benchmarkable(wait(S * x),
-                setup = (S = distribute(sprand($T, $N, $N, $density), Blocks($b, $b));
-                         x = distribute(rand($T, $N), Blocks($b)); wait(S); wait(x)),
+                setup = (S = distribute(sprand(Random.Xoshiro(1234), $T, $N, $N, $density), Blocks($b, $b), $fixture_assignment);
+                         x = distribute(rand(Random.Xoshiro(4321), $T, $N), Blocks($b), $fixture_assignment); wait(S); wait(x)),
                 teardown = (S = nothing; x = nothing; @everywhere GC.gc()))
         end
 
         # SpGEMM: the result fills in, so budget generously.
         if spgemm_ok && fits_budget(sparse_bytes(N; nmats=6, density=density, T=T))
             sub["spgemm (S*S)"] = @benchmarkable(wait(S * S),
-                setup = (S = distribute(sprand($T, $N, $N, $density), Blocks($b, $b)); wait(S)),
+                setup = (S = distribute(sprand(Random.Xoshiro(1234), $T, $N, $N, $density), Blocks($b, $b), $fixture_assignment); wait(S)),
                 teardown = (S = nothing; @everywhere GC.gc()))
         end
 
         # Iterative solve of an SPD system via conjugate gradients.
         if cg_ok && fits_budget(sparse_bytes(N; nmats=2, density=3 / N, T=T))
             sub["cg solve (laplacian)"] = @benchmarkable(wait(first(Dagger.cg(A, rhs; atol=$atol, rtol=$rtol, itmax=200))),
-                setup = (A = distribute(laplacian_1d($T, $N), Blocks($b, $b));
-                         rhs = distribute(rand($T, $N), Blocks($b)); wait(A); wait(rhs)),
+                setup = (A = distribute(laplacian_1d($T, $N), Blocks($b, $b), $fixture_assignment);
+                         rhs = distribute(rand(Random.Xoshiro(4321), $T, $N), Blocks($b), $fixture_assignment); wait(A); wait(rhs)),
                 teardown = (A = nothing; rhs = nothing; @everywhere GC.gc()))
         end
 

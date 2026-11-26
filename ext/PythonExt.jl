@@ -8,7 +8,7 @@ end
 
 import Dagger
 import Dagger: Processor, OSProc, ThreadProc, Chunk
-import Distributed: myid
+import Dagger: myid
 
 const CPUProc = Union{OSProc, ThreadProc}
 

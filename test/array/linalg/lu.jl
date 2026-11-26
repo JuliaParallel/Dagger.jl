@@ -13,6 +13,24 @@ function factorization_rtol(T, pivot)
     end
 end
 
+function test_lu_pivot_blocks(::Type{T}, part, pivot) where T
+    A = Matrix{T}(I, 13, 13) + rand(T, 13, 13) / 20
+    F = lu(distribute(A, part), pivot)
+    @test F.ipiv.partitioning == Blocks(part.blocksize[1])
+    pivot == NoPivot() && @test collect(F.ipiv) == collect(1:13)
+    b = rand(T, 13)
+    @test collect(F \ distribute(b, Blocks(2))) ≈ A \ b
+    B = rand(T, 13, 2)
+    @test collect(F \ distribute(B, Blocks(2, 1))) ≈ A \ B
+end
+
+@testset "Pivot blocks follow factor rows" begin
+    # Deliberately differ from AutoBlocks, including a partial final tile.
+    for T in (Float64, ComplexF64), part in (Blocks(3, 3), Blocks(5, 3)), pivot in (NoPivot(), RowMaximum())
+        test_lu_pivot_blocks(T, part, pivot)
+    end
+end
+
 @testset "$T with $pivot" for T in (Float64, ComplexF64), pivot in (NoPivot(), RowMaximum())
     A = rand(T, 128, 128)
     B = copy(A)

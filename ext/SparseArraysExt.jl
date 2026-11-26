@@ -6,6 +6,11 @@ import LinearAlgebra
 import Dagger
 import Dagger: Blocks, AutoBlocks, BlocksOrAuto, AssignmentType, DSparseArray, DSparseMatrix
 
+# SparseArrays' vararg CSC indexing and Dagger's AbstractArray domain indexing
+# each constrain a different argument. Resolve their intersection explicitly.
+Base.getindex(A::SparseArrays.AbstractSparseMatrixCSC, d::Dagger.ArrayDomain) =
+    A[Dagger.indexes(d)...]
+
 # Keep tiles sparse through `collect`/`cat`; the outer `collect` densifies.
 Dagger._sparse_collect(M::SparseMatrixCSC) = copy(M)
 

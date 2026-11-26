@@ -15,6 +15,9 @@ import Preferences: load_preference, set_preferences!
     load_path = join(Base.load_path(), Sys.iswindows() ? ';' : ':')
     base_cmd = `$(Base.julia_cmd()) --startup-file=no -E 'using Dagger; parentmodule(Dagger.myid)'`
     cmd = addenv(base_cmd, "JULIA_LOAD_PATH" => load_path)
+    packages = (Dagger, Dagger.MemPool, Dagger.TimespanLogging)
+    distributed_packages = map(p -> load_preference(p, "distributed-package", nothing), packages)
+    precompile_workload = load_preference(Dagger, "precompile_workload", nothing)
     try
         # Disabling the precompilation workload shaves off over half the time
         # this test takes.
@@ -28,8 +31,10 @@ import Preferences: load_preference, set_preferences!
             @test readchomp(cmd) == "DistributedNext"
         end
     finally
-        set_preferences!(Dagger, "precompile_workload" => true; force=true)
-        # Reset distributed package to the default to avoid affecting subsequent runs
-        Dagger.set_distributed_package!("Distributed")
+        set_preferences!(Dagger, "precompile_workload" => precompile_workload; force=true)
+        # Preserve the transport selected by the test environment.
+        for (package, value) in zip(packages, distributed_packages)
+            set_preferences!(package, "distributed-package" => value; force=true)
+        end
     end
 end

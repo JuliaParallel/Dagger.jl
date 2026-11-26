@@ -116,10 +116,6 @@ function Dagger.matmatmul!(
     alpha,
     beta
 )
-    if !isa(C.mat, Finch.Tensor)
-        # Not supported here, forward to generic matmatmul!
-        return Dagger.matmatmul!(C.mat, transA, transB, A, B, alpha, beta)
-    end
     transA in ('N', 'T', 'C') || throw(ArgumentError("Invalid transA: $transA"))
     transB in ('N', 'T', 'C') || throw(ArgumentError("Invalid transB: $transB"))
 
@@ -136,7 +132,11 @@ function Dagger.matmatmul!(
     # sparse `Tensor` so accumulation and later iterations stay well-typed.
     C_out = _finch_materialize(C_out, eltype(Cm), size(Cm))
     if beta != 0
-        C_out = C_out + beta * Cm
+        # `similar(::DArray)` may initially allocate host CSC tiles. The
+        # wrapper permits replacing their storage with the Finch result, but
+        # accumulation must first bring the previous values into Finch too.
+        C_prev = Cm isa Finch.Tensor ? Cm : _finch_materialize(Cm, eltype(Cm), size(Cm))
+        C_out = C_out + beta * C_prev
     end
     C.mat = C_out
 

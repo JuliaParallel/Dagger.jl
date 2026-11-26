@@ -1,6 +1,7 @@
 include(joinpath(@__DIR__, "stencil_defs.jl"))
 
 @testset "CPU" begin
+    @info "Testing stencil backend" backend=:CPU
     test_stencil()
 end
 
@@ -9,6 +10,7 @@ end
         # FIXME
         kind == :oneAPI && continue
         @testset "$kind" begin
+            @info "Testing stencil backend" backend=kind
             Dagger.with_options(;scope) do
                 # The Metal backend breaks on the 3D/4D stencil tests and
                 # causes subsequent tests to fail, so skip them there.

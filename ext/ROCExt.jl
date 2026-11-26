@@ -5,7 +5,7 @@ export ROCArrayDeviceProc
 import Dagger, MemPool
 import Dagger: CPURAMMemorySpace, Chunk, unwrap, ROCArrayDeviceProc
 import MemPool: DRef, poolget
-import Distributed: myid, remotecall_fetch
+import Dagger: myid, remotecall_fetch
 import LinearAlgebra
 using KernelAbstractions, Adapt
 

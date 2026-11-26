@@ -4,7 +4,7 @@ using SparseArrays
 using Krylov
 
 @everywhere begin
-    using Distributed, Dagger
+    using Dagger
     import Dagger: Kernel
     using KernelAbstractions
 end

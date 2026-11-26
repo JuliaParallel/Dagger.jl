@@ -71,3 +71,22 @@
         @test collect(Db) ≈ b_ref rtol=tol
     end
 end
+
+@testset "Factorization solves retain distributed RHS storage" begin
+    A = Matrix{Float64}(I, 8, 8) + fill(0.1, 8, 8)
+    for b in (collect(1.0:8.0), reshape(collect(1.0:16.0), 8, 2))
+        Db = distribute(b, b isa AbstractVector ? Blocks(3) : Blocks(3, 1))
+        for F in (cholesky(distribute(A, Blocks(4, 4))),
+                  lu(distribute(A, Blocks(4, 4))))
+            x = F \ Db
+            @test x isa Dagger.DArray
+            @test collect(x) ≈ A \ b
+            @test collect(Db) == b
+            # Exercise both allocation protocols even on older Julia.
+            dest = LinearAlgebra._zeros(Float64, Db, F)
+            @test dest isa Dagger.DArray
+            @test size(dest) == size(b)
+            @test iszero(sum(dest))
+        end
+    end
+end

@@ -836,7 +836,8 @@ include("lu.jl")
     # boundary condition, including the stencil_source_chunks pre-sweep
     # snapshot used by self-referencing Wrap stencils (@stencil A[idx] =
     # f(@neighbors(A[idx]))).
-    test_stencil()
+    # The 4D case triggers pathological cold compilation on MPI ranks.
+    test_stencil(; skip_4d=true)
 end
 
 @testset "Sparse" begin

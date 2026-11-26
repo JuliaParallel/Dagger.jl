@@ -179,7 +179,9 @@ end
         # ensure workers are actually modified while the scheduler is working.
 
         setup = quote
-            using Dagger, Distributed
+            using Dagger
+            const Distributed = parentmodule(Dagger.myid)
+            using .Distributed
             function _list_workers(ctx, state, task, tid, _)
                 return procs(ctx)
             end
@@ -209,7 +211,7 @@ end
             @testset "Add new workers" begin
                 ps = []
                 try
-                    ps1 = addprocs(2, exeflags="--project")
+                    ps1 = addprocs(2, exeflags=`--project=$(Base.active_project())`)
                     append!(ps, ps1)
 
                     @everywhere vcat(ps1, myid()) $setup
@@ -224,10 +226,10 @@ end
                     end
 
                     # Will not be added, so they should never appear in output
-                    ps2 = addprocs(2, exeflags="--project")
+                    ps2 = addprocs(2, exeflags=`--project=$(Base.active_project())`)
                     append!(ps, ps2)
 
-                    ps3 = addprocs(2, exeflags="--project")
+                    ps3 = addprocs(2, exeflags=`--project=$(Base.active_project())`)
                     append!(ps, ps3)
                     @everywhere ps3 $setup
                     addprocs!(ctx, ps3)
@@ -251,7 +253,7 @@ end
             #=@testset "Remove workers" begin
                 ps = []
                 try
-                    ps1 = addprocs(4, exeflags="--project")
+                    ps1 = addprocs(4, exeflags=`--project=$(Base.active_project())`)
                     append!(ps, ps1)
 
                     @everywhere vcat(ps1, myid()) $setup
@@ -310,7 +312,7 @@ end
             @testset "Remove all workers throws" begin
                 ps = []
                 try
-                    ps1 = addprocs(2, exeflags="--project")
+                    ps1 = addprocs(2, exeflags=`--project=$(Base.active_project())`)
                     append!(ps, ps1)
 
                     @everywhere vcat(ps1, myid()) $setup

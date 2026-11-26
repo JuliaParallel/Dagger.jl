@@ -23,6 +23,10 @@ jobs:
     if: ${{ !contains(github.event.head_commit.message, '[skip tests]') }}
     env:
       JULIA_NUM_THREADS: '1'
+      # Distributed's older releases race when used from multiple threads.
+      # Keep stdlib coverage on newer Julia while testing the supported
+      # DistributedNext transport on 1.10/1.11.
+      CI_DISTRIBUTED_PACKAGE: ${{ (matrix.version == '1.10' || matrix.version == '1.11') && 'DistributedNext' || 'Distributed' }}
     strategy:
       fail-fast: false
       matrix:
@@ -128,6 +132,7 @@ jobs:
     env:
       JULIA_NUM_THREADS: '1'
       CI_USE_OPENCL: '1'
+      CI_DISTRIBUTED_PACKAGE: DistributedNext
     steps:
       - uses: actions/checkout@v7
       - uses: julia-actions/setup-julia@v3
