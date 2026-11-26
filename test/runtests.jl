@@ -23,6 +23,7 @@ tests = [
     ("Processors", "processors.jl"),
     ("Uniform Placement", "uniform-placement.jl"),
     ("Two-choices Placement", "two-choices.jl"),
+    ("Local Fast Path", "local-fastpath.jl"),
     ("Processor Grids", "procgrid.jl"),
     ("Memory Spaces", "memory-spaces.jl"),
     ("Logging", "logging.jl"),

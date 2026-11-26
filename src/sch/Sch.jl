@@ -36,6 +36,7 @@ import ScopedValues: ScopedValue, @with, with
 
 
 include("util.jl")
+include("fastpath.jl")
 include("fault-handler.jl")
 include("dynamic.jl")
 
@@ -107,6 +108,8 @@ mutable struct CompatEntry
     const procs::Vector{Processor}
     const compat::Set{Processor}
     @atomic ordered::Union{Nothing,Vector{Processor}}
+    # The local fast path's view of this set (`missing` until first asked; see fastpath.jl)
+    @atomic fast::Any
 end
 const COMPAT_PROCS_CACHE = LockedObject(Dagger.BasicLFUCache{Tuple{UInt,UInt},CompatEntry}(256))
 # Drop all cached compatible-processor sets. Called whenever the processor
@@ -158,7 +161,7 @@ function compat_entry(accel, scope, procs::Vector{<:Processor})
     # happens not to have this (accel, scope) pair cached already -- see the
     # sibling fix in generic `compatible_processors`, which had the same defect
     # with `Set(gen)`.
-    entry = CompatEntry(scope, Vector{Processor}(procs), compat, nothing)
+    entry = CompatEntry(scope, Vector{Processor}(procs), compat, nothing, missing)
     return @safe_lock_spin1 COMPAT_PROCS_CACHE cache begin
         # N.B. `get!` would keep a *stale* entry for this key (one whose `procs` no longer
         # matches, because the processor list changed without a cache flush) and hand it
@@ -1013,115 +1016,128 @@ concurrently across threads.
     Dagger.options_merge!(options, state.sch_options)
     Dagger.populate_defaults!(options, sig)
 
-    # Calculate scope.  Errors are stored in `scope_ex` and applied in Phase 3.
-    local scope
-    local scope_ex = nothing
-    if options.exec_scope !== nothing
-        # Bypass scope calculation if it's been done for us already
-        scope = options.exec_scope
-    else
-        scope = constrain(@something(options.compute_scope, options.scope, DefaultScope()),
-                          @something(options.result_scope, AnyScope()))
-        if scope isa InvalidScope
-            scope_ex = SchedulingException("compute_scope and result_scope are not compatible: $(scope.x), $(scope.y)")
-        else
-            for arg in task.inputs
-                scope_ex === nothing || break
-                value = unwrap_weak_checked(Dagger.value(arg))
-                # After collect_task_inputs!, Thunk inputs are resolved to Chunks.
-                @assert !istask(value)
-                chunk = if value isa Chunk
-                    value
-                else
-                    nothing
-                end
-                chunk isa Chunk || continue
-                scope = constrain(scope, chunk.scope)
-                if scope isa InvalidScope
-                    scope_ex = SchedulingException("Current scope and argument Chunk scope are not compatible: $(scope.x), $(scope.y)")
-                end
-            end
-        end
-    end
-
-    if scope_ex !== nothing
-        # scope is invalid — fail the task under state.lock (set_failed! requires it)
-        lock(state.lock) do
-            set_failed!(state, task; ex=scope_ex)
-            # Release the `running_count` credit `task` received when it
-            # entered `ready_out` (see comment at the other `set_failed!`
-            # call sites in this function for why this is necessary).
-            Threads.atomic_sub!(state.running_count, 1)
-            @logfinish ctx LogSchedule LogScheduleId(state.uid, task.id) (;thunk_id=task.id)
-        end
-        return
-    end
-
     # `accel` drives uniform (e.g. MPI) scheduling: it filters compatible
     # processors, imposes a deterministic processor order, and (under uniform
     # execution) makes selection ignore rank-local capacity/occupancy so every
     # rank picks the same processor for this task.
     accel = something(options.acceleration, current_acceleration())
 
-    sorted_procs = @reusable_vector :schedule_one!_sorted_procs Processor OSProc() 32
-    if uniform_execution(accel)
-        # Measured costs are rank-local, so under uniform execution the
-        # candidates are ordered by a deterministic, acceleration-dispatched key
-        # instead and the cost estimate would be discarded unread. Start from
-        # the cached canonical order of the candidate set and apply only the
-        # per-task part (owner preference and rotation).
-        ordered = compatible_processors_ordered(accel, scope, procs_filt)
-        resize!(sorted_procs, length(ordered))
-        copyto!(sorted_procs, ordered)
-        Dagger.place_processors_uniform!(sorted_procs, accel, task, state)
-    else
-        input_procs = @reusable_vector :schedule_one!_input_procs Processor OSProc() 32
-        compat = compatible_processors_cached(accel, scope, procs_filt)
-        # N.B. `compat` is a `Set`: its elements are already unique
-        append!(input_procs, compat)
-        resize!(sorted_procs, length(input_procs))
-        estimate_task_costs!(sorted_procs, nothing, state, input_procs, task; sig)
-        empty!(input_procs)
-    end
-
-    # Select the best available processor and reserve time pressure optimistically.
-    # These operations use their own fine-grained locks — no state.lock needed.
+    # Lightweight placement for a task that certainly runs on a thread of this process
+    # (fastpath.jl); anything it does not handle takes the general path below.
     scheduled = false
     local best_loc, best_spec
-    for proc in sorted_procs
-        gproc = get_parent(proc)
-        can_use, scope = can_use_proc(state, task, gproc, proc, options, scope)
-        if can_use
-            has_cap, est_time_util, est_alloc_util, est_occupancy =
-                has_capacity(state, proc, root_worker_id(gproc), options.time_util, options.alloc_util, options.occupancy, sig)
-            # Under uniform execution capacity is rank-local; every rank must
-            # take the first usable processor in the deterministic order.
-            if has_cap || scheduling_ignore_capacity(accel)
-                # Optimistic reservation: capture-the-ref, atomic_add!
-                counter_ref = lock(state.worker_time_pressure) do wtp
-                    proc_map = get!(wtp, root_worker_id(gproc)) do
-                        Dict{Processor,Threads.Atomic{UInt64}}()
-                    end
-                    get!(proc_map, proc) do
-                        Threads.Atomic{UInt64}(UInt64(0))
-                    end
-                end
-                Threads.atomic_add!(counter_ref, est_time_util)
-                lock(state.running_pressure_refs) do rpr
-                    rpr[task.id] = (counter_ref, est_time_util)
-                end
-                @dagdebug task :schedule "Scheduling to $gproc -> $proc (pressure: $(counter_ref[]))"
-                # Uniform execution overlaps communicating tasks on a processor
-                # (rank-local shares); avoid serializing them into wait cycles.
-                est_occupancy = scheduling_task_occupancy(accel, est_occupancy)
-                best_loc = ScheduleTaskLocation(gproc, proc)
-                best_spec = ScheduleTaskSpec(task, scope, est_time_util, est_alloc_util, est_occupancy)
-                scheduled = true
-                break
-            end
+    fast_cand = local_fast_candidates(state, task, options, procs, accel)
+    if fast_cand !== nothing
+        placed = local_fast_place!(state, task, options, sig, fast_cand[1], fast_cand[2])
+        if placed !== nothing
+            best_loc, best_spec = placed
+            scheduled = true
         end
     end
-    empty!(sorted_procs)
+
+    if !scheduled
+        # Calculate scope.  Errors are stored in `scope_ex` and applied in Phase 3.
+        local scope
+        local scope_ex = nothing
+        if options.exec_scope !== nothing
+            # Bypass scope calculation if it's been done for us already
+            scope = options.exec_scope
+        else
+            scope = constrain(@something(options.compute_scope, options.scope, DefaultScope()),
+                              @something(options.result_scope, AnyScope()))
+            if scope isa InvalidScope
+                scope_ex = SchedulingException("compute_scope and result_scope are not compatible: $(scope.x), $(scope.y)")
+            else
+                for arg in task.inputs
+                    scope_ex === nothing || break
+                    value = unwrap_weak_checked(Dagger.value(arg))
+                    # After collect_task_inputs!, Thunk inputs are resolved to Chunks.
+                    @assert !istask(value)
+                    chunk = if value isa Chunk
+                        value
+                    else
+                        nothing
+                    end
+                    chunk isa Chunk || continue
+                    scope = constrain(scope, chunk.scope)
+                    if scope isa InvalidScope
+                        scope_ex = SchedulingException("Current scope and argument Chunk scope are not compatible: $(scope.x), $(scope.y)")
+                    end
+                end
+            end
+        end
+
+        if scope_ex !== nothing
+            # scope is invalid — fail the task under state.lock (set_failed! requires it)
+            lock(state.lock) do
+                set_failed!(state, task; ex=scope_ex)
+                # Release the `running_count` credit `task` received when it
+                # entered `ready_out` (see comment at the other `set_failed!`
+                # call sites in this function for why this is necessary).
+                Threads.atomic_sub!(state.running_count, 1)
+                @logfinish ctx LogSchedule LogScheduleId(state.uid, task.id) (;thunk_id=task.id)
+            end
+            return
+        end
+
+        sorted_procs = @reusable_vector :schedule_one!_sorted_procs Processor OSProc() 32
+        if uniform_execution(accel)
+            # Measured costs are rank-local, so under uniform execution the
+            # candidates are ordered by a deterministic, acceleration-dispatched key
+            # instead and the cost estimate would be discarded unread. Start from
+            # the cached canonical order of the candidate set and apply only the
+            # per-task part (owner preference and rotation).
+            ordered = compatible_processors_ordered(accel, scope, procs_filt)
+            resize!(sorted_procs, length(ordered))
+            copyto!(sorted_procs, ordered)
+            Dagger.place_processors_uniform!(sorted_procs, accel, task, state)
+        else
+            input_procs = @reusable_vector :schedule_one!_input_procs Processor OSProc() 32
+            compat = compatible_processors_cached(accel, scope, procs_filt)
+            # N.B. `compat` is a `Set`: its elements are already unique
+            append!(input_procs, compat)
+            resize!(sorted_procs, length(input_procs))
+            estimate_task_costs!(sorted_procs, nothing, state, input_procs, task; sig)
+            empty!(input_procs)
+        end
+
+        # Select the best available processor and reserve time pressure optimistically.
+        # These operations use their own fine-grained locks — no state.lock needed.
+        for proc in sorted_procs
+            gproc = get_parent(proc)
+            can_use, scope = can_use_proc(state, task, gproc, proc, options, scope)
+            if can_use
+                has_cap, est_time_util, est_alloc_util, est_occupancy =
+                    has_capacity(state, proc, root_worker_id(gproc), options.time_util, options.alloc_util, options.occupancy, sig)
+                # Under uniform execution capacity is rank-local; every rank must
+                # take the first usable processor in the deterministic order.
+                if has_cap || scheduling_ignore_capacity(accel)
+                    # Optimistic reservation: capture-the-ref, atomic_add!
+                    counter_ref = lock(state.worker_time_pressure) do wtp
+                        proc_map = get!(wtp, root_worker_id(gproc)) do
+                            Dict{Processor,Threads.Atomic{UInt64}}()
+                        end
+                        get!(proc_map, proc) do
+                            Threads.Atomic{UInt64}(UInt64(0))
+                        end
+                    end
+                    Threads.atomic_add!(counter_ref, est_time_util)
+                    lock(state.running_pressure_refs) do rpr
+                        rpr[task.id] = (counter_ref, est_time_util)
+                    end
+                    @dagdebug task :schedule "Scheduling to $gproc -> $proc (pressure: $(counter_ref[]))"
+                    # Uniform execution overlaps communicating tasks on a processor
+                    # (rank-local shares); avoid serializing them into wait cycles.
+                    est_occupancy = scheduling_task_occupancy(accel, est_occupancy)
+                    best_loc = ScheduleTaskLocation(gproc, proc)
+                    best_spec = ScheduleTaskSpec(task, scope, est_time_util, est_alloc_util, est_occupancy)
+                    scheduled = true
+                    break
+                end
+            end
+        end
+        empty!(sorted_procs)
+    end
 
     # Phase 3 — brief state.lock hold: fire or fail the task.
     # `restore_ready` only becomes non-empty if a task completes synchronously
