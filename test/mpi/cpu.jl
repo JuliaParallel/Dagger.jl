@@ -148,6 +148,7 @@ end
 include("spawn.jl")
 include("noaliasing_args.jl")
 include("rank_gate.jl")
+include("delegation.jl")
 
 @testset "Datadeps" begin
 

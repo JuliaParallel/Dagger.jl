@@ -2568,6 +2568,8 @@ function Dagger.task_blocked(::MPIAcceleration, f)
     end
 end
 
+include("MPIExtDelegation.jl")
+
 # A task that is not part of a Datadeps region (no tag option) generates ref ids only while it
 # is moved to and executed on its processor, never during planning, so once `execute!` returns
 # nobody takes another id for its thunk id and its sub-counter is dead. Without this the table
@@ -2579,15 +2581,36 @@ function execute!(proc::MPIProcessor, f, args...; kwargs...)
     if opts !== nothing && opts.tag === nothing
         tid = sch_handle().thunk_id.id
         try
-            return mpi_execute_body(proc, f, args...; kwargs...)
+            return mpi_execute_lend(proc, f, args...; kwargs...)
         finally
             mpi_cleanup_tid(tid)
         end
     end
-    return mpi_execute_body(proc, f, args...; kwargs...)
+    return mpi_execute_lend(proc, f, args...; kwargs...)
 end
 
-function mpi_execute_body(proc::MPIProcessor, f, args...; kwargs...)
+function mpi_execute_lend(proc::MPIProcessor, f, args...; kwargs...)
+    # Opt-in delegation (`lend=true`): one flag read for every other task
+    if LEND_ENABLED[]
+        spec = Dagger.get_tls().task_spec
+        opts = spec === nothing ? nothing : spec.options
+        if opts !== nothing
+            lend = mpi_lend_state(proc, f, opts::Options)
+            lend === nothing || return mpi_execute_body(lend, proc, f, args...; kwargs...)
+        end
+    end
+    return mpi_execute_body(nothing, proc, f, args...; kwargs...)
+end
+
+# What the owner calls to run the function itself: through the rank gate, or (a task that may be lent, see
+# `mpi_lend_state`) through the lend pool. A separate method per `lend` type, so that the code of a task
+# that does not lend is compiled as before.
+mpi_owner_run(::Nothing, proc::MPIProcessor, f, raw_args::Tuple, kwargs) =
+    mpi_gated_execute!(proc.innerProc, f, raw_args...; kwargs...)
+mpi_owner_run(lend::LendState, proc::MPIProcessor, f, raw_args::Tuple, kwargs) =
+    mpi_lend_run(lend, proc, f, raw_args, kwargs)
+
+function mpi_execute_body(lend::Union{Nothing,LendState}, proc::MPIProcessor, f, args...; kwargs...)
     local_rank = MPI.Comm_rank(proc.comm)
     islocal = local_rank == proc.rank
     inplace_move = f === move!
@@ -2623,7 +2646,7 @@ function mpi_execute_body(proc::MPIProcessor, f, args...; kwargs...)
     # type on every rank so chunktype stays SPMD-uniform.
     if !plan.need_type_bcast && plan.nothrow
         if islocal
-            result = mpi_gated_execute!(proc.innerProc, f, raw_args...; kwargs...)
+            result = mpi_owner_run(lend, proc, f, raw_args, kwargs)
             space = mpi_result_space(result, proc)
             return tochunk(result, proc, space; type=plan.inferred)
         else
@@ -2637,7 +2660,7 @@ function mpi_execute_body(proc::MPIProcessor, f, args...; kwargs...)
     if !plan.need_type_bcast
         if islocal
             result = try
-                mpi_gated_execute!(proc.innerProc, f, raw_args...; kwargs...)
+                mpi_owner_run(lend, proc, f, raw_args, kwargs)
             catch err
                 @opcounter :execute_bcast_send_yield
                 bcast_meta_yield(proc.comm, proc.rank, tag, (:error, mpi_wire_exception(err)))
@@ -2660,7 +2683,7 @@ function mpi_execute_body(proc::MPIProcessor, f, args...; kwargs...)
     # Non-concrete return type: full status + type/space (or error) broadcast
     if islocal
         result = try
-            mpi_gated_execute!(proc.innerProc, f, raw_args...; kwargs...)
+            mpi_owner_run(lend, proc, f, raw_args, kwargs)
         catch err
             @opcounter :execute_bcast_send_yield
             bcast_meta_yield(proc.comm, proc.rank, tag, (:error, mpi_wire_exception(err)))
