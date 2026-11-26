@@ -3,7 +3,7 @@ using Dagger, Test, Random
 # Light tasks (@light): protocol stress test (random DAGs built concurrently, multiple waiters, nested spawns, errors) and DTask interop.
 # Count-bounded on purpose (AGENTS.md lessons 12, 27); with 300 rounds an early-launch ordering bug fails the stress part 3 of 3 times at 8 threads, with 40 rounds it slipped through (lesson 136).
 @testset "Light tasks" begin
-    ITER = parse(Int, get(ENV, "DAGGER_LIGHT_ITER", "300"))
+    ITER = 300
     busy(k) = (s = 0; for i in 1:k; s += i; end; s)
     node(xs...) = 1 + sum(xs; init = 0)
 
