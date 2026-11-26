@@ -1,18 +1,23 @@
 # Plain eager tasks need a uniform placement decision even when ranks make
 # progress at different speeds. Check actual execution, scopes, and locality.
+# A task whose scope excludes some thread of its rank asked for a thread, and must run on the
+# processor's thread. Any other task runs on whichever thread of its rank is free (see
+# `free_threads.jl`), so only its rank is the planner's choice.
 mpi_spawn_location(x=nothing) = (MPI.Comm_rank(MPI.COMM_WORLD), Threads.threadid(), x)
 mpi_spawn_value() = (sleep(0.05); 42)
 mpi_spawn_value_fast(i) = 42 + i - i
 mpi_spawn_checked(i::Int) = i > 0 ? i : error("negative")
 
-function check_spawn_placements(tasks, allowed, value=nothing)
+function check_spawn_placements(tasks, allowed, value=nothing; pinned=false)
     placements = Dagger.Processor[]
     for task in tasks
         proc = fetch(task; raw=true).processor
         push!(placements, proc)
         @test proc in allowed
         @test Dagger.check_uniform(proc)
-        @test fetch(task) == (proc.rank, proc.innerProc.tid, value)
+        loc = fetch(task)
+        @test loc[1] == proc.rank && loc[3] == value
+        pinned && @test loc[2] == proc.innerProc.tid
     end
     @test [count(==(p), placements) for p in allowed] == fill(4, length(allowed))
 end
@@ -50,7 +55,7 @@ end
                 end
                 foreach(wait, tasks)
                 Dagger.check_uniformity!(true)
-                check_spawn_placements(tasks, allowed)
+                check_spawn_placements(tasks, allowed; pinned=label in ("compute scope", "exact scope"))
             end
 
             @testset "Chunk owner preference" begin

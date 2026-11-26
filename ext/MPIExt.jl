@@ -2429,6 +2429,81 @@ function mpi_execute_bcast_plan(f, args, proc::MPIProcessor)
     return (; need_type_bcast=false, nothrow, inferred)
 end
 
+# --- Running a task on a free thread of its rank --------------------------------------
+#
+# `execute!(::ThreadProc)` binds the function to the processor's thread, so an MPI task
+# waits behind anything that occupies that thread without yielding (a long kernel, a
+# rank-local task), whichever thread the scheduler happened to name. A task whose scope
+# leaves every thread of its rank open did not ask for a thread: the choice is the
+# runtime's and need not be kept, so it runs on whichever thread of its rank is free.
+# A task whose scope excludes some thread of its rank (an `ExactScope`, which is what
+# Datadeps and explicit pinning use, or a union of only some threads) did ask for one:
+# it stays on the thread of the processor the scheduler picked within that scope.
+
+# Does `scope` leave out a thread of the rank of `proc`?
+function mpi_thread_requested(proc::MPIProcessor, scope)
+    (scope === nothing || scope isa Dagger.AnyScope || scope === Dagger.DefaultScope()) && return false
+    nthreads = count(p -> p isa Dagger.ThreadProc, ensure_children!(proc.comm))
+    if scope isa Dagger.UnionScope
+        # A union of `ExactScope`s (what `scope(mpi_rank=...)` builds) is the common shape: count
+        # the distinct threads of this rank it names instead of testing every thread against it
+        named = 0
+        for sub in scope.scopes
+            if sub isa Dagger.ExactScope && sub.processor isa MPIProcessor{Dagger.ThreadProc}
+                p = sub.processor
+                (p.rank == proc.rank && p.comm == proc.comm) && (named += 1)
+            else
+                return mpi_thread_requested_slow(proc, scope)
+            end
+        end
+        return named < nthreads
+    end
+    return mpi_thread_requested_slow(proc, scope)
+end
+function mpi_thread_requested_slow(proc::MPIProcessor, scope)
+    for inner in ensure_children!(proc.comm)
+        inner isa Dagger.ThreadProc || continue
+        Dagger.proc_in_scope(MPIProcessor(inner, proc.comm, proc.rank), scope) || return true
+    end
+    return false
+end
+
+# The task that runs `execute!` is a pooled, migratable task with its TLS in place, so
+# the function can simply be called: Julia runs it on whichever thread is free
+function mpi_run_unbound(f, args...; kwargs...)
+    if Dagger.task_logging_enabled()
+        Dagger.TimespanLogging.prof_task_put!(Dagger.get_tls().sch_handle.thunk_id.id)
+    end
+    try
+        return @invokelatest f(args...; kwargs...)
+    catch err
+        err isa InterruptException && rethrow()
+        rethrow(CapturedException(err, catch_backtrace()))
+    end
+end
+
+# Start the task of an MPI processor already pinned to the thread of its inner processor.
+# Without this the task is migratable, and `execute!(::ThreadProc)` then misses its inline
+# fast path: it creates a second task pinned to the thread, schedules it and waits, which
+# measured 160-190 us per task (a dependent chain of tasks pinned to one thread: 387 us per
+# link at 4 ranks x 16 threads, of which 161 us was this hand-over). Only for processors of
+# this rank, and not for a task that asked for no particular thread. `task.scope` is the
+# scope the scheduler placed the task under (it includes Datadeps' exact scope and the scopes
+# of chunk arguments), the same one `mpi_execute_inner` looks at.
+function Dagger.Sch.task_tid_for_processor(proc::MPIProcessor{Dagger.ThreadProc}, task)
+    proc.rank == MPI.Comm_rank(proc.comm) || return nothing
+    mpi_thread_requested(proc, task.scope) || return nothing
+    return Dagger.Sch.task_tid_for_processor(proc.innerProc)
+end
+
+function mpi_execute_inner(proc::MPIProcessor, f, args...; kwargs...)
+    if proc.innerProc isa ThreadProc && Dagger.in_task() &&
+       !mpi_thread_requested(proc, Dagger.get_tls().task_spec.scope)
+        return mpi_run_unbound(f, args...; kwargs...)
+    end
+    return execute!(proc.innerProc, f, args...; kwargs...)
+end
+
 # A task that is not part of a Datadeps region (no tag option) generates ref ids only while it
 # is moved to and executed on its processor, never during planning, so once `execute!` returns
 # nobody takes another id for its thunk id and its sub-counter is dead. Without this the table
@@ -2484,7 +2559,7 @@ function mpi_execute_body(proc::MPIProcessor, f, args...; kwargs...)
     # type on every rank so chunktype stays SPMD-uniform.
     if !plan.need_type_bcast && plan.nothrow
         if islocal
-            result = execute!(proc.innerProc, f, raw_args...; kwargs...)
+            result = mpi_execute_inner(proc, f, raw_args...; kwargs...)
             space = mpi_result_space(result, proc)
             return tochunk(result, proc, space; type=plan.inferred)
         else
@@ -2498,7 +2573,7 @@ function mpi_execute_body(proc::MPIProcessor, f, args...; kwargs...)
     if !plan.need_type_bcast
         if islocal
             result = try
-                execute!(proc.innerProc, f, raw_args...; kwargs...)
+                mpi_execute_inner(proc, f, raw_args...; kwargs...)
             catch err
                 @opcounter :execute_bcast_send_yield
                 bcast_meta_yield(proc.comm, proc.rank, tag, (:error, mpi_wire_exception(err)))
@@ -2521,7 +2596,7 @@ function mpi_execute_body(proc::MPIProcessor, f, args...; kwargs...)
     # Non-concrete return type: full status + type/space (or error) broadcast
     if islocal
         result = try
-            execute!(proc.innerProc, f, raw_args...; kwargs...)
+            mpi_execute_inner(proc, f, raw_args...; kwargs...)
         catch err
             @opcounter :execute_bcast_send_yield
             bcast_meta_yield(proc.comm, proc.rank, tag, (:error, mpi_wire_exception(err)))
