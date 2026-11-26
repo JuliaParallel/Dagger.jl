@@ -2908,14 +2908,34 @@ end
 
 # Scopes are reused (a `with_options(scope=...)` block hands the same object to every
 # task spawned under it), so what a union scope names is worked out once per scope.
-const MPI_UNION_SCOPE_CACHE = LockedObject(Dict{UInt,Tuple{Any,Any}}())
+#
+# The key is not `objectid(scope)`: a `UnionScope` holds a tuple with one `ExactScope` per
+# processor, and `objectid` hashes all of it, which made a plain rank scope
+# (`Dagger.scope(mpi_rank=r)`, one entry per thread) cost time proportional to the thread
+# count, several times per task. It is not the scope's address either: for a statically
+# typed immutable the compiler may pass a fresh box, so an "address" can differ on every
+# call and the cache would never hit. The key is a function of the contents (length and
+# three members); `===` on a hit confirms it, and a miss only costs a recomputation.
+# Reads take no lock: the table is replaced as a whole.
+function mpi_union_key(scope::Dagger.UnionScope)
+    s = scope.scopes
+    n = length(s)
+    h = hash(n)
+    if n > 0
+        h = hash(s[1], h); h = hash(s[n], h); h = hash(s[(n >> 1) + 1], h)
+    end
+    return UInt(h)
+end
+
+mutable struct MPIUnionScopeCache
+    @atomic table::Dict{UInt,Tuple{Any,Any}}
+end
+const MPI_UNION_SCOPE_CACHE = MPIUnionScopeCache(Dict{UInt,Tuple{Any,Any}}())
+const MPI_UNION_SCOPE_CACHE_LOCK = ReentrantLock()
 
 function mpi_union_scope_processor(scope::Dagger.UnionScope)
-    key = objectid(scope)
-    hit = lock(MPI_UNION_SCOPE_CACHE) do cache
-        get(cache, key, nothing)
-    end
-    # `===`: the entry keeps the scope alive, so a hit cannot be a recycled objectid
+    key = mpi_union_key(scope)
+    hit = get((@atomic MPI_UNION_SCOPE_CACHE.table), key, nothing)
     hit !== nothing && hit[1] === scope && return hit[2]
     proc = nothing
     scopes = scope.scopes
@@ -2926,9 +2946,11 @@ function mpi_union_scope_processor(scope::Dagger.UnionScope)
             proc = argmin(short_name, [sc.processor for sc in scopes])
         end
     end
-    lock(MPI_UNION_SCOPE_CACHE) do cache
-        length(cache) >= 256 && empty!(cache)
-        cache[key] = (scope, proc)
+    lock(MPI_UNION_SCOPE_CACHE_LOCK) do
+        old = @atomic MPI_UNION_SCOPE_CACHE.table
+        table = length(old) >= 256 ? Dict{UInt,Tuple{Any,Any}}() : copy(old)
+        table[key] = (scope, proc)
+        @atomic MPI_UNION_SCOPE_CACHE.table = table
     end
     return proc
 end
@@ -2945,9 +2967,15 @@ end
 # and so rule it out, as does an explicit tag (Datadeps tasks, whose copies and
 # waits do not know about failures that arrive this way).
 mpi_failure_only(::Nothing) = false
-mpi_failure_only(opts::Options) =
-    Dagger.ELIDE_FOREIGN_TASKS[] && !CHECK_UNIFORMITY[] && opts.tag === nothing &&
-    mpi_scope_processor(opts) !== nothing
+function mpi_failure_only(opts::Options)
+    Dagger.ELIDE_FOREIGN_TASKS[] && !CHECK_UNIFORMITY[] && opts.tag === nothing || return false
+    return mpi_failure_only(opts, mpi_scope_processor(opts))
+end
+# With the task's processor already worked out (`elide_task!` needs it for other things too)
+function mpi_failure_only(opts::Options, proc::Union{Nothing,MPIProcessor})
+    Dagger.ELIDE_FOREIGN_TASKS[] && !CHECK_UNIFORMITY[] && opts.tag === nothing || return false
+    return proc !== nothing
+end
 
 # Whether `local_rank` takes part in moving `v` to the task's rank, or cannot tell
 function mpi_arg_participates(v, local_rank::Int)
@@ -3096,15 +3124,18 @@ end
 function Dagger.elide_task!(accel::MPIAcceleration, spec, task)
     CHECK_UNIFORMITY[] && return false
     opts = spec.options
-    # Tasks without a scope are placed here, so that every rank knows the owner
-    if mpi_task_processor(opts) === nothing && opts.compute_scope === nothing && opts.scope === nothing
-        mpi_preplace!(accel, spec, task)
-    end
+    # Tasks without a scope are placed here, so that every rank knows the owner.
+    # N.B. The processor a union scope names is looked up once per task: it is the same
+    # answer every time, and each lookup is a hash-table probe on every task.
     proc = mpi_task_processor(opts)
+    if proc === nothing && opts.compute_scope === nothing && opts.scope === nothing
+        mpi_preplace!(accel, spec, task)
+        proc = mpi_task_processor(opts)
+    end
     proc === nothing && return false
     # Later submissions use this to decide about their own arguments, and `fetch`
     # to stay uniform when the task fails. Only failure-only tasks have an owner.
-    mpi_failure_only(opts) || return false
+    mpi_failure_only(opts, proc) || return false
     task.owner = proc.rank
     local_rank = MPI.Comm_rank(proc.comm)
     proc.rank == local_rank && return false
