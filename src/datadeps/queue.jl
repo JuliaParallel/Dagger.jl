@@ -326,7 +326,7 @@ function written_positions(task_arg_ws, deps_vec)
     return something(writes, Int[])
 end
 
-function distribute_task!(queue::DataDepsTaskQueue, state::DataDepsState, all_procs, all_scope, spec::DTaskSpec{typed}, task::DTask, fargs, proc_to_scope_lfu, write_num::Int; ownership=nothing) where typed
+function distribute_task!(queue::DataDepsTaskQueue, state::DataDepsState, all_procs, all_scope, spec::DTaskSpec{typed}, task::DTask, fargs, proc_to_scope_lfu, write_num::Int; ownership=nothing, pre_proc=nothing) where typed
     @specialize spec fargs
 
     if typed
@@ -339,7 +339,11 @@ function distribute_task!(queue::DataDepsTaskQueue, state::DataDepsState, all_pr
 
     task_scope = @something(spec.options.compute_scope, spec.options.scope, DefaultScope())
     scheduler = queue.scheduler
-    our_proc = datadeps_schedule_task(scheduler, state, all_procs, all_scope, task_scope, spec, task)
+    # `pre_proc` is the processor `schedule_slot_window!` already chose for this
+    # task (the scheduler is stateless, so asking early gives the same answer).
+    our_proc = pre_proc === nothing ?
+        datadeps_schedule_task(scheduler, state, all_procs, all_scope, task_scope, spec, task) :
+        pre_proc
     @assert our_proc in all_procs
     our_space = only(memory_spaces(our_proc))
     @check_uniform(our_proc)

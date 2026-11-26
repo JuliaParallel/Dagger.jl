@@ -288,6 +288,19 @@ which is what the limit exists for.
 """
 const DATADEPS_UNIFORM_DEFER_MAX = 512
 
+"""
+How many tasks uniform (SPMD) planning places ahead so that the aliasing info of
+their remote slots is exchanged in one batch (`schedule_slot_window!`); 1 turns
+it off.
+
+Each remote slot's aliasing info is only known to the rank that owns the slot,
+and every rank needs it, so asking for it per slot makes planning a chain of
+blocking rendezvous (about 500 per 8192^2 / 256^2-tile Cholesky, 0.7 s of the
+planning thread at 2 ranks x 32 threads, where a rendezvous costs 1.4 ms while
+the peers compute).
+"""
+const DATADEPS_SLOT_WINDOW = 128
+
 ### Planning instrumentation ###
 #
 # Where a region's planning time went, per phase, printed once per region when
@@ -1356,7 +1369,8 @@ function _schedule_vertex!(v::Int, partition_id::Int,
                            vertex_to_partition::Vector{Int},
                            proc_to_scope_lfu,
                            write_num::Int,
-                           registry::Union{SharedChunkRegistry,Nothing})
+                           registry::Union{SharedChunkRegistry,Nothing};
+                           pre_proc=nothing)
     pair = seen_tasks[v]
     spec = pair.spec
     task = pair.task
@@ -1376,7 +1390,75 @@ function _schedule_vertex!(v::Int, partition_id::Int,
 
     return distribute_task!(temp_queue, state, local_procs, local_scope,
                             spec, task, spec.fargs,
-                            proc_to_scope_lfu, write_num; ownership=registry)
+                            proc_to_scope_lfu, write_num; ownership=registry, pre_proc)
+end
+
+"""
+    schedule_slot_window!(state, task_metas, verts, procs, temp_queues,
+                          local_scopes, partition_procs, vertex_to_partition)
+
+Uniform (SPMD) planning only. Place the tasks `verts` (in order) and exchange the
+aliasing info of all their remote slots at once, leaving the chosen processors in
+`procs` for `distribute_task!` to use.
+
+A slot living on another rank is a fresh buffer there, so its aliasing info is
+known to that rank alone and every rank needs it: asked per slot, it is one
+blocking broadcast per (argument, rank), and each is a rendezvous that waits for
+the slowest rank to reach the same point in its own replay of the plan. Here the
+slots a window needs are generated first (allocation is rank-local for dense
+tiles), their ainfos go through one `batch_ainfos` exchange per owning rank, and
+the results land in the region memo, so the `aliasing!` calls `distribute_task!`
+makes afterwards find them and communicate nothing. What the planner does with
+them, and in what order, is unchanged.
+
+Asking the scheduler ahead of the planning of the earlier tasks of the window is
+only valid for a scheduler that never reads the planning state
+(`datadeps_schedule_is_stateless`); the caller checks that. Slots that this
+misses (an argument seen under another `dep_mod` while computing a remainder,
+say) still take the per-slot exchange, so this only ever removes communication.
+"""
+function schedule_slot_window!(state::DataDepsState,
+                               task_metas::Vector{HierarchicalTaskMeta},
+                               verts::Vector{Int}, procs::Vector{Processor},
+                               temp_queues, local_scopes, partition_procs,
+                               vertex_to_partition::Vector{Int})
+    resize!(procs, length(verts))
+    for (k, v) in enumerate(verts)
+        pid = vertex_to_partition[v]
+        spec = task_metas[v].pair.spec
+        task = task_metas[v].pair.task
+        DATADEPS_CURRENT_TASK[] = task
+        task_scope = @something(spec.options.compute_scope, spec.options.scope, DefaultScope())
+        procs[k] = datadeps_schedule_task(temp_queues[pid].scheduler, state,
+                                          partition_procs[pid], local_scopes[pid],
+                                          task_scope, spec, task)
+    end
+
+    objs = Any[]
+    dep_mods = Any[]
+    seen = Set{UInt}()
+    for (k, v) in enumerate(verts)
+        meta = task_metas[v]
+        meta.may_alias || continue
+        our_space = only(memory_spaces(procs[k]))
+        DATADEPS_CURRENT_TASK[] = meta.pair.task
+        for dep in meta.deps
+            arg = dep.arg_w.arg
+            arg isa Chunk || continue
+            memory_space(arg) == our_space && continue
+            slot = get_or_generate_slot!(state, our_space, arg)
+            key = ainfo_memo_key(slot, dep.arg_w.dep_mod)
+            (key in seen || has_memoized_ainfo(key)) && continue
+            push!(seen, key)
+            push!(objs, slot)
+            push!(dep_mods, dep.arg_w.dep_mod)
+        end
+    end
+    if !isempty(objs)
+        @opcounter :slot_window_ainfos length(objs)
+        batch_ainfos(current_acceleration(), objs, dep_mods)
+    end
+    return
 end
 
 """
@@ -1535,7 +1617,8 @@ function schedule_partitions_sequential!(queue::DataDepsTaskQueue,
                                          vertex_to_partition::Vector{Int},
                                          registry::Union{SharedChunkRegistry,Nothing},
                                          wait_all_queue,
-                                         value_dep_verts::Set{Int})
+                                         value_dep_verts::Set{Int},
+                                         task_metas::Vector{HierarchicalTaskMeta})
     n_partitions = length(partitions)
     temp_queues = Vector{DataDepsTaskQueue}(undef, n_partitions)
     local_scopes = Vector{AbstractScope}(undef, n_partitions)
@@ -1610,20 +1693,44 @@ function schedule_partitions_sequential!(queue::DataDepsTaskQueue,
 
     # Copy tasks spawned from within `distribute_task!` go through the same queue
     # as the tasks they serve, so that they are held (or not) alongside them.
+    window = DATADEPS_SLOT_WINDOW
+    windowed = window > 1 && uniform_execution() &&
+               datadeps_schedule_is_stateless(queue.scheduler)
+    win_verts = Int[]
+    win_procs = Processor[]
     with_options(; task_queue=submit_queue) do
         try
-            for v in topo
-                pid = vertex_to_partition[v]
-                local_procs = partition_procs[pid]
-                isempty(local_procs) && continue
-                # A task taking an in-region task's *value* as an argument has
-                # `distribute_task!` `fetch` that producer, so it must really
-                # have been submitted; its own turn is topologically earlier.
-                v in value_dep_verts && maybe_flush_batch!(submit_queue)
-                write_num = _schedule_vertex!(
-                    v, pid, temp_queues[pid], shared_state, local_procs,
-                    local_scopes[pid], dag, seen_tasks, vertex_to_partition,
-                    proc_to_scope_lfus[pid], write_num, ownership)
+            i = 1
+            while i <= length(topo)
+                # Gather the next window of vertices (at most one when not
+                # windowed). A vertex taking an in-region producer's value starts
+                # a window: that producer must have been submitted before the
+                # vertex is prepared, so nothing may be placed ahead of the flush.
+                empty!(win_verts)
+                while i <= length(topo) && length(win_verts) < (windowed ? window : 1)
+                    v = topo[i]
+                    isempty(partition_procs[vertex_to_partition[v]]) && (i += 1; continue)
+                    isempty(win_verts) || !(v in value_dep_verts) || break
+                    push!(win_verts, v)
+                    i += 1
+                end
+                isempty(win_verts) && continue
+                windowed && schedule_slot_window!(
+                    shared_state, task_metas, win_verts, win_procs,
+                    temp_queues, local_scopes, partition_procs, vertex_to_partition)
+                for (k, v) in enumerate(win_verts)
+                    pid = vertex_to_partition[v]
+                    local_procs = partition_procs[pid]
+                    # A task taking an in-region task's *value* as an argument has
+                    # `distribute_task!` `fetch` that producer, so it must really
+                    # have been submitted; its own turn is topologically earlier.
+                    v in value_dep_verts && maybe_flush_batch!(submit_queue)
+                    write_num = _schedule_vertex!(
+                        v, pid, temp_queues[pid], shared_state, local_procs,
+                        local_scopes[pid], dag, seen_tasks, vertex_to_partition,
+                        proc_to_scope_lfus[pid], write_num, ownership;
+                        pre_proc=windowed ? win_procs[k] : nothing)
+                end
             end
         finally
             maybe_flush_batch!(submit_queue)
@@ -1812,7 +1919,7 @@ function _distribute_tasks_hierarchical!(queue::DataDepsTaskQueue,
             schedule_partitions_sequential!(
                 queue, queue_lock, partitions, dag, seen_tasks,
                 partition_procs, vertex_to_partition, registry,
-                wait_all_queue, value_dep_verts)
+                wait_all_queue, value_dep_verts, task_metas)
         else
             states = Vector{DataDepsState}(undef, n_partitions)
             @sync for pid in 1:n_partitions

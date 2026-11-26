@@ -325,6 +325,13 @@ function memoize_ainfo!(key::UInt, ainfo::AbstractAliasing)
     end
 end
 
+"Whether the region memo already holds an answer for `key` (see `memoize_ainfo!`)."
+function has_memoized_ainfo(key::UInt)
+    memo = CHUNK_AINFO_MEMO[]
+    memo === nothing && return false
+    @lock memo.lock return haskey(memo.entries, key)
+end
+
 struct ArgumentWrapper
     arg
     dep_mod

@@ -24,6 +24,18 @@ default to `false`; MPIExt marks thread 1 of each rank.
 """
 is_driver_thread_proc(::Processor) = false
 
+
+"""
+    datadeps_schedule_is_stateless(sched) -> Bool
+
+Whether `datadeps_schedule_task` depends only on `sched`'s own counter, the
+task's scope and the processor list, and never on the `DataDepsState` that
+planning the *earlier* tasks mutates. Such a scheduler may be asked about a
+task before the tasks ahead of it are planned (in order), which is what lets
+`schedule_slot_window!` batch the slot aliasing exchanges of a window of tasks.
+"""
+datadeps_schedule_is_stateless(::DataDepsScheduler) = false
+datadeps_schedule_is_stateless(::RoundRobinScheduler) = true
 function datadeps_schedule_task(sched::RoundRobinScheduler, state::DataDepsState, all_procs, all_scope, task_scope, spec::DTaskSpec, task::DTask)
     proc_idx = sched.proc_idx
     our_proc = all_procs[proc_idx]

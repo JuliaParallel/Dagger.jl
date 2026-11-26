@@ -152,6 +152,7 @@ include("noaliasing_args.jl")
 
 include("threads.jl")
 include("streaming.jl")
+include("slot_window.jl")
 
 @testset "Uniform chunk creation" begin
     Random.seed!(1)
