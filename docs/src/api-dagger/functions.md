@@ -86,3 +86,15 @@ Sch.exec!
 Sch.halt!
 Sch.get_dag_ids
 ```
+
+## Collective Functions (SPMD, cooperative under MPI)
+```@docs
+barrier
+bcast
+gather
+allgather
+scatter
+alltoall
+allreduce
+reduce_to
+```

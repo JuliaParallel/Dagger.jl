@@ -356,6 +356,31 @@ convenient for reductions or for writing results out from rank 0.
 payload, while non-owning ranks return their placeholder metadata. Guard
 rank-specific output (printing, file writes) with `if MPI.Comm_rank(comm) == 0`.
 
+### Collectives for the driver
+
+Do not call blocking MPI collectives (`MPI.Allgather`, `MPI.Barrier`, ...) from
+the driver while Dagger tasks may be in flight: the call parks an OS thread
+inside MPI, where it runs no relay and reaches no GC safepoint, and across nodes
+this can deadlock the whole rank. Dagger's versions post the non-blocking
+request and wait for it with `MPI.Test` and `yield`. Each is called by every
+rank, in the same order, and works without MPI as the one-process case.
+
+- [`Dagger.barrier`](@ref)`()`
+- [`Dagger.bcast`](@ref)`(x; root)`: the value of `root` on every rank
+- [`Dagger.gather`](@ref)`(x; root)` and [`Dagger.allgather`](@ref)`(x)`: the
+  contributions of all ranks, in rank order, on `root` or on every rank
+- [`Dagger.scatter`](@ref)`(xs; root)` and [`Dagger.alltoall`](@ref)`(xs)`: one
+  element per rank is sent to that rank
+- [`Dagger.reduce_to`](@ref)`(op, x; root)` and [`Dagger.allreduce`](@ref)`(op, x)`:
+  the contributions folded with `op` in rank order (identical bits everywhere)
+
+Values may be anything that serializes; sizes may differ between ranks and
+contributions may be empty. The reductions gather the (small) contributions and
+fold them locally, so `op` can be any Julia function. MPI requires every rank to
+start the collectives of a communicator in the same order, so two tasks that
+communicate at the same time need different communicators (`MPI.Comm_dup`),
+passed as `comm=`.
+
 ## Testing MPI code
 
 Dagger ships a set of MPI test environments and suites (used by CI) that are a

@@ -323,3 +323,124 @@ default_memory_space() = default_memory_space(current_acceleration())
 # Whether two logical owners share a physical node (for device IPC fast paths).
 # Defaults false; Distributed and MPI provide concrete methods.
 same_node(::Acceleration, ::Integer, ::Integer) = false
+
+# Cooperative collectives. Each one is SPMD: every process of the communicator calls it, in the same order. Without MPI
+# there is one process, so each reduces to its one-process meaning. The MPI extension provides the real methods.
+
+struct _NoInit end
+
+function _check_root_one(root)
+    root == 0 || throw(ArgumentError("root $root is not a valid rank for one process"))
+    return nothing
+end
+
+"""
+    barrier(; comm)
+
+Block until every process of the communicator has called `barrier`. Under MPI this is a non-blocking `MPI_Ibarrier`
+that is waited for cooperatively (`MPI.Test` and `yield`), so no OS thread is parked inside MPI. That is the
+difference to `MPI.Barrier` called from the driver: such a call holds a thread in a C routine that is not a GC
+safepoint, so a garbage collection started by another thread waits for it, the rank's relay cannot forward
+messages, and a peer that waits for one never reaches the barrier, which can deadlock a job. `comm` selects another
+communicator than the one of the current acceleration. A no-op without MPI.
+
+All collectives of this family ([`bcast`](@ref), [`gather`](@ref), [`allgather`](@ref), [`scatter`](@ref),
+[`alltoall`](@ref), [`allreduce`](@ref), [`reduce_to`](@ref)) are cooperative in the same way, may be called from the
+driver or from inside a task, and take any value that serializes (for an array of bits elements that is a header and
+the raw bytes). Contributions may differ in size between processes and may be empty. `root` is a 0-based rank. The
+MPI rule for collectives applies: all processes of a communicator start their collectives in the same order, so
+two tasks that communicate at the same time must use different communicators (`MPI.Comm_dup`). A contribution that
+cannot be serialized makes the processes that receive it throw instead of leaving them waiting.
+"""
+barrier(; kwargs...) = barrier(current_acceleration(); kwargs...)
+barrier(::Acceleration; kwargs...) = nothing
+
+"""
+    bcast(x; root=0, comm) -> value
+
+Return the value `x` of process `root` on every process; the argument of the other processes is ignored.
+Without MPI it returns `x`. See [`barrier`](@ref) for what applies to all collectives.
+"""
+bcast(x; kwargs...) = bcast(current_acceleration(), x; kwargs...)
+function bcast(::Acceleration, x; root::Integer=0, kwargs...)
+    _check_root_one(root)
+    return x
+end
+
+"""
+    allgather(x; comm) -> Vector
+
+Every process contributes `x` and receives the vector of all contributions in rank order (`Vector{Any}`). Without MPI it is
+`Any[x]`. See [`barrier`](@ref). Under MPI this uses hand-written dissemination rounds, which measured faster than the
+library's `MPI_Iallgather(v)` for contributions of a few KB, and the library call for larger ones; the choice is a
+scoped value of the MPI extension (`MPI_ALLGATHER_NATIVE`) that every process must set alike.
+"""
+allgather(x; kwargs...) = allgather(current_acceleration(), x; kwargs...)
+allgather(::Acceleration, x; kwargs...) = Any[x]
+
+"""
+    gather(x; root=0, comm) -> Vector or nothing
+
+Like [`allgather`](@ref), but only process `root` receives the vector of contributions; the others get `nothing`.
+Without MPI it is `Any[x]`. See [`barrier`](@ref).
+"""
+gather(x; kwargs...) = gather(current_acceleration(), x; kwargs...)
+function gather(::Acceleration, x; root::Integer=0, kwargs...)
+    _check_root_one(root)
+    return Any[x]
+end
+
+"""
+    scatter(xs; root=0, comm) -> value
+
+Process `root` passes a vector `xs` with one element per process; every process returns the element for its rank
+(`xs[rank + 1]`). `xs` is ignored on the other processes. Without MPI `xs` must have one element and it is returned.
+See [`barrier`](@ref).
+"""
+scatter(xs; kwargs...) = scatter(current_acceleration(), xs; kwargs...)
+function scatter(::Acceleration, xs; root::Integer=0, kwargs...)
+    _check_root_one(root)
+    length(xs) == 1 || throw(ArgumentError("scatter needs one element per process (1), got $(length(xs))"))
+    return first(xs)
+end
+
+"""
+    alltoall(xs; comm) -> Vector
+
+Every process passes a vector `xs` with one element per process; element `i` goes to rank `i - 1`. Every process returns
+the vector of the elements addressed to it, in the order of the sending ranks. Without MPI `xs` must have one element
+and the result is `Any[xs[1]]`. See [`barrier`](@ref).
+"""
+alltoall(xs; kwargs...) = alltoall(current_acceleration(), xs; kwargs...)
+function alltoall(::Acceleration, xs; kwargs...)
+    length(xs) == 1 || throw(ArgumentError("alltoall needs one element per process (1), got $(length(xs))"))
+    return Any[first(xs)]
+end
+
+"""
+    allreduce(op, x; init, comm) -> value
+
+[`allgather`](@ref), then a fold with `op` over the contributions **in rank order** on every process:
+`op(op(v0, v1), v2)...` (starting from `init` when given). Every process folds the same values in the same order,
+so the result is identical on all of them, and a floating-point sum is bitwise reproducible whatever the arrival
+order. `op` is an ordinary Julia function and need not be associative or commutative. It is meant for small values
+(a partial sum, a count, a bounding box): every process receives all contributions, and no MPI reduction operation is
+involved. For large arrays combine them inside tasks first. Without MPI it is `x` (folded into `init` if given).
+"""
+function allreduce(op, x; init=_NoInit(), kwargs...)
+    vals = allgather(x; kwargs...)
+    return init isa _NoInit ? reduce(op, vals) : reduce(op, vals; init)
+end
+
+"""
+    reduce_to(op, x; root=0, init, comm) -> value or nothing
+
+Like [`allreduce`](@ref), but the contributions go to process `root` only (as in [`gather`](@ref)), which folds them in
+rank order and returns the result; the others return `nothing`. It is called `reduce_to` so as not to take over
+`Base.reduce`.
+"""
+function reduce_to(op, x; init=_NoInit(), kwargs...)
+    vals = gather(x; kwargs...)
+    vals === nothing && return nothing
+    return init isa _NoInit ? reduce(op, vals) : reduce(op, vals; init)
+end
