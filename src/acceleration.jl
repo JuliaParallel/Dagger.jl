@@ -320,6 +320,41 @@ slot back, so waiting inside a task cannot exhaust the slots. Off by default. De
 """
 function mpi_rank_gate! end
 
+"""
+    enable_delegation!(; slots=max(Threads.nthreads(:default) - 1, 1), max_bytes=typemax(Int))
+
+(MPI) Let tasks spawned with `lend=true` have their execution lent to idle ranks. Collective: every
+rank must call it at the same point, before the first lendable task (it creates a communicator for
+the lending traffic). `slots` is the number of lendable tasks a rank runs at once; further lendable
+tasks wait in a queue from which an idle rank may take them. The default leaves one thread of the rank
+free: the lending service, the broadcast relay and the thread that plans tasks need one, and a rank
+whose threads all run kernels that never yield cannot answer a request until one finished. Nothing changes for tasks that do not
+set `lend=true`. A second call while delegation is enabled does nothing (call [`disable_delegation!`](@ref) first
+to change the settings). Other accelerations do not support it.
+
+A lent task ships its function and all its arguments, as serialized values, every time it is lent, and the thief
+runs it on copies: a write to an argument is not seen by the owner. `max_bytes` refuses to lend a task whose arguments
+add up to more than that many bytes (such a task runs on its own rank).
+"""
+enable_delegation!(; kwargs...) = enable_delegation!(current_acceleration(); kwargs...)
+enable_delegation!(::Acceleration; kwargs...) = error("task delegation is only supported by the MPI acceleration")
+
+"Undo [`enable_delegation!`](@ref) (collective as well)."
+disable_delegation!() = disable_delegation!(current_acceleration())
+disable_delegation!(::Acceleration) = nothing
+
+"""
+    delegation_stats() -> NamedTuple or nothing
+
+Counters of this process for [`enable_delegation!`](@ref): `lent` (tasks of this rank whose execution
+was lent out and whose answer has arrived), `failed` (of those, the ones that came back as a failure),
+`returned` (claims a thief handed back unrun), `stolen` (tasks of other ranks run here), `local_`
+(lendable tasks run on their own rank).
+`nothing` when delegation is not enabled.
+"""
+delegation_stats() = delegation_stats(current_acceleration())
+delegation_stats(::Acceleration) = nothing
+
 # Default processor grid for block assignment of new distributed arrays.
 # Returns `nothing` to let the scheduler choose freely; uniform-execution
 # accelerations (MPI) override this to produce a deterministic assignment

@@ -185,3 +185,14 @@ end
     @test Dagger.Sch.QueueKey(UInt32(1), 9) < Dagger.Sch.QueueKey(UInt32(1), 0) < Dagger.Sch.QueueKey(UInt32(1), -5)
     @test Dagger.Sch.QueueKey(UInt32(1), 9) < Dagger.Sch.QueueKey(UInt32(2), 100)     # occupancy still comes first
 end
+
+# Delegation is an MPI feature: everywhere else the option does nothing and the functions say so
+@testset "Task delegation without MPI" begin
+    @test Dagger.Options().lend === nothing
+    @test Dagger.Options(lend=true).lend === true
+    @test fetch(Dagger.@spawn lend=true 1 + 1) == 2               # ignored without delegation
+    @test Dagger.delegation_stats() === nothing
+    @test Dagger.disable_delegation!() === nothing
+    @test_throws ErrorException Dagger.enable_delegation!()
+    @test Dagger.delegation_stats() === nothing
+end
