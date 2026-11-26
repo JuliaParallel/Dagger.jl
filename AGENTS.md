@@ -1014,3 +1014,12 @@ lesson.
     the domain's indices there. Test both direct sparse-domain slicing and the
     existing allocation/distribute suite on the current nightly; an older
     nightly without the fallback does not exercise the conflict.
+
+98. **Use the public fence API in both remainder-copy transports.**
+    Julia 1.14 added a sync-scope argument to the `atomic_fence` intrinsic.
+    A direct one-argument call can survive precompilation and then fail when
+    MPI first compiles a cross-rank remainder copy. Use
+    `Base.Threads.atomic_fence()` after scattering in both the Distributed
+    and MPI paths. When diagnosing MPI uniformity errors, check for an earlier
+    task failure that left ranks on different operations. Compare the actual
+    Julia versions behind rolling CI labels such as `pre`.

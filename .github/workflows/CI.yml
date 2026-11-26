@@ -448,8 +448,9 @@ jobs:
         version:
           - '1.10'   # LTS
           - '1.11'
+          - '1.13'
+          - '1.14'
           - '1'      # latest stable
-          - 'pre'    # latest prerelease
         ranks:
           - 2
           - 4
@@ -458,6 +459,7 @@ jobs:
       - uses: julia-actions/setup-julia@v3
         with:
           version: ${{ matrix.version }}
+          include-all-prereleases: ${{ matrix.version == '1.14' }}
           arch: x64
       - uses: julia-actions/cache@v3
       # test/mpi/env pulls MPI (MPICH_jll by default) plus the checked-out Dagger;
