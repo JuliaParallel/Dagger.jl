@@ -22,6 +22,7 @@ tests = [
     ("Scheduler", "scheduler.jl"),
     ("Processors", "processors.jl"),
     ("Uniform Placement", "uniform-placement.jl"),
+    ("Two-choices Placement", "two-choices.jl"),
     ("Processor Grids", "procgrid.jl"),
     ("Memory Spaces", "memory-spaces.jl"),
     ("Logging", "logging.jl"),

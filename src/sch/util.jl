@@ -817,6 +817,62 @@ function order_candidates!(P::Vector{Int}, cost_vec::Vector{Float64}, all_equal:
     return
 end
 
+# With many candidates that are all threads of one process, the cost of a candidate is its
+# reserved pressure and nothing else (same-worker transfers are free, `est_time_util` is the
+# same for every candidate), so ranking all of them reads every counter, shuffles and sorts:
+# O(threads) work per task that grew to ~50 us at 64 threads on our cluster. The scheduler only
+# needs a good first choice, because idle runners steal what is queued behind a busy one.
+# Choose the less loaded of two random candidates instead ("power of two choices": the
+# maximum load stays within O(log log n) of the mean), and keep the rest in rotation order as
+# fallbacks for the capacity checks.
+const TWO_CHOICES_MIN = 8   # candidates
+
+# The pid shared by every candidate, or -1
+function single_worker_pid(procs, ::Type{P}) where {P}
+    pid = Dagger.root_worker_id(@inbounds(procs[1])::P)
+    for idx in 2:length(procs)
+        Dagger.root_worker_id(@inbounds(procs[idx])::P) == pid || return -1
+    end
+    return pid
+end
+
+function place_two_choices!(sorted_procs, state, procs, np::Int, pid::Int)
+    i1 = rand(1:np)
+    i2 = rand(1:np-1)
+    i2 >= i1 && (i2 += 1)
+    p1 = @inbounds procs[i1]
+    p2 = @inbounds procs[i2]
+    # One acquisition for both counters. N.B. Explicit lock/unlock, and the result returned
+    # from the `try`, so nothing is captured and reassigned (which would box it).
+    lock(state.worker_time_pressure)
+    c1, c2 = try
+        wtp = Dagger.payload(state.worker_time_pressure)
+        proc_map = get(wtp, pid, nothing)
+        if proc_map === nothing
+            (UInt64(0), UInt64(0))
+        else
+            r1 = get(proc_map, p1, nothing)
+            r2 = get(proc_map, p2, nothing)
+            (r1 === nothing ? UInt64(0) : r1[], r2 === nothing ? UInt64(0) : r2[])
+        end
+    finally
+        unlock(state.worker_time_pressure)
+    end
+    first_idx, second_idx = c2 < c1 ? (i2, i1) : (i1, i2)
+    @inbounds sorted_procs[1] = procs[first_idx]
+    @inbounds sorted_procs[2] = procs[second_idx]
+    pos = 3
+    off = rand(1:np)
+    for k in 1:np
+        j = off + k
+        j > np && (j -= np)
+        (j == first_idx || j == second_idx) && continue
+        @inbounds sorted_procs[pos] = procs[j]
+        pos += 1
+    end
+    return
+end
+
 """
     estimate_task_costs!(sorted_procs, costs, state, procs, task; sig=nothing)
 
@@ -842,6 +898,14 @@ candidate lookups cost about 130 us for 16 threads and grew with the thread coun
         sorted_procs[1] = proc
         costs === nothing || (costs[proc] = 0.0)
         return
+    end
+
+    if costs === nothing && np > TWO_CHOICES_MIN
+        pid = single_worker_pid(procs, candidate_type(procs))
+        if pid >= 0
+            place_two_choices!(sorted_procs, state, procs, np, pid)
+            return
+        end
     end
 
     # Find all Chunks
