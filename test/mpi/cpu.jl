@@ -147,6 +147,7 @@ end
 
 include("spawn.jl")
 include("noaliasing_args.jl")
+include("bulk.jl")
 
 @testset "Datadeps" begin
 
