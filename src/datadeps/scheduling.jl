@@ -10,6 +10,20 @@ mutable struct RoundRobinScheduler <: DataDepsScheduler
     RoundRobinScheduler() = new(1)
 end
 Base.similar(::RoundRobinScheduler) = RoundRobinScheduler()
+"""
+    is_driver_thread_proc(proc::Processor) -> Bool
+
+Whether `proc` is the thread that plans (and submits from) a Datadeps region.
+Under uniform (MPI) execution every task is pinned to the processor the
+scheduler chose, round-robin over the canonical processor list, which starts
+with thread 1 of rank 0: the thread that is busy planning. A task pinned there
+cannot start until planning yields it, and the first one is the critical path of
+most graphs (a Cholesky's first `potrf`). `RoundRobinScheduler` therefore skips
+such processors for tasks that name no processor of their own. Processors
+default to `false`; MPIExt marks thread 1 of each rank.
+"""
+is_driver_thread_proc(::Processor) = false
+
 function datadeps_schedule_task(sched::RoundRobinScheduler, state::DataDepsState, all_procs, all_scope, task_scope, spec::DTaskSpec, task::DTask)
     proc_idx = sched.proc_idx
     our_proc = all_procs[proc_idx]
@@ -22,9 +36,16 @@ function datadeps_schedule_task(sched::RoundRobinScheduler, state::DataDepsState
         # `InvalidScope` and the compatibility check is skippable; all that
         # remains of `proc_in_scope(proc, DefaultScope())` is its lone
         # `DefaultEnabledTaint`, i.e. `default_enabled(proc)`.
-        while !default_enabled(our_proc)
+        # Under uniform execution the driver thread is skipped as well (see
+        # `is_driver_thread_proc`), unless the list holds nothing else (one thread per
+        # rank), where skipping would funnel every task to one rank. A task with a
+        # scope of its own keeps whatever it names.
+        avoid = uniform_execution() && any(!is_driver_thread_proc, all_procs)
+        skipped = 0
+        while !default_enabled(our_proc) || (avoid && skipped < length(all_procs) - 1 && is_driver_thread_proc(our_proc))
             proc_idx = mod1(proc_idx + 1, length(all_procs))
             our_proc = all_procs[proc_idx]
+            skipped += 1
         end
     else
         if isa(constrain(task_scope, all_scope), InvalidScope)
