@@ -122,7 +122,55 @@ const DATADEPS_THUNK_ID = ScopedValue{Int64}(0)
 # `uniform_execution()` holds (i.e. under MPIExt), which provides the method.
 function to_tag end
 
+"""
+    DATADEPS_FLAT_ASYNC_MIN
+
+Smallest region (in tasks) that the flat planner submits through an
+[`AsyncEnqueueQueue`](@ref), so that planning the next tasks overlaps with
+turning the previous ones into scheduler thunks. Without it the planner submits
+each task itself, one after the other: planning (~70 us/task) and submission
+(~100+ us on our cluster) then add up on one thread. Not used under
+uniform execution (see `AsyncEnqueueQueue`) or on a single thread. Regions
+below the threshold (e.g. the few-task steps of iterative solvers) stay
+synchronous, because buffered tasks cannot start before their batch is handed
+over.
+"""
+const DATADEPS_FLAT_ASYNC_MIN = 256
+
 function distribute_tasks!(queue::DataDepsTaskQueue)
+    if length(queue.seen_tasks) >= DATADEPS_FLAT_ASYNC_MIN && !uniform_execution() && Threads.nthreads() > 1
+        aeq = AsyncEnqueueQueue(queue.upper_queue, ReentrantLock())
+        aqueue = DataDepsTaskQueue(aeq; scheduler=queue.scheduler)
+        append!(aqueue.seen_tasks, queue.seen_tasks)
+        try
+            # N.B. Copy and free tasks are spawned through the *scoped* task queue; routing them through
+            # the async queue as well keeps them behind the compute tasks whose thunks they depend on
+            with_options(; task_queue=aeq) do
+                _distribute_tasks_flat!(aqueue, aeq)
+            end
+        finally
+            close_submitter!(aeq)
+        end
+        return
+    end
+    return _distribute_tasks_flat!(queue, nothing)
+end
+
+# A task whose argument is the result of an earlier task of the region needs that task to exist
+# (`populate_task_info!` fetches it), so everything handed to the async submitter must be submitted first
+_unlaunched_dtask_arg(_arg) = (v = first(unwrap_inout(value(_arg))); v isa DTask && !istaskstarted(v))
+function _flush_for_value_deps!(aeq, spec)
+    fargs = spec.fargs
+    for idx in 1:length(fargs)
+        if _unlaunched_dtask_arg(fargs[idx])
+            flush_batch!(aeq)
+            return
+        end
+    end
+    return
+end
+
+function _distribute_tasks_flat!(queue::DataDepsTaskQueue, aeq)
     #= TODO: Improvements to be made:
     # - Support for copying non-AbstractArray arguments
     # - Parallelize read copies
@@ -160,6 +208,7 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
     for pair in queue.seen_tasks
         spec = pair.spec
         task = pair.task
+        aeq === nothing || _flush_for_value_deps!(aeq, spec)
         write_num = distribute_task!(queue, state, all_procs, all_scope, spec, task, spec.fargs, proc_to_scope_lfu, write_num)
     end
 
