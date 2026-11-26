@@ -1832,8 +1832,8 @@ function move!(dep_mod::Dagger.RemainderAliasing{<:MPIMemorySpace}, to_space::MP
             mpi_device_sync(to_space.innerSpace)
             stage_release!(kind, stage_buf)
 
-            # Ensure that the data is visible
-            Core.Intrinsics.atomic_fence(:release)
+            # Publish the scattered data with a fence across supported Julia versions.
+            Base.Threads.atomic_fence()
         end
     end
 
