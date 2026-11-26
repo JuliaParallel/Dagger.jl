@@ -9,6 +9,19 @@
     t2 = spawn(+, 1, t1)
     fetch(t2)
 
+    # A Datadeps region through the async submitter (flat regions of DATADEPS_FLAT_ASYNC_MIN tasks
+    # and more take it): without this the first large region of a process compiles it
+    c1 = tochunk(zeros(4, 4))
+    c2 = tochunk(zeros(4, 4))
+    with(DATADEPS_FLAT_ASYNC_FORCE=>true) do
+        spawn_datadeps() do
+            spawn(copyto!, InOut(c1), In(c2))
+            spawn(copyto!, InOut(c2), In(c1))
+        end
+    end
+    fetch(c1); fetch(c2)
+    c1 = nothing; c2 = nothing
+
     # Clean up refs
     t1 = nothing; t2 = nothing
     state = Sch.EAGER_STATE[]
