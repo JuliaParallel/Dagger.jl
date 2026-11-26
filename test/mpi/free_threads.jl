@@ -114,3 +114,15 @@ if nranks == 1
         @test fetch(Dagger.@spawn(free_quick(1))) == 2   # still working afterwards
     end
 end
+
+# The acceleration keeps freed tile memory in the heap (glibc mallopt); it is a no-op elsewhere
+@testset "tune_malloc!" begin
+    ok = Dagger.tune_malloc!()
+    @test ok isa Bool
+    # Idempotent
+    @test Dagger.tune_malloc!() == ok
+    # Allocating and freeing a tile-sized libc buffer still works with the settings in place
+    A = Dagger.alloc_libc_array(Float64, (256, 256))
+    A .= 1.0
+    @test sum(A) == 256 * 256
+end

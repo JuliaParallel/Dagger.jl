@@ -2664,6 +2664,8 @@ function initialize_acceleration!(a::MPIAcceleration)
         a.comm in comms
     end
     already && return
+    # Tiles crossing ranks are libc buffers allocated and freed per region: keep their pages in the heap
+    Dagger.tune_malloc!()
     if !MPI.Initialized()
         MPI.Init(;threadlevel=:multiple)
     end
