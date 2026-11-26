@@ -139,7 +139,9 @@ end
 function Base.wait(t::LightTask)
     light_isdone(t) && return nothing
     ev = Base.Event()
-    light_add_dependent!(t, ev) && wait(ev)
+    # Inside a Dagger task, hand the processor back while waiting (exactly what `wait(::ThunkFuture)`
+    # does), so that the tasks this light task depends on can run on it. Outside a task `thunk_yield(f)` is `f()`.
+    light_add_dependent!(t, ev) && Dagger.Sch.thunk_yield(() -> wait(ev))
     return nothing
 end
 function Base.fetch(t::LightTask)
@@ -156,10 +158,9 @@ _light_rethrow(ex) = throw(ex)
     light_to_dtask(l::LightTask) -> DTask
 
 A `DTask` whose value is the value of `l` (a failure of `l` becomes a failure of the DTask).
-The caller waits (cooperatively) until `l` is done before the DTask is created: a DTask that
-blocked on `l` would occupy a processor while `l`'s own dependencies need that processor's
-thread, and Dagger's occupancy wait spins on `yield()` (AGENTS.md lesson 12), which deadlocks
-on one or two threads. Not usable under MPI/Distributed.
+The caller waits (cooperatively) until `l` is done before the DTask is created. A `DTask` may
+also `wait` or `fetch` a light task directly: it hands its processor back while it waits.
+Not usable under MPI/Distributed.
 """
 function light_to_dtask(l::LightTask)
     wait(l)

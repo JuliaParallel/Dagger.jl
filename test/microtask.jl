@@ -113,6 +113,20 @@ using Dagger, Test, Random
         end
         @test fetch(acc) == sum(1:20)
     end
+
+    @testset "a DTask waits on a light task that depends on a task needing the same processor" begin
+        # Everything runs on one processor: the waiting DTask must hand the processor back while it
+        # waits, or the task its light task depends on can never start (no matter how many threads).
+        Dagger.with_options(; scope=Dagger.scope(worker=1, thread=1)) do
+            b  = Dagger.@spawn (() -> (sleep(0.2); 1))()
+            d2 = Dagger.@spawn (x -> x + 20)(b)
+            l  = @light (x -> 2x)(d2)
+            d1 = Dagger.@spawn (l -> fetch(l))(l)
+            t = @async fetch(d1)
+            @test timedwait(() -> istaskdone(t), 60) === :ok
+            istaskdone(t) && @test fetch(t) == 42
+        end
+    end
 end
 
 @testset "Light tasks: a continuation calls functions defined after its predecessor started" begin
