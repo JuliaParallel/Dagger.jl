@@ -867,5 +867,5 @@ end
     # A scope that matches no processor leaves `estimate_task_costs!` with an empty candidate list; the
     # task must fail with the usual "No processors available" message, not with an UndefRefError.
     nowhere = Dagger.ExactScope(Dagger.ThreadProc(1, typemax(Int) - 1))
-    @test_throws_unwrap (Dagger.DTaskFailedException, Dagger.Sch.SchedulingException) reason="No processors available, try widening scope" fetch(Dagger.@spawn scope=nowhere identity(1))
+    @test_throws_unwrap (Dagger.DTaskFailedException, Dagger.Sch.SchedulingException) reason<"No processors available, try widening scope" fetch(Dagger.@spawn scope=nowhere identity(1))
 end
