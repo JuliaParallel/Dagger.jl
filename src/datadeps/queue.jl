@@ -139,10 +139,13 @@ const DATADEPS_FLAT_ASYNC_MIN = 256
 # Lets a region take the async path regardless of its size and the thread count. Only the
 # precompile workload (single-threaded, tiny region) and the tests use it, to exercise the path.
 const DATADEPS_FLAT_ASYNC_FORCE = ScopedValue{Bool}(false)
+# Number of flat regions of this process that took the async path (read by the tests)
+const DATADEPS_FLAT_ASYNC_REGIONS = Threads.Atomic{Int}(0)
 
 function distribute_tasks!(queue::DataDepsTaskQueue)
     if !uniform_execution() && (DATADEPS_FLAT_ASYNC_FORCE[] ||
         (length(queue.seen_tasks) >= DATADEPS_FLAT_ASYNC_MIN && Threads.nthreads() > 1))
+        Threads.atomic_add!(DATADEPS_FLAT_ASYNC_REGIONS, 1)
         aeq = AsyncEnqueueQueue(queue.upper_queue, ReentrantLock())
         aqueue = DataDepsTaskQueue(aeq; scheduler=queue.scheduler)
         append!(aqueue.seen_tasks, queue.seen_tasks)
