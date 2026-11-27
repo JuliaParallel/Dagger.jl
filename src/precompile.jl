@@ -10,7 +10,8 @@
     fetch(t2)
 
     # A small Datadeps region over chunks (the dependencies come from In/InOut/Out): the first region of a
-    # process otherwise compiles the planner, the aliasing analysis and the copy tasks, seconds on a laptop
+    # process otherwise compiles the planner and the aliasing analysis, seconds on a laptop (it copies nothing:
+    # both chunks and both tasks are in this process's one memory space; see below for the copy path)
     c1 = tochunk(zeros(4, 4))
     c2 = tochunk(zeros(4, 4))
     spawn_datadeps() do
