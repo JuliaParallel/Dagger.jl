@@ -1527,7 +1527,7 @@ const BCAST_RELAY_IDLE_SLEEP = 1e-4
 # for a 10s warn / 120s error timer and costs nothing when nobody is waiting.
 const BCAST_RELAY_HEARTBEAT_ITERS = 1000
 
-# Broadcast traffic of this process (see `Dagger.traffic_stats`): messages and bytes received by the relay, and sent or forwarded
+# Message traffic of this process (see `Dagger.traffic_stats`): serialized messages and bytes received (point to point or by the relay), and sent by the relay or forwarded
 const BCAST_RX_MSGS = Threads.Atomic{Int}(0)
 const BCAST_RX_BYTES = Threads.Atomic{Int}(0)
 const BCAST_TX_MSGS = Threads.Atomic{Int}(0)
@@ -1586,6 +1586,7 @@ function bcast_relay_loop(state::BcastState, spin_iters::Int=BCAST_RELAY_SPIN_IT
             src = MPI.Get_source(stat)
             tag = UInt32(MPI.Get_tag(stat))
             count = MPI.Get_count(stat, UInt8)
+            Threads.atomic_add!(BCAST_RX_MSGS, 1); Threads.atomic_add!(BCAST_RX_BYTES, count)
             buf = Array{UInt8}(undef, count)
             req = MPI.Imrecv!(MPI.Buffer(buf), msg)
             __wait_for_request(req, comm, rank, src, tag, "bcast_relay", "recv")

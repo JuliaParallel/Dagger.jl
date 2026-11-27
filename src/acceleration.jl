@@ -353,10 +353,12 @@ reset_elision_stats!(::Acceleration) = nothing
 """
     traffic_stats() -> NamedTuple or nothing
 
-(MPI) Messages and bytes this process received (`rx_*`), sent as the root of a broadcast and forwarded to tree
-children (`tx_*`) through the broadcast machinery that carries task results, failures and metadata between ranks,
-cumulative since the start or the last [`reset_traffic_stats!`](@ref). Tile moves of Datadeps copies are not counted.
-Read it before and after a phase to see whether a result is being sent to ranks that do not need it. Other
+(MPI) Serialized messages and bytes this process received (`rx_*`: task values, statuses, failures and metadata,
+whether they arrive point to point or at the broadcast relay) and the messages it forwarded as a tree node or sent
+as the root of a metadata broadcast (`tx_*`), cumulative since the start or the last
+[`reset_traffic_stats!`](@ref). Raw array payloads (tile moves of Datadeps copies) are not counted, and neither are
+the point-to-point sends of a value (only receives of those), so `tx_*` is smaller than the traffic this
+process caused. Read it before and after a phase to see whether a result reaches ranks that do not need it. Other
 accelerations return `nothing`.
 """
 traffic_stats() = traffic_stats(current_acceleration())
