@@ -1,14 +1,16 @@
-# A treap: a binary search tree on `span_start` that is kept balanced by random node priorities
+# A treap: a binary search tree on `span_start` that is kept balanced by pseudo-random node priorities
 # (a node's priority is never smaller than its children's). Memory spans arrive in address order
 # very often (arrays and tiles allocated one after another), and an unbalanced tree then degrades to a
 # linked list: inserting 16000 increasing spans cost 34 us each against 0.1 us for the same spans
 # shuffled, and a Datadeps region over many tiles spent 40-85 % of its planning time in `insert!`.
 #
-# The priorities come from a per-tree counter, not from the span: the shape of a tree must be the same on
-# every MPI rank that performs the same inserts (the order in which `iterate`/`find_overlapping!` return
-# spans follows the shape, and ranks must plan identically), and spans carry rank-local addresses.
-# Equal starts may therefore sit on either side of each other after a rotation; only `delete!` searched for
-# an exact span and it looks on both sides for ties.
+# The priorities come from a per-tree counter (mixed by splitmix64), not from `rand` or from the span: the
+# order in which `iterate`/`find_overlapping!` return spans follows the tree's shape, and MPI ranks must plan
+# identically. A treap's shape is fixed by its span starts and their priorities, so with the same priorities
+# for the same sequence of inserts, ranks whose span starts compare the same way build the same tree, which is
+# the same condition the unbalanced tree had.
+# Equal starts may sit on either side of each other after a rotation; only `delete!` searched for an exact
+# span and it looks on both sides for ties.
 mutable struct IntervalNode{M,E}
     span::M
     max_end::E  # Maximum end value in this subtree
