@@ -504,10 +504,19 @@ e = Dagger.@light d + 1
 A light task has no scopes, options, processors, chunks, Datadeps, logging
 events or cancellation, and it does not work with MPI or multiple workers: it
 always runs in the process that created it. Use `Dagger.@spawn` whenever you
-need any of those. A failure in a light task (or in a `DTask` it depends on)
-is rethrown by `fetch`, and fails the light tasks that depend on it.
+need any of those. Keyword arguments are not supported (wrap the call in a
+closure). The arguments are evaluated when `@light` is called, so mutating an
+array argument afterwards is visible to the task, as with `Threads.@spawn`.
 
-`Dagger.light_to_dtask` waits for the light task in the calling task before it
-creates the `DTask`. A `DTask` that blocked on a light task could occupy the
-processor that the light task's own dependencies need, which can deadlock on
-one or two threads.
+A failure in a light task (or in a `DTask` it depends on) is rethrown by
+`fetch`, and fails the light tasks that depend on it.
+
+A light task body runs as an ordinary Julia task on the default thread pool. It
+may spawn further light tasks and may block cooperatively (`wait`, `fetch`,
+`sleep`, locks), also on one thread. It must not busy-wait for another task to
+make progress, because that keeps the thread the other task needs.
+
+A `DTask` may `wait` or `fetch` a light task: while it waits it hands its
+processor back, as `wait` on a `DTask` does, so the tasks the light task depends
+on can run on it. `Dagger.light_to_dtask` is the other direction: it waits for
+the light task in the calling task and then creates a `DTask` holding its value.
