@@ -53,6 +53,15 @@ function init_eager()
     catch err
         # Scheduler halting is considered normal
         err isa SchedulerHaltedException && return
+        # So is a halt requested by `cancel!(; halt_sch=true)`, which warns about
+        # it on the caller's side. The halt ends the eager task normally; should
+        # a cancellation interrupt it anyway, say so briefly instead of printing
+        # a scheduler error with its backtrace.
+        state = EAGER_STATE[]
+        if state !== nothing && state.halt_cancelled[]
+            @warn "Dagger's eager scheduler task was interrupted while `cancel!` halted the scheduler"
+            return
+        end
 
         iob = IOContext(IOBuffer(), :color=>true)
         println(iob, "Error in eager scheduler:")

@@ -64,6 +64,59 @@ end
     @test Dagger.Sch.EAGER_CONTEXT[] === nothing
     @test fetch(Dagger.@spawn 1+1) == 2
     @test Dagger.Sch.EAGER_CONTEXT[] !== nothing
+    @testset "halting the scheduler by cancellation warns, without a scheduler error" begin
+        # `cancel!(;halt_sch=true)` used to interrupt the eager scheduler's own
+        # task, which was printed as "Error in eager scheduler" with a backtrace;
+        # the halt itself is announced by a warning
+        path, io = mktemp()
+        try
+            redirect_stderr(io) do
+                @test_logs (:warn, r"Cancelled every Dagger task and halted Dagger's eager scheduler") Dagger.cancel!(;halt_sch=true)
+            end
+            close(io)
+            @test !occursin("Error in eager scheduler", read(path, String))
+        finally
+            rm(path; force=true)
+        end
+        Dagger.Sch.EAGER_CONTEXT[] = nothing
+        @test fetch(Dagger.@spawn 1+1) == 2
+    end
+    @testset "cancelling every task leaves the scheduler running" begin
+        # Without `halt_sch`, `cancel!()` cancels the tasks, not the scheduler
+        @test fetch(Dagger.@spawn 1+1) == 2
+        state = Dagger.Sch.EAGER_STATE[]
+        t = Dagger.@spawn sleep(2)
+        sleep(0.5)
+        path, io = mktemp()
+        try
+            redirect_stderr(io) do
+                @test_logs (:warn, r"Cancelled every Dagger task \(`cancel!`\)") Dagger.cancel!()
+                err = try fetch(t); nothing catch e; e end
+                @test Dagger.Sch.unwrap_nested_exception(err) isa InterruptException
+                # The scheduler would stop shortly after its root task was interrupted
+                @test timedwait(() -> Dagger.Sch.EAGER_STATE[] !== state, 2.0) === :timed_out
+            end
+            close(io)
+            @test !occursin("Error in eager scheduler", read(path, String))
+        finally
+            rm(path; force=true)
+        end
+        @test Dagger.Sch.EAGER_STATE[] === state
+        @test fetch(Dagger.@spawn 1+1) == 2
+    end
+    @testset "cancelling one task warns, unless asked not to or already finished" begin
+        t = Dagger.@spawn sleep(2)
+        sleep(0.5)
+        @test_logs (:warn, Regex("Cancelled Dagger task $(Int(t.uid)) \\(`cancel!`\\)")) Dagger.cancel!(t)
+        @test_throws Exception fetch(t)
+        t = Dagger.@spawn sleep(2)
+        sleep(0.5)
+        @test_logs Dagger.cancel!(t; warn=false)
+        @test_throws Exception fetch(t)
+        t = Dagger.@spawn 1+1
+        @test fetch(t) == 2
+        @test_logs Dagger.cancel!(t)   # nothing left to cancel
+    end
     @testset "per-call" begin
         x = 2
         a = @spawn x + x
