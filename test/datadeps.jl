@@ -98,6 +98,47 @@ end
     @test s.sz == sizeof(3)
 end
 
+# A field whose declared type is not concrete can still hold mutable memory.
+struct AbstractFieldBox; v::AbstractVector{Float64}; end
+struct UnionFieldBox; v::Union{Nothing,Vector{Float64}}; end
+struct UntypedFieldBox; v; end
+struct MixedFieldBox; v::Vector{Float64}; x; end
+nonconcrete_box_write!(b) = (sleep(0.5); fill!(b.v, 1.0); nothing)
+nonconcrete_box_sum(b) = sum(b.v)
+
+@testset "Non-concrete fields" begin
+    @testset "type_may_alias" begin
+        for B in (AbstractFieldBox, UnionFieldBox, UntypedFieldBox)
+            @test Dagger.type_may_alias(B)
+            @test Dagger.type_alias_depends_on_value(B)
+        end
+        # A concretely typed mutable field decides it for every value
+        @test Dagger.type_may_alias(MixedFieldBox)
+        @test !Dagger.type_alias_depends_on_value(MixedFieldBox)
+        # A Union of plain data can never hold mutable memory
+        @test !Dagger.type_may_alias(Union{Nothing,Int})
+        @test !Dagger.type_may_alias(Union{Nothing,Int,Float64})
+
+        @test Dagger.value_may_alias(UntypedFieldBox(zeros(2)))
+        @test Dagger.value_may_alias(UnionFieldBox(zeros(2)))
+        @test !Dagger.value_may_alias(UntypedFieldBox(1))
+        @test !Dagger.value_may_alias(UnionFieldBox(nothing))
+    end
+
+    # Previously these types were treated as never aliasing, so the reader was
+    # not ordered after the writer and saw the original zeros.
+    @testset "writer is ordered before reader: $B" for B in (AbstractFieldBox, UnionFieldBox, UntypedFieldBox)
+        b = B(zeros(4))
+        local t
+        Dagger.spawn_datadeps() do
+            Dagger.@spawn scope=Dagger.scope(worker=1) nonconcrete_box_write!(InOut(b))
+            t = Dagger.@spawn scope=Dagger.scope(worker=1) nonconcrete_box_sum(In(b))
+        end
+        @test fetch(t) == 4.0
+        @test all(==(1.0), b.v)
+    end
+end
+
 @testset "ChunkView" begin
     DA = rand(Blocks(8, 8), 64, 64)
     task1 = DA.chunks[1,1]::DTask

@@ -769,6 +769,10 @@ function _collect_aliased_args_range!(task_metas::Vector{HierarchicalTaskMeta},
             inplace_move = may_alias && _cached_get!(supports_cache, cache_lock, arg) do
                 supports_inplace_move(arg)
             end
+            # Must match `_populate_arg_deps!`, which makes the same decision.
+            if inplace_move && type_alias_depends_on_value(typeof(arg))
+                may_alias = inplace_move = value_may_alias(arg)
+            end
 
             if !may_alias || !inplace_move
                 continue

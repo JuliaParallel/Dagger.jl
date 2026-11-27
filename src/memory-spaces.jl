@@ -263,6 +263,19 @@ inplace_mpi_build(::Type{T}, parts, header) where T =
 
 ### Aliasing and Memory Spans
 
+"""
+    type_may_alias(T) -> Bool
+
+Whether a value of type `T` may hold mutable memory, and so must be tracked by
+Datadeps. A `false` answer is a promise: Datadeps passes such values to tasks
+as plain, untracked arguments, without ordering their readers and writers.
+
+A non-concrete type (an abstract type, a `Union`, or a `UnionAll` -- e.g. a
+field declared `v::AbstractVector`, `v::Union{Nothing,Vector{Float64}}`, or
+left untyped) is `true`, since such a field can hold a mutable value. Whether a
+particular value actually does is then decided from the value; see
+`type_alias_depends_on_value`.
+"""
 type_may_alias(::Type{String}) = false
 type_may_alias(::Type{Symbol}) = false
 type_may_alias(::Type{<:Type}) = false
@@ -270,6 +283,12 @@ type_may_alias(::Type{C}) where C<:Chunk{T} where T = type_may_alias(T)
 function type_may_alias(::Type{T}) where T
     if isbitstype(T)
         return false
+    elseif _is_bits_union(T)
+        # e.g. `Union{Nothing,Int}`: every member is immutable plain data
+        return false
+    elseif !isconcretetype(T)
+        # The declared type cannot rule out a mutable value.
+        return true
     elseif ismutabletype(T)
         return true
     elseif isstructtype(T)
@@ -278,6 +297,34 @@ function type_may_alias(::Type{T}) where T
         end
     end
     return false
+end
+_is_bits_union(T) = T isa Union && _is_bits_union_member(T.a) && _is_bits_union_member(T.b)
+_is_bits_union_member(T) = T isa Union ? _is_bits_union(T) : isbitstype(T)
+
+"""
+    type_alias_depends_on_value(T) -> Bool
+
+Whether `type_may_alias(T)` is `true` only because some (possibly nested)
+field of `T` has a non-concrete declared type. Then the type alone cannot say
+whether a value of `T` holds mutable memory: `struct S; x::Any; end` does for
+`S([1.0])` and does not for `S(1)`. Datadeps checks such values individually
+(see `value_may_alias`), rather than tracking every one.
+
+`false` whenever some field certainly may alias (a concretely typed mutable
+field such as a `Vector`), since every value of `T` then needs tracking.
+"""
+type_alias_depends_on_value(::Type{C}) where C<:Chunk{T} where T = type_alias_depends_on_value(T)
+function type_alias_depends_on_value(::Type{T}) where T
+    type_may_alias(T) || return false
+    isconcretetype(T) || return true
+    (isbitstype(T) || ismutabletype(T) || !isstructtype(T)) && return false
+    depends = false
+    for FT in fieldtypes(T)
+        type_may_alias(FT) || continue
+        type_alias_depends_on_value(FT) || return false
+        depends = true
+    end
+    return depends
 end
 
 may_alias(::MemorySpace, ::MemorySpace) = false

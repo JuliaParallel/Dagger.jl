@@ -933,6 +933,9 @@ function _populate_arg_deps!(state::DataDepsState, infos::Vector{TaskArgInfo},
     # Skip non-aliasing arguments or arguments that don't support in-place move
     may_alias = type_may_alias(typeof(arg))
     inplace_move = may_alias && supports_inplace_move(state, arg)
+    if inplace_move && type_alias_depends_on_value(typeof(arg))
+        may_alias = inplace_move = value_may_alias(arg)
+    end
     dep_start = length(deps_vec) + 1
     if !may_alias || !inplace_move
         arg_w = ArgumentWrapper(arg, identity)
@@ -1119,6 +1122,30 @@ supports_inplace_move(t::DTask) = supports_inplace_move(chunktype(t))
 supports_inplace_move(c::Chunk) = supports_inplace_move(chunktype(c))
 supports_inplace_move(::Type) = true
 supports_inplace_move(::Type{<:Function}) = false
+
+"""
+    value_may_alias(arg) -> Bool
+
+Whether `arg`, whose type `type_alias_depends_on_value`, actually holds mutable
+memory, i.e. whether its aliasing has any memory spans.
+
+Datadeps tracks only values that do. Besides being pointless, tracking a value
+with no spans would be wrong: its aliasing carries no address, so every such
+value has the *same* aliasing (e.g. an empty `CombinedAliasing`), and the
+aliased-object cache, which is keyed by aliasing, would hand one argument's
+slot to another (`S(1)` and `S(2)` of `struct S; x::Any; end` would share a
+slot, and one task would see the other's value). Such a value is instead passed
+through untracked, exactly like an `isbits` value.
+
+Under MPI, `aliasing` of a `Chunk` is computed by its owner and broadcast (and
+memoized for the region), so every rank reaches the same answer.
+"""
+function value_may_alias(arg)
+    ainfo = aliasing(current_acceleration(), arg, identity)
+    may_alias = !isempty(memory_spans(ainfo))
+    @check_uniform(may_alias)
+    return may_alias
+end
 
 # Read/write dependency management
 function get_write_deps!(state::DataDepsState, dest_space::MemorySpace, ainfo::AbstractAliasing, write_num, syncdeps)
