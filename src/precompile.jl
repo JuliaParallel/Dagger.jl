@@ -20,6 +20,36 @@
     fetch(c1); fetch(c2)
     c1 = nothing; c2 = nothing
 
+    # The region above runs in one memory space, so it never copies, and the first region that does
+    # compiles the copy path at run time. Run the parts of that path that need no second process, with
+    # the types a copy of a `Matrix{Float64}` (or of a view of one) uses: the gather/scatter kernels of a
+    # remainder copy, the whole-array `move!`, and the remainder planning on the spans of two and three
+    # memory spaces. Slot creation and the copy tasks' remote calls still compile on first use.
+    let A = zeros(8, 8), B = ones(8, 8), space = CPURAMMemorySpace(myid())
+        V = view(A, 3:6, 3:6)
+        W = view(B, 3:6, 3:6)
+        GC.@preserve A B begin
+            src = LocalMemorySpan.(memory_spans(aliasing(W)))
+            dst = LocalMemorySpan.(memory_spans(aliasing(V)))
+            spans = Tuple{LocalMemorySpan,LocalMemorySpan}[(s, d) for (s, d) in zip(src, dst)]
+            buf = Vector{UInt8}(undef, sum(t -> span_len(t[1]), spans))
+            for from in (B, W), to in (A, V)
+                multi_span_gather!(buf, from, Iterators.map(first, spans))
+                multi_span_scatter!(to, buf, Iterators.map(last, spans))
+            end
+        end
+        move!(identity, space, space, A, B)
+        move!(identity, space, space, V, W)
+        for N in (2, 3)
+            many(i) = ManyMemorySpan{N}(ntuple(k -> LocalMemorySpan(UInt(0x100000 * k + 64 * i), UInt(32)), N))
+            tree = IntervalTree{ManyMemorySpan{N}}([many(i) for i in 1:8])
+            others = [many(i) for i in 2:2:8]
+            tracker = Tuple{LocalMemorySpan,LocalMemorySpan}[]
+            schedule_remainder!(tracker, 1, N, tree, others)
+            subtract_spans!(IntervalTree{ManyMemorySpan{N}}([many(i) for i in 1:8]), others)
+        end
+    end
+
     # Clean up refs
     t1 = nothing; t2 = nothing
     state = Sch.EAGER_STATE[]
