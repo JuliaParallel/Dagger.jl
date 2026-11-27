@@ -334,6 +334,22 @@ the default does nothing.
 """
 note_chunk_placement!(::Acceleration, task, scope) = nothing
 
+"""
+    elision_stats() -> NamedTuple or nothing
+
+How many of the tasks this process planned were elided, run here, or planned in full and why
+(`:elided`, `:own_task`, `:no_owner_known`, `:not_failure_only`, `:syncdeps_or_restore`,
+`:return_type_not_concrete`, `:function_not_plain`, `:argument_not_positional`,
+`:argument_participates`, `:scope_conflict`, `:not_applicable`), cumulative since the start or the
+last [`reset_elision_stats!`](@ref). Only the accelerations that elide tasks (MPI) return anything.
+"""
+elision_stats() = elision_stats(current_acceleration())
+elision_stats(::Acceleration) = nothing
+
+"Reset the counters of [`elision_stats`](@ref)."
+reset_elision_stats!() = reset_elision_stats!(current_acceleration())
+reset_elision_stats!(::Acceleration) = nothing
+
 default_processor(space::CPURAMMemorySpace) = OSProc(space.owner)
 default_memory_space(accel::DistributedAcceleration) = CPURAMMemorySpace(myid())
 # Chunk records must be labeled with the space the value actually resides in

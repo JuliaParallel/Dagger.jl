@@ -3162,10 +3162,30 @@ function mpi_chunk_scopes_fit(opts::Options, fargs)
     return true
 end
 
+# Why a task was or was not elided on this rank (read with `Dagger.elision_stats()`), counted where the
+# decision is made. One atomic increment per task; only tasks that reach `elide_task!` are counted, which is
+# every task while the elision switch is on.
+const E_ELIDED, E_OWN_TASK, E_NO_OWNER_KNOWN, E_NOT_FAILURE_ONLY, E_SYNCDEPS_OR_RESTORE,
+      E_RETURN_TYPE_NOT_CONCRETE, E_FUNCTION_NOT_PLAIN, E_ARGUMENT_NOT_POSITIONAL,
+      E_ARGUMENT_PARTICIPATES, E_SCOPE_CONFLICT, E_NOT_APPLICABLE = 1:11
+const ELISION_REASONS = (:elided, :own_task, :no_owner_known, :not_failure_only, :syncdeps_or_restore,
+                         :return_type_not_concrete, :function_not_plain, :argument_not_positional,
+                         :argument_participates, :scope_conflict, :not_applicable)
+const ELISION_COUNTS = [Threads.Atomic{Int}(0) for _ in ELISION_REASONS]
+elide_no(reason::Int) = (Threads.atomic_add!(ELISION_COUNTS[reason], 1); false)
+
+function Dagger.elision_stats(::MPIAcceleration)
+    return NamedTuple{ELISION_REASONS}(ntuple(i -> ELISION_COUNTS[i][], length(ELISION_REASONS)))
+end
+function Dagger.reset_elision_stats!(::MPIAcceleration)
+    foreach(c -> Threads.atomic_xchg!(c, 0), ELISION_COUNTS)
+    return
+end
+
 function Dagger.elide_task!(accel::MPIAcceleration, spec, task)
-    CHECK_UNIFORMITY[] && return false
+    CHECK_UNIFORMITY[] && return elide_no(E_NOT_APPLICABLE)
     # Placement, ids and failure tags here are those of the world communicator only
-    accel.comm == MPI.COMM_WORLD || return false
+    accel.comm == MPI.COMM_WORLD || return elide_no(E_NOT_APPLICABLE)
     opts = spec.options
     # Tasks without a scope are placed here, so that every rank knows the owner.
     # N.B. The processor a union scope names is looked up once per task: it is the same
@@ -3175,26 +3195,26 @@ function Dagger.elide_task!(accel::MPIAcceleration, spec, task)
         mpi_preplace!(accel, spec, task)
         proc = mpi_task_processor(opts)
     end
-    proc === nothing && return false
+    proc === nothing && return elide_no(E_NO_OWNER_KNOWN)
     # Later submissions use this to decide about their own arguments, and `fetch`
     # to stay uniform when the task fails. Only failure-only tasks have an owner.
-    mpi_failure_only(opts, proc) || return false
+    mpi_failure_only(opts, proc) || return elide_no(E_NOT_FAILURE_ONLY)
     task.owner = proc.rank
     local_rank = MPI.Comm_rank(proc.comm)
-    proc.rank == local_rank && return false
-    (opts.syncdeps === nothing || isempty(opts.syncdeps)) || return false
-    opts.restore === nothing || return false
+    proc.rank == local_rank && return elide_no(E_OWN_TASK)
+    (opts.syncdeps === nothing || isempty(opts.syncdeps)) || return elide_no(E_SYNCDEPS_OR_RESTORE)
+    opts.restore === nothing || return elide_no(E_SYNCDEPS_OR_RESTORE)
     T = task.metadata.return_type
-    (isconcretetype(T) && T !== Union{}) || return false
+    (isconcretetype(T) && T !== Union{}) || return elide_no(E_RETURN_TYPE_NOT_CONCRETE)
     fargs = spec.fargs
     f = Dagger.value(fargs[1])
-    (f isa Function || f isa Type) || return false
+    (f isa Function || f isa Type) || return elide_no(E_FUNCTION_NOT_PLAIN)
     for i in 2:length(fargs)
         arg = fargs[i]
-        Dagger.ispositional(arg) || return false
-        mpi_arg_participates(Dagger.value(arg), local_rank) && return false
+        Dagger.ispositional(arg) || return elide_no(E_ARGUMENT_NOT_POSITIONAL)
+        mpi_arg_participates(Dagger.value(arg), local_rank) && return elide_no(E_ARGUMENT_PARTICIPATES)
     end
-    mpi_chunk_scopes_fit(opts, fargs) || return false
+    mpi_chunk_scopes_fit(opts, fargs) || return elide_no(E_SCOPE_CONFLICT)
     # The placeholder `execute!` stamps on a non-owner, with the id it would get, on the
     # processor the owner will run it on
     proc = mpi_planned_processor(accel, opts, proc, task.uid)
@@ -3209,6 +3229,7 @@ function Dagger.elide_task!(accel::MPIAcceleration, spec, task)
     mpi_cleanup_tid(task.uid)
     task.stub = stub
     put!(task.future, stub)
+    Threads.atomic_add!(ELISION_COUNTS[E_ELIDED], 1)
     return true
 end
 

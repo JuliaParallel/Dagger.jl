@@ -5,6 +5,7 @@ elide_inc(x::Int) = x + 1                 # concrete, cannot throw: elidable
 elide_add(a::Int, b::Int) = a + b
 elide_throws(x::Int) = x > 0 ? error("elide_throws") : x   # may throw, concrete Int
 elide_len(x::Vector{Int}) = length(x)    # concrete, cannot throw
+elide_untyped(x::Int) = x > 0 ? 1 : "a"   # the return type is not concrete
 elide_blocksum(x::Matrix{Float64}) = sum(x)
 elide_slow_throws(x::Int) = (sleep(0.5); x > 0 ? error("elide_slow_throws") : x)
 elide_rank() = MPI.Comm_rank(MPI.COMM_WORLD)
@@ -200,6 +201,31 @@ elide_where() = (MPI.Comm_rank(MPI.COMM_WORLD), Threads.threadid())   # concrete
                 @test fetch(t) == 0.0
                 @test allequal(MPI.Allgather(Int(t.uid), comm))
             end
+        end
+
+        @testset "elision statistics say why a task was or was not elided" begin
+            target = nranks - 1
+            Dagger.reset_elision_stats!()
+            @test all(==(0), values(Dagger.elision_stats()))
+            wait(Dagger.@spawn scope=pinned(target) elide_inc(1))                 # elidable
+            st = Dagger.elision_stats()
+            @test (rank == target ? st.own_task : st.elided) == 1
+            wait(Dagger.@spawn scope=pinned(target) elide_untyped(1))             # result type is not concrete
+            st = Dagger.elision_stats()
+            rank != target && @test st.return_type_not_concrete == 1
+            rank == target && @test st.own_task == 2
+            ntasks = 2
+            if nranks >= 2
+                # a task that reads a chunk this rank owns, run on another rank: rank 0 has to take part
+                ch = Dagger.tochunk(fill(1, 4), proc_for_rank(0), space_for_rank(0))
+                wait(Dagger.@spawn scope=pinned(target) elide_len(ch))
+                st = Dagger.elision_stats()
+                rank == 0 && target != 0 && @test st.argument_participates == 1
+                ntasks += 1
+            end
+            @test sum(values(Dagger.elision_stats())) == ntasks                   # every task counted exactly once
+            Dagger.reset_elision_stats!()
+            @test sum(values(Dagger.elision_stats())) == 0
         end
 
         @testset "dependent chains" begin
