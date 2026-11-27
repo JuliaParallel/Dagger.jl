@@ -1,7 +1,7 @@
 using Dagger, Test, Random
 
 # Light tasks (@light): protocol stress test (random DAGs built concurrently, multiple waiters, nested spawns, errors) and DTask interop.
-# Count-bounded on purpose (AGENTS.md lessons 12, 27); with 300 rounds an early-launch ordering bug fails the stress part 3 of 3 times at 8 threads, with 40 rounds it slipped through (lesson 136).
+# Count-bounded on purpose (a time-bounded loop can starve the task that stops it); with 300 rounds an early-launch ordering bug fails the stress part 3 of 3 times at 8 threads, with 40 rounds it slipped through.
 @testset "Light tasks" begin
     ITER = 300
     busy(k) = (s = 0; for i in 1:k; s += i; end; s)

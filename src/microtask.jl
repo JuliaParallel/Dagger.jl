@@ -7,7 +7,7 @@ export LightTask, @light
 # Arguments may be values, other `LightTask`s (dependencies) or `DTask`s (dependencies; a failed DTask fails the light task).
 # `light_to_dtask(l)` waits for the light task and gives a DTask of its value (the other direction).
 #
-# Protocol (see AGENTS.md lesson 136): `left` starts at 1 (a guard) + one per dependency, BEFORE anything is registered; a refused
+# Protocol: `left` starts at 1 (a guard) + one per dependency, BEFORE anything is registered; a refused
 # registration (dependency already done) subtracts again; the guard is dropped last.  Only the thread that brings `left` to zero launches the
 # task, exactly once.
 
