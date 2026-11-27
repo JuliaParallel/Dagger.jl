@@ -1148,6 +1148,7 @@ function recv_yield_serialized(comm, my_rank, their_rank, tag)
                 error("recv_yield failed with error $(MPI.Get_error(stat))")
             end
             count = MPI.Get_count(stat, UInt8)
+            Threads.atomic_add!(BCAST_RX_MSGS, 1); Threads.atomic_add!(BCAST_RX_BYTES, count)
             buf = Array{UInt8}(undef, count)
             req = MPI.Imrecv!(MPI.Buffer(buf), msg)
             __wait_for_request(req, comm, my_rank, their_rank, tag, "recv_yield", "recv")
@@ -1526,6 +1527,19 @@ const BCAST_RELAY_IDLE_SLEEP = 1e-4
 # for a 10s warn / 120s error timer and costs nothing when nobody is waiting.
 const BCAST_RELAY_HEARTBEAT_ITERS = 1000
 
+# Broadcast traffic of this process (see `Dagger.traffic_stats`): messages and bytes received by the relay, and sent or forwarded
+const BCAST_RX_MSGS = Threads.Atomic{Int}(0)
+const BCAST_RX_BYTES = Threads.Atomic{Int}(0)
+const BCAST_TX_MSGS = Threads.Atomic{Int}(0)
+const BCAST_TX_BYTES = Threads.Atomic{Int}(0)
+Dagger.traffic_stats(::MPIAcceleration) = (rx_msgs=BCAST_RX_MSGS[], rx_bytes=BCAST_RX_BYTES[], tx_msgs=BCAST_TX_MSGS[], tx_bytes=BCAST_TX_BYTES[])
+function Dagger.reset_traffic_stats!(::MPIAcceleration)
+    for c in (BCAST_RX_MSGS, BCAST_RX_BYTES, BCAST_TX_MSGS, BCAST_TX_BYTES)
+        Threads.atomic_xchg!(c, 0)
+    end
+    return nothing
+end
+
 # Always-running per-rank progress engine: receive a broadcast on `bcast_comm`,
 # forward the raw bytes to this rank's tree children, then deliver the payload.
 # Forwarding is NOT gated by datadeps task dispatch — that is what breaks the
@@ -1577,6 +1591,7 @@ function bcast_relay_loop(state::BcastState, spin_iters::Int=BCAST_RELAY_SPIN_IT
             __wait_for_request(req, comm, rank, src, tag, "bcast_relay", "recv")
             root, value = Serialization.deserialize(IOBuffer(buf))
             for child in bcast_tree_children(rank, Int(root), sz)
+                Threads.atomic_add!(BCAST_TX_MSGS, 1); Threads.atomic_add!(BCAST_TX_BYTES, length(buf))
                 sreq = MPI.Isend(buf, comm; dest=child, tag=tag)
                 __wait_for_request(sreq, comm, rank, child, tag, "bcast_relay", "send")
             end
@@ -1674,6 +1689,7 @@ function bcast_meta_yield(comm::MPI.Comm, root::Integer, tag, value=nothing)
         buf = bcast_serialize((Int(root), value))
         bcomm = state.bcast_comm
         for child in bcast_tree_children(rank, Int(root), sz)
+            Threads.atomic_add!(BCAST_TX_MSGS, 1); Threads.atomic_add!(BCAST_TX_BYTES, length(buf))
             req = MPI.Isend(buf, bcomm; dest=child, tag=utag)
             __wait_for_request(req, bcomm, rank, child, utag, "bcast_meta", "send")
         end

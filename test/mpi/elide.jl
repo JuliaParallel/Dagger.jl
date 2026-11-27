@@ -254,6 +254,22 @@ elide_where() = (MPI.Comm_rank(MPI.COMM_WORLD), Threads.threadid())   # concrete
             @test fetch(v) == 2
         end
 
+        @testset "traffic statistics count the broadcast messages of a fetch" begin
+            MPI.Barrier(comm)
+            Dagger.reset_traffic_stats!()
+            MPI.Barrier(comm)
+            @test fetch(Dagger.@spawn scope=pinned(0) elide_inc(1)) == 2     # the owner broadcasts the value to every rank
+            MPI.Barrier(comm)
+            st = Dagger.traffic_stats()
+            @test keys(st) == (:rx_msgs, :rx_bytes, :tx_msgs, :tx_bytes)
+            # every rank but the owner received the value; summed over the ranks at least one message per receiver
+            totals = MPI.Allgather([st.rx_msgs + st.tx_msgs, st.rx_bytes + st.tx_bytes], comm)
+            @test sum(totals[1:2:end]) >= nranks - 1
+            @test sum(totals[2:2:end]) > 0
+            rank != 0 && @test st.rx_msgs >= 1
+            Dagger.reset_traffic_stats!()
+        end
+
         @testset "tasks that may throw" begin
             # success: elided like any other, nobody waits for a status
             ok = Dagger.@spawn scope=pinned(0) elide_throws(0)

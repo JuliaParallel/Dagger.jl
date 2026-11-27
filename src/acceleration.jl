@@ -350,6 +350,22 @@ elision_stats(::Acceleration) = nothing
 reset_elision_stats!() = reset_elision_stats!(current_acceleration())
 reset_elision_stats!(::Acceleration) = nothing
 
+"""
+    traffic_stats() -> NamedTuple or nothing
+
+(MPI) Messages and bytes this process received (`rx_*`), sent as the root of a broadcast and forwarded to tree
+children (`tx_*`) through the broadcast machinery that carries task results, failures and metadata between ranks,
+cumulative since the start or the last [`reset_traffic_stats!`](@ref). Tile moves of Datadeps copies are not counted.
+Read it before and after a phase to see whether a result is being sent to ranks that do not need it. Other
+accelerations return `nothing`.
+"""
+traffic_stats() = traffic_stats(current_acceleration())
+traffic_stats(::Acceleration) = nothing
+
+"Reset the counters of [`traffic_stats`](@ref)."
+reset_traffic_stats!() = reset_traffic_stats!(current_acceleration())
+reset_traffic_stats!(::Acceleration) = nothing
+
 default_processor(space::CPURAMMemorySpace) = OSProc(space.owner)
 default_memory_space(accel::DistributedAcceleration) = CPURAMMemorySpace(myid())
 # Chunk records must be labeled with the space the value actually resides in
