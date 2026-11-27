@@ -91,5 +91,8 @@ Sch.get_dag_ids
 ```@docs
 with_rank_local
 per_rank
+with_group
+per_group
+free_group!
 with_acceleration
 ```

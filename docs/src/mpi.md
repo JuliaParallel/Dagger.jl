@@ -408,6 +408,27 @@ Rules for data crossing the two graphs:
 - The graph is selected through the task-local acceleration, so tasks started with
   `Threads.@spawn` inside the block do not belong to it.
 
+## Group task graphs
+
+[`Dagger.with_group`](@ref)`(f, comm)` is the same idea for a communicator of `k` ranks
+(made by the application with `MPI.Comm_split` or `MPI.Comm_create_group`): only its members
+plan and run the tasks of the block, with their own task ids, so planning per rank does
+not grow with the total number of tasks. Every member runs the same program inside the block.
+The first use of a communicator is collective over its members.
+[`Dagger.per_group`](@ref)`(f, comm, T)` is `per_rank` on `comm`, and `per_rank` is
+`per_group` on the world. Data crosses between groups under the rules of rank-local graphs:
+only a process that is a member of both and owns the chunk reads it, in place.
+
+Each group runs a broadcast relay on a duplicate of its communicator. Call
+[`Dagger.free_group!`](@ref)`(comm)` (collective, after the group's tasks are done and before
+freeing `comm`) to stop it and free the duplicate; a chunk of a freed group cannot be fetched
+any more (an error). A group costs a communicator and a relay task, so a group graph is worth
+it when many ranks would otherwise plan each other's tasks, not for a few ranks. The ids of a
+group's tasks are limited to `2^24` per group: past that the next spawn is an error, so free
+the group and start a new one. The first use of a communicator exchanges a small message with
+every member on the tag `MPI.tag_ub() - 1` of `comm`; the application must not use that tag on it.
+Uniformity checks are off inside groups, and a task of the world cannot read a group chunk.
+
 ## Limitations and tips
 
 - **Keep planning uniform.** The single most important rule: every rank must
