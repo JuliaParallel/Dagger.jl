@@ -393,6 +393,21 @@ the reserved slot, and waiting tasks get slots by priority, then arrival. A task
 its function computes; while it waits for another task (`fetch`, `wait`) it gives the slot back. The gate
 is off by default and costs about `1/cap` of the throughput of ordinary tasks, because one slot is kept free.
 
+## Delegating tasks to idle ranks
+
+With one task per tile, a rank that owns many ready tasks queues work while other ranks idle: ranks
+move data, not ready tasks. [`Dagger.enable_delegation!`](@ref)`()` (collective, before the first lendable
+task) lets the owner of a task lend its *execution* to an idle rank when the task is spawned with
+`lend=true`. The owner keeps everything else: the result stays a chunk of the owner, ids and tags do not change,
+and an exception on the thief comes back to the owner as the task's failure.
+
+`lend=true` is a promise that the task is pure: no writes to its arguments or to globals, no `spawn`, no chunk
+creation, no collectives. The thief runs the function on serialized copies of the arguments, so function and
+arguments must serialize; this is not checked. Tasks with a scope, a compute scope or a tag (Datadeps tasks) are
+never lent. `slots` limits how many lendable tasks a rank runs at once, and `max_bytes` keeps tasks with large
+arguments at home. [`Dagger.disable_delegation!`](@ref) undoes it (collective); tasks still lent at that moment
+fail with an error.
+
 ## Limitations and tips
 
 - **Keep planning uniform.** The single most important rule: every rank must

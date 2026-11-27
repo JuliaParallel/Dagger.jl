@@ -90,4 +90,7 @@ Sch.get_dag_ids
 ## MPI Scheduling Functions
 ```@docs
 mpi_rank_gate!
+enable_delegation!
+disable_delegation!
+delegation_stats
 ```
