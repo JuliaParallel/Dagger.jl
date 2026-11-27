@@ -965,9 +965,13 @@ function _populate_arg_deps!(state::DataDepsState, infos::Vector{TaskArgInfo},
         origin_space = memory_space(arg_chunk)
         @check_uniform(origin_space)
         state.arg_origin[arg_chunk] = origin_space
-        state.remote_arg_to_original[arg_chunk] = arg_chunk
         memo = state.dep_memo[arg_chunk] = DepMemoEntry[]
     end
+    # N.B. Recorded on every use, not only the first: slot generation also writes
+    # this entry, and when another argument has identical aliasing, `aliased_object!`
+    # hands it this argument's chunk as its slot, which points this entry at that
+    # other argument. The next use of this argument is what puts it back.
+    state.remote_arg_to_original[arg_chunk] = arg_chunk
 
     # Record and populate argument info for all aliasing dependencies
     for dep in raw_deps
@@ -978,6 +982,10 @@ function _populate_arg_deps!(state::DataDepsState, infos::Vector{TaskArgInfo},
                 break
             end
         end
+        # A hit skips `populate_argument_info!`. That is only valid because a repeat
+        # call does nothing: the owner, history and overlap entries already exist,
+        # `aliasing!` returns its cached result, and nothing in a region removes them.
+        # Anything per-use added there would be skipped from the second use on.
         if dep_full === nothing
             dep_full = DataDepsTaskDependency(arg_chunk, dep)
             populate_argument_info!(state, dep_full.arg_w, memory_space(arg_chunk))
