@@ -2685,4 +2685,30 @@ accel_matches_proc(accel::MPIAcceleration, proc::MPIClusterProc) = true
 accel_matches_proc(accel::MPIAcceleration, proc::MPIProcessor) = true
 accel_matches_proc(accel::MPIAcceleration, proc) = false
 
+# Precompile workload: run one small Datadeps region on a single MPI rank, so that the first MPI region of
+# a process does not compile the concrete-MPI planner (its methods are specialized on the MPI types, which
+# the package's own workload cannot reach). The workload initializes MPI in the precompilation process and
+# shuts the scheduler down again afterwards; it is skipped if that fails.
+using PrecompileTools: @compile_workload
+function mpi_precompile_workload()
+    Dagger.accelerate!(MPIAcceleration(MPI.COMM_WORLD))
+    c1 = Dagger.tochunk(zeros(4, 4))
+    c2 = Dagger.tochunk(zeros(4, 4))
+    Dagger.spawn_datadeps() do
+        Dagger.spawn(copyto!, Dagger.InOut(c1), Dagger.In(c2))
+        Dagger.spawn(copyto!, Dagger.InOut(c2), Dagger.In(c1))
+    end
+    fetch(c1); fetch(c2)
+    Dagger.accelerate!(Dagger.DistributedAcceleration())
+    return nothing
+end
+@compile_workload begin
+    try
+        mpi_precompile_workload()
+        Dagger.shutdown_precompile_workload!()
+    catch err
+        @warn "MPIExt precompile workload skipped" exception=err
+    end
+end
+
 end # module MPIExt

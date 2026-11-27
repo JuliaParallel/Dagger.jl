@@ -1,3 +1,49 @@
+# Stops the eager scheduler that a precompile workload started and removes its global state, so the
+# precompilation process can exit. Used by this package's workload and by extensions that run their own.
+# Callers must have dropped their references to the tasks they spawned.
+function shutdown_precompile_workload!()
+    state = Sch.EAGER_STATE[]
+    for i in 1:5
+        lock(state.thunk_dict) do d; length(d); end == 1 && break
+        GC.gc()
+        yield()
+    end
+
+    # Halt scheduler
+    notify(state.halt)
+    put!(state.chan, Sch.TaskResult(1, OSProc(), 0, Sch.SchedulerHaltedException(), nothing))
+    state = nothing
+
+    # Wait for halt
+    while Sch.EAGER_INIT[]
+        sleep(0.5)
+    end
+
+    # Final clean-up
+    Sch.EAGER_CONTEXT[] = nothing
+    GC.gc(); sleep(0.5)
+    lock(Sch.ERRORMONITOR_TRACKED) do tracked
+        if all(t->istaskdone(t) || istaskfailed(t), map(last, tracked))
+            empty!(tracked)
+            return
+        end
+        for (name, t) in tracked
+            if t.state == :runnable
+                Threads.@spawn Base.throwto(t, InterruptException())
+            end
+        end
+    end
+    MemPool.exit_hook()
+    GC.gc()
+    yield()
+    @assert isempty(Sch.WORKER_MONITOR_CHANS)
+    @assert isempty(Sch.WORKER_MONITOR_TASKS)
+    ID_COUNTER[] = 1
+    # Clear the precompile-time UUID cache so it is not baked into the compiled
+    # image; __init__ re-populates it from the shared UUID file at load time.
+    delete!(SYSTEM_UUIDS, myid())
+end
+
 @compile_workload begin
     system_uuid()
     add_processor_callback!("__cpu_thread_1__") do
@@ -53,44 +99,5 @@
 
     # Clean up refs
     t1 = nothing; t2 = nothing
-    state = Sch.EAGER_STATE[]
-    for i in 1:5
-        lock(state.thunk_dict) do d; length(d); end == 1 && break
-        GC.gc()
-        yield()
-    end
-
-    # Halt scheduler
-    notify(state.halt)
-    put!(state.chan, Sch.TaskResult(1, OSProc(), 0, Sch.SchedulerHaltedException(), nothing))
-    state = nothing
-
-    # Wait for halt
-    while Sch.EAGER_INIT[]
-        sleep(0.5)
-    end
-
-    # Final clean-up
-    Sch.EAGER_CONTEXT[] = nothing
-    GC.gc(); sleep(0.5)
-    lock(Sch.ERRORMONITOR_TRACKED) do tracked
-        if all(t->istaskdone(t) || istaskfailed(t), map(last, tracked))
-            empty!(tracked)
-            return
-        end
-        for (name, t) in tracked
-            if t.state == :runnable
-                Threads.@spawn Base.throwto(t, InterruptException())
-            end
-        end
-    end
-    MemPool.exit_hook()
-    GC.gc()
-    yield()
-    @assert isempty(Sch.WORKER_MONITOR_CHANS)
-    @assert isempty(Sch.WORKER_MONITOR_TASKS)
-    ID_COUNTER[] = 1
-    # Clear the precompile-time UUID cache so it is not baked into the compiled
-    # image; __init__ re-populates it from the shared UUID file at load time.
-    delete!(SYSTEM_UUIDS, myid())
+    shutdown_precompile_workload!()
 end
