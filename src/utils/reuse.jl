@@ -195,8 +195,10 @@ macro reusable(name, T, null, N, var, ex)
     if !hasproperty(__module__, cache_name)
         __module__.eval(:(#=const=# $cache_name = $TaskLocalValue{$ReusableCache{$T}}(()->$ReusableCache($T, $null, $N))))
     end
+    # The task-local global is non-const: assert the cache type, or `var` (and
+    # everything computed from it in `ex`) infers as `Any` (see `@reusable_vector`).
     quote
-        @take_or_alloc! $(esc(cache_name))[] $T $(esc(var)) $(esc(ex))
+        @take_or_alloc! $(esc(cache_name))[]::$ReusableCache{$(esc(T))} $T $(esc(var)) $(esc(ex))
     end
 end
 macro reusable(name, T, null, N, len, var, ex)
@@ -205,7 +207,7 @@ macro reusable(name, T, null, N, len, var, ex)
         __module__.eval(:(#=const=# $cache_name = $TaskLocalValue{$ReusableCache{$T}}(()->$ReusableCache($T, $null, $N; sized=true))))
     end
     quote
-        @take_or_alloc! $(esc(cache_name))[] $T $(esc(len)) $(esc(var)) $(esc(ex))
+        @take_or_alloc! $(esc(cache_name))[]::$ReusableCache{$(esc(T))} $T $(esc(len)) $(esc(var)) $(esc(ex))
     end
 end
 

@@ -932,6 +932,18 @@ Phase 1 / Phase 3 critical sections; **callers must not already hold
 `state.lock`**, so that Phase 2 runs genuinely lock-free and
 concurrently across threads.
 """
+# A short description of `x` for the "No processors available" message, built on the
+# failure path only. `:limit` and the cap keep it short: a callable struct prints all
+# of its fields, so a `Base.Fix1(f, big_array)` would otherwise put the whole array in
+# the exception. A `show` that throws costs only the description, not the exception.
+function short_show(x)
+    try
+        return first(sprint(show, x; context=(:compact => true, :limit => true)), 200)
+    catch
+        return string(typeof(x))
+    end
+end
+
 @reuse_scope function schedule_one!(state, task, procs=procs_to_use(state.ctx, state.sch_options))
     # Phase 1 — brief state.lock hold: resolve inputs and bail early if already done.
     # The expensive work (cost estimation, processor selection, pressure reservation)
@@ -1071,6 +1083,7 @@ concurrently across threads.
     # Select the best available processor and reserve time pressure optimistically.
     # These operations use their own fine-grained locks — no state.lock needed.
     scheduled = false
+    no_proc_diag = ""   # filled only when no processor could be chosen, to say why in the exception
     local best_loc, best_spec
     for proc in sorted_procs
         gproc = get_parent(proc)
@@ -1105,6 +1118,11 @@ concurrently across threads.
             end
         end
     end
+    if !scheduled
+        no_proc_diag = string(" for task ", task.id, " (", short_show(task.f), "): ", length(sorted_procs),
+                              " candidate processor(s) after scope ", short_show(scope),
+                              ", ", length(procs_filt), " processor(s) known to this scheduler")
+    end
     empty!(sorted_procs)
 
     # Phase 3 — brief state.lock hold: fire or fail the task.
@@ -1120,7 +1138,7 @@ concurrently across threads.
         if scheduled
             fire_tasks!(ctx, best_loc, [best_spec], state, restore_ready)
         else
-            ex = SchedulingException("No processors available, try widening scope")
+            ex = SchedulingException("No processors available, try widening scope" * no_proc_diag)
             set_failed!(state, task; ex)
             @dagdebug task :schedule "No processors available, skipping"
             # `task` was already credited to `running_count` when it entered

@@ -867,5 +867,25 @@ end
     # A scope that matches no processor leaves `estimate_task_costs!` with an empty candidate list; the
     # task must fail with the usual "No processors available" message, not with an UndefRefError.
     nowhere = Dagger.ExactScope(Dagger.ThreadProc(1, typemax(Int) - 1))
-    @test_throws_unwrap (Dagger.DTaskFailedException, Dagger.Sch.SchedulingException) reason="No processors available, try widening scope" fetch(Dagger.@spawn scope=nowhere identity(1))
+    @test_throws_unwrap (Dagger.DTaskFailedException, Dagger.Sch.SchedulingException) reason<"No processors available, try widening scope" fetch(Dagger.@spawn scope=nowhere identity(1))
+end
+
+@everywhere struct NoProcShowThrows end
+@everywhere (::NoProcShowThrows)(x) = x
+@everywhere Base.show(io::IO, ::NoProcShowThrows) = error("show failed")
+@testset "No processors available: the task description stays short and safe" begin
+    nowhere = Dagger.ExactScope(Dagger.ThreadProc(1, typemax(Int) - 1))
+    reason_of(f) = try
+        fetch(Dagger.@spawn scope=nowhere f(1)); ""
+    catch err
+        Dagger.Sch.unwrap_nested_exception(err).reason
+    end
+    # A callable struct prints all of its fields; the description is capped
+    big = reason_of(Base.Fix1(+, zeros(10^5)))
+    @test startswith(big, "No processors available, try widening scope")
+    @test length(big) < 1000
+    # A `show` that throws leaves the scheduling failure intact, naming the type instead
+    bad = reason_of(NoProcShowThrows())
+    @test startswith(bad, "No processors available, try widening scope")
+    @test occursin("NoProcShowThrows", bad)
 end

@@ -61,6 +61,32 @@ Dagger.default_option(::Val{:name}, ::Type{typeof(option_default_target)},
     @test_throws ArgumentError Dagger.default_option(Val(:meta))
 end
 
+@testset "Signature option defaults are memoized per task" begin
+    fetch(Threads.@spawn begin
+        int_sig = Dagger.Signature(Any[typeof(option_default_target), Int])
+        flt_sig = Dagger.Signature(Any[typeof(option_default_target), Float64])
+        # alternate signatures: the memo must follow the signature, not stick to the first one
+        for _ in 1:3
+            o1 = Dagger.populate_defaults!(Dagger.Options(), int_sig)
+            o2 = Dagger.populate_defaults!(Dagger.Options(), flt_sig)
+            @test o1.meta === true && o1.get_result === nothing && o1.name === nothing
+            @test o2.meta === nothing && o2.get_result === true && o2.name == "Float64"
+        end
+        # options the caller set are left alone, including ones whose default would differ
+        @test Dagger.populate_defaults!(Dagger.Options(; meta=false), int_sig).meta === false
+        # a memo hit gives exactly what the cache path gives
+        memo = Dagger.memo_for(Dagger.SIGNATURE_DEFAULT_MEMO[], int_sig)
+        @test memo.valid && memo.hash == int_sig.hash_nokw
+        # signatures in different slots keep their memos while the others are in use
+        if int_sig.hash_nokw % UInt(Dagger.SIGNATURE_MEMO_SLOTS) != flt_sig.hash_nokw % UInt(Dagger.SIGNATURE_MEMO_SLOTS)
+            Dagger.populate_defaults!(Dagger.Options(), flt_sig)
+            memo = Dagger.memo_for(Dagger.SIGNATURE_DEFAULT_MEMO[], int_sig)
+            @test any(v -> v !== Dagger.DEFAULT_OPTION_UNFILLED, memo.vals)
+        end
+        @test Dagger.cached_default_option(Val(:meta), int_sig) === true
+    end)
+end
+
 @testset "Scope propagation" begin
     first_wid = first(workers())
     last_wid = last(workers())

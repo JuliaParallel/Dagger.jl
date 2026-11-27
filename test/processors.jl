@@ -36,9 +36,18 @@ end
     end
     @testset "Processor exhaustion" begin
         opts = Options(proclist=[OptOutProc])
-        @test_throws_unwrap (Dagger.DTaskFailedException, Dagger.Sch.SchedulingException) reason="No processors available, try widening scope" collect(delayed(sum; options=opts)([1,2,3]))
+        @test_throws_unwrap (Dagger.DTaskFailedException, Dagger.Sch.SchedulingException) reason<"No processors available, try widening scope" collect(delayed(sum; options=opts)([1,2,3]))
         opts = Options(proclist=(proc)->false)
-        @test_throws_unwrap (Dagger.DTaskFailedException, Dagger.Sch.SchedulingException) reason="No processors available, try widening scope" collect(delayed(sum; options=opts)([1,2,3]))
+        @test_throws_unwrap (Dagger.DTaskFailedException, Dagger.Sch.SchedulingException) reason<"No processors available, try widening scope" collect(delayed(sum; options=opts)([1,2,3]))
+        # The message names the task and how many candidates were left
+        opts = Options(proclist=(proc)->false)
+        msg = try
+            collect(delayed(sum; options=opts)([1,2,3])); ""
+        catch err
+            sprint(showerror, Dagger.Sch.unwrap_nested_exception(err))
+        end
+        @test occursin("candidate processor(s) after scope", msg)
+        @test occursin("sum", msg)
         opts = Options(proclist=nothing)
         @test collect(delayed(sum; options=opts)([1,2,3])) == 6
     end
