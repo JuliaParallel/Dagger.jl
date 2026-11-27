@@ -1812,9 +1812,8 @@ function _hierarchical_copy_from!(state::DataDepsState, arg_w::ArgumentWrapper, 
     origin_space = state.arg_origin[arg_w.arg]
     # Mirror flat `distribute_tasks!`: when the origin still holds a fully-current
     # replica -- the argument was only read, or copies merely propagated it back --
-    # the write-back is pure overhead, so elide it. Safe only here at region end;
-    # mid-region the copy tasks also serialize readers against later writers and
-    # must not be skipped.
+    # the write-back is pure overhead, so elide it. `compute_remainder_for_arg!`
+    # makes the same check, mid-region too; it is repeated here only to skip the call.
     #
     # N.B. `arg_current` is per-partition state. A partition only records a space
     # as current for an argument it actually planned, so this cannot elide a

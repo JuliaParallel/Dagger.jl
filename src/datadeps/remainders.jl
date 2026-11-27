@@ -116,6 +116,11 @@ function compute_remainder_for_arg!(state::DataDepsState,
     # time another space reads it. `arg_current` knows better: it lists every
     # space holding a fully-current replica (a task write resets it, a copy
     # extends it). Only entries it has recorded are trusted.
+    # Skipping the copy mid-region keeps the task order: the reader still syncs
+    # with the last writer of its own replica (`get_read_deps!` on the target
+    # space's aliasing), and a later write there still syncs with the reader.
+    # What it relies on is that `arg_current` never lists a stale space; see
+    # `origin_holds_latest` for the case that needs care.
     current = get(state.arg_current, arg_w, nothing)
     if current !== nothing && target_space in current
         return NoAliasing(), 0

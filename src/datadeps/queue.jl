@@ -172,8 +172,8 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
         origin_space = state.arg_origin[arg]
         # When the origin still holds a fully-current replica (the argument was
         # only read, or copies merely propagated it), the write-back is elided.
-        # This is only safe here at region end: mid-region, the copy tasks also
-        # serialize readers against later writers, so they must not be skipped.
+        # `compute_remainder_for_arg!` makes the same check, mid-region too (see
+        # the comment there); it is repeated here only to skip the call.
         current = get(state.arg_current, arg_w, nothing)
         if current !== nothing && origin_space in current
             remainder = NoAliasing()
