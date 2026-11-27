@@ -737,36 +737,34 @@ function _collect_task_meta!(spec::DTaskSpec, pair::DTaskPair, task_idx::Int,
                              raw_arg_cache::IdDict{Any,Any},
                              cache_lock::Union{ReentrantLock,Nothing},
                              task_to_idx::IdDict{DTask,Int})
-    let
-        task = pair.task
-        fargs = spec.fargs
+    task = pair.task
+    fargs = spec.fargs
 
-        all_deps = HierarchicalTaskInfo[]
-        value_deps = Int[]
-        first_chunk = nothing
-        task_may_alias = false
-        task_inplace = false
+    all_deps = HierarchicalTaskInfo[]
+    value_deps = Int[]
+    first_chunk = nothing
+    task_may_alias = false
+    task_inplace = false
 
-        for arg_idx in (is_typed(spec) ? (1:length(fargs)) : eachindex(fargs))
-            # N.B. Function barrier: `fargs[arg_idx]` is abstract here, and the
-            # fetched argument below is `Any`, so processing them inline makes
-            # `type_may_alias`, `unwrap_inout`'s result, the cache closures and
-            # `ArgumentWrapper` dynamic dispatches -- once per argument per
-            # task, on the serial (MPI) pre-pass. See `_populate_one_arg!`.
-            arg_chunk = _collect_arg_meta!(all_deps, value_deps, unique_arg_ws,
-                                           supports_cache, raw_arg_cache, cache_lock,
-                                           task_to_idx, task_idx, fargs[arg_idx])
-            if arg_chunk !== nothing && first_chunk === nothing
-                first_chunk = arg_chunk
-                task_may_alias = true
-                task_inplace = true
-            end
+    for arg_idx in (is_typed(spec) ? (1:length(fargs)) : eachindex(fargs))
+        # N.B. Function barrier: `fargs[arg_idx]` is abstract here, and the
+        # fetched argument below is `Any`, so processing them inline makes
+        # `type_may_alias`, `unwrap_inout`'s result, the cache closures and
+        # `ArgumentWrapper` dynamic dispatches -- once per argument per
+        # task, on the serial (MPI) pre-pass. See `_populate_one_arg!`.
+        arg_chunk = _collect_arg_meta!(all_deps, value_deps, unique_arg_ws,
+                                       supports_cache, raw_arg_cache, cache_lock,
+                                       task_to_idx, task_idx, fargs[arg_idx])
+        if arg_chunk !== nothing && first_chunk === nothing
+            first_chunk = arg_chunk
+            task_may_alias = true
+            task_inplace = true
         end
-
-        return HierarchicalTaskMeta(
-            pair, first_chunk, task_may_alias, task_inplace, all_deps, value_deps
-        )
     end
+
+    return HierarchicalTaskMeta(
+        pair, first_chunk, task_may_alias, task_inplace, all_deps, value_deps
+    )
 end
 
 # Per-argument body of `_collect_task_meta!`. Returns the argument's `Chunk` (or
