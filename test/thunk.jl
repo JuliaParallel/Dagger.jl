@@ -64,13 +64,14 @@ end
     @test Dagger.Sch.EAGER_CONTEXT[] === nothing
     @test fetch(Dagger.@spawn 1+1) == 2
     @test Dagger.Sch.EAGER_CONTEXT[] !== nothing
-    @testset "halting the scheduler by cancellation is not reported as an error" begin
-        # `cancel!(;halt_sch=true)` ends the eager scheduler's own task with an
-        # `InterruptException`; that used to be printed as "Error in eager scheduler".
+    @testset "halting the scheduler by cancellation warns, without a scheduler error" begin
+        # `cancel!(;halt_sch=true)` used to interrupt the eager scheduler's own
+        # task, which was printed as "Error in eager scheduler" with a backtrace;
+        # the halt itself is announced by a warning
         path, io = mktemp()
         try
             redirect_stderr(io) do
-                Dagger.cancel!(;halt_sch=true)
+                @test_logs (:warn, r"Halted Dagger's eager scheduler") Dagger.cancel!(;halt_sch=true)
             end
             close(io)
             @test !occursin("Error in eager scheduler", read(path, String))
@@ -78,6 +79,29 @@ end
             rm(path; force=true)
         end
         Dagger.Sch.EAGER_CONTEXT[] = nothing
+        @test fetch(Dagger.@spawn 1+1) == 2
+    end
+    @testset "cancelling every task leaves the scheduler running" begin
+        # Without `halt_sch`, `cancel!()` cancels the tasks, not the scheduler
+        @test fetch(Dagger.@spawn 1+1) == 2
+        state = Dagger.Sch.EAGER_STATE[]
+        t = Dagger.@spawn sleep(2)
+        sleep(0.5)
+        path, io = mktemp()
+        try
+            redirect_stderr(io) do
+                @test_logs Dagger.cancel!()   # no halt, no warning
+                err = try fetch(t); nothing catch e; e end
+                @test Dagger.Sch.unwrap_nested_exception(err) isa InterruptException
+                # The scheduler would stop shortly after its root task was interrupted
+                @test timedwait(() -> Dagger.Sch.EAGER_STATE[] !== state, 2.0) === :timed_out
+            end
+            close(io)
+            @test !occursin("Error in eager scheduler", read(path, String))
+        finally
+            rm(path; force=true)
+        end
+        @test Dagger.Sch.EAGER_STATE[] === state
         @test fetch(Dagger.@spawn 1+1) == 2
     end
     @testset "per-call" begin

@@ -102,7 +102,7 @@ function cancel!(task::DTask; force::Bool=false, graceful::Bool=true, halt_sch::
 end
 function cancel!(tid::Union{Int,Nothing}=nothing;
                  force::Bool=false, graceful::Bool=true, halt_sch::Bool=false)
-    remotecall_fetch(1, tid, force, halt_sch) do tid, force, halt_sch
+    halted = remotecall_fetch(1, tid, force, halt_sch) do tid, force, halt_sch
         state = Sch.EAGER_STATE[]
 
         # The eager scheduler may still be starting up, in which case
@@ -126,8 +126,13 @@ function cancel!(tid::Union{Int,Nothing}=nothing;
         # Check that the scheduler isn't stopping or has already stopped
         if !isnothing(state) && !state.halt.set
             @lock state.lock _cancel!(state, tid, force, graceful, halt_sch)
+            return halt_sch
         end
+        return false
     end
+    # A halt stops every task of the session, so say so (on the caller's side)
+    halted && @warn "Halted Dagger's eager scheduler (`cancel!` with `halt_sch=true`); it restarts on the next `spawn`"
+    return
 end
 # Put a signal onto the scheduler's channel, tolerating the case where the
 # scheduler has already exited and closed the channel.
@@ -300,6 +305,11 @@ function _cancel!(state, tid, force, graceful, halt_sch)
             (@atomic t.finished) && continue
             (@atomic t.running) || continue
             t.running_on === nothing && continue
+            # Never the eager scheduler's own root task (`eager_thunk`), as in the
+            # processor-level pass above: interrupting it stops the scheduler,
+            # also when no halt was asked for, and a halt ends it anyway (it only
+            # waits for `state.halt`)
+            Dagger.value(first(t.inputs)) === Sch.eager_thunk && continue
             push!(fallback_cancelled, t)
         end
     end
