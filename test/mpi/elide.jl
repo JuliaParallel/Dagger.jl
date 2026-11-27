@@ -6,6 +6,7 @@ elide_add(a::Int, b::Int) = a + b
 elide_throws(x::Int) = x > 0 ? error("elide_throws") : x   # may throw, concrete Int
 elide_len(x::Vector{Int}) = length(x)    # concrete, cannot throw
 elide_blocksum(x::Matrix{Float64}) = sum(x)
+elide_slow_throws(x::Int) = (sleep(0.5); x > 0 ? error("elide_slow_throws") : x)
 elide_rank() = MPI.Comm_rank(MPI.COMM_WORLD)
 elide_where() = (MPI.Comm_rank(MPI.COMM_WORLD), Threads.threadid())   # concrete, cannot be proven not to throw
 
@@ -244,6 +245,17 @@ elide_where() = (MPI.Comm_rank(MPI.COMM_WORLD), Threads.threadid())   # concrete
             # a failure far from the data: the consumer's own rank learns of it on the move
             far = Dagger.@spawn scope=pinned(nranks-1) elide_add(bad, 1)
             @test_throws Exception fetch(far)
+        end
+
+        @testset "changing the switch waits for the tasks in flight" begin
+            # Whether a task reports only failures is decided when it runs: a task submitted with the
+            # switch on must not run with it off (the ranks that elided it would wait for a status).
+            bad = Dagger.@spawn scope=pinned(0) elide_slow_throws(1)
+            Dagger.elide_foreign_tasks!(false)
+            @test isready(bad)                  # the owner's task was waited for
+            Dagger.elide_foreign_tasks!(true)
+            @test_throws Exception fetch(bad)   # and every rank still sees the failure
+            @test_throws Exception fetch(Dagger.@spawn scope=pinned(0) Dagger.elide_foreign_tasks!(false))
         end
 
         @testset "later SPMD work is unaffected" begin

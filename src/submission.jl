@@ -549,6 +549,8 @@ end
 
 chunktype(t::DTask) = t.metadata.return_type
 
+const ELIDE_FOREIGN_TASKS = Ref{Bool}(false)
+
 """
     elide_foreign_tasks!(on::Bool=true)
 
@@ -556,9 +558,26 @@ Switch owner elision on or off for this process (off by default); see
 [`elide_task!`](@ref). The flag is read each time a task is submitted, so it can be
 changed at run time. Under SPMD every rank must call it with the same value at the
 same point of the program.
+
+Whether a task reports only failures is decided when it runs, so a change of the flag
+first waits until the tasks already submitted have finished (a task submitted under
+the old value that ran under the new one would leave the other ranks waiting for a
+status that never comes). It therefore must not be called from inside a task.
 """
-const ELIDE_FOREIGN_TASKS = Ref{Bool}(false)
-elide_foreign_tasks!(on::Bool=true) = (ELIDE_FOREIGN_TASKS[] = on)
+function elide_foreign_tasks!(on::Bool=true)
+    if ELIDE_FOREIGN_TASKS[] != on
+        in_task() && throw(ArgumentError("`elide_foreign_tasks!` cannot change the flag from inside a task"))
+        state = Sch.EAGER_STATE[]
+        if state !== nothing
+            # N.B. The long-lived root thunk of the eager scheduler holds one credit
+            while state.running_count[] > 1
+                sleep(0.001)
+            end
+        end
+        ELIDE_FOREIGN_TASKS[] = on
+    end
+    return on
+end
 
 """
     elide_task!(accel::Acceleration, spec::DTaskSpec, task::DTask) -> Bool
