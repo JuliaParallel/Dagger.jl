@@ -3212,4 +3212,19 @@ function Dagger.elide_task!(accel::MPIAcceleration, spec, task)
     return true
 end
 
+function Dagger.skip_tasks!(accel::MPIAcceleration, n::Integer)
+    n >= 0 || throw(ArgumentError("cannot skip a negative number of tasks"))
+    n == 0 && return nothing
+    # Without elision the owner announces every task's result type to ALL ranks, which a rank that never planned the task
+    # cannot receive; only failure-only (elided) tasks may be skipped.
+    Dagger.ELIDE_FOREIGN_TASKS[] || throw(ArgumentError("`Dagger.skip_tasks!` needs foreign-task elision: call `Dagger.elide_foreign_tasks!(true)` first"))
+    accel.comm == MPI.COMM_WORLD || throw(ArgumentError("`Dagger.skip_tasks!` is only supported for the world communicator"))
+    # The first real submission of a process starts the eager scheduler, which takes a task id of its own
+    # (see `eager_launch!`). A rank that skips before it ever submits must take that id too, or its counter
+    # is one behind the ranks that did.
+    Dagger.Sch.EAGER_STATE[] === nothing && myid() == 1 && Dagger.Sch.init_eager()
+    Threads.atomic_add!(Dagger.ID_COUNTER, n)
+    return nothing
+end
+
 end # module MPIExt

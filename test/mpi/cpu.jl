@@ -150,6 +150,7 @@ include("noaliasing_args.jl")
 include("free_threads.jl")
 include("relay.jl")
 include("elide.jl")
+include("skip_tasks.jl")
 
 @testset "Datadeps" begin
 

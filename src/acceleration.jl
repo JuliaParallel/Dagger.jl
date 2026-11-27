@@ -334,6 +334,23 @@ the default does nothing.
 """
 note_chunk_placement!(::Acceleration, task, scope) = nothing
 
+"""
+    skip_tasks!(n)
+
+Under MPI every rank plans every task, and a task's id (and so its MPI tags) is the next value of a counter
+that must be equal on all ranks. A rank that does not take part in a task (it neither runs it nor owns one
+of its arguments) can leave the `@spawn` out and call `skip_tasks!(1)` at that position instead (or
+`skip_tasks!(k)` for `k` consecutive foreign tasks): it advances the task id counter by `n` and costs a few
+nanoseconds against ~20 us for an elided `@spawn`, so planning a batch of `P` tasks of which a rank takes part
+in `g` costs it `g` spawns instead of `P`. Needs foreign-task elision ([`elide_foreign_tasks!`](@ref)), which is
+checked. Constraints that are not checked: every rank must make the same sequence of `@spawn` / `skip_tasks!`
+calls per task position; a skipped task must be one that this rank would have elided (a concrete `return_type`,
+no `tag`, and its result is never used on this rank), because the rank has no placeholder for it and a failure of
+the task is announced to it without a consumer. Other accelerations have no uniform ids: a no-op.
+"""
+skip_tasks!(n::Integer) = skip_tasks!(current_acceleration(), n)
+skip_tasks!(::Acceleration, n::Integer) = nothing
+
 default_processor(space::CPURAMMemorySpace) = OSProc(space.owner)
 default_memory_space(accel::DistributedAcceleration) = CPURAMMemorySpace(myid())
 # Chunk records must be labeled with the space the value actually resides in
