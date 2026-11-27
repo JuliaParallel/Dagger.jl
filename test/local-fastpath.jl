@@ -10,6 +10,8 @@ import Dagger.Sch: COMPAT_PROCS_CACHE
     (::NoThreadFn)(x) = x
     Dagger.iscompatible_func(::Dagger.ThreadProc, opts, ::Type{NoThreadFn}) = false
     FP_TINY(x) = x + 1
+    struct NoThreadArg end
+    Dagger.iscompatible_arg(::Dagger.ThreadProc, opts, ::Type{NoThreadArg}) = false
     fp_proc() = (sleep(0.002); Dagger.task_processor())
 end
 
@@ -86,6 +88,11 @@ end
             @test reserved_pressure() == 0
         end
 
+        @testset "a thread that refuses an argument type is respected" begin
+            t = Dagger.@spawn FP_TINY(NoThreadArg())
+            @test_throws Exception fetch(t)
+        end
+
         @testset "a thread that refuses the function is respected" begin
             t = Dagger.@spawn NoThreadFn()(1)
             @test_throws Exception fetch(t)
@@ -103,5 +110,130 @@ end
             end
             @test all(a -> all(==(6.0), a), A)
         end
+    end
+end
+
+@everywhere begin
+    FP_PROCARG(x) = (sleep(0.002); Dagger.task_processor())
+end
+
+# Pressure counters aligned like `LocalFast.refs`
+struct FPOtherAccel <: Dagger.Acceleration end
+fp_refs(v) =[Threads.Atomic{UInt64}(UInt64(x)) for x in v]
+fast_values() = collect(values(@atomic Dagger.Sch.FAST_INDEX.dict))
+
+@testset "Local fast path: decisions" begin
+    LocalFast = Dagger.Sch.LocalFast
+    me = myid()
+    accel = Dagger.DistributedAcceleration()
+
+    @testset "only a compatible set made of this process's threads qualifies" begin
+        local_set = Processor[ThreadProc(me, 1), ThreadProc(me, 2)]
+        @test Dagger.Sch.build_local_fast((; compat=local_set), accel) isa LocalFast
+        @test Dagger.Sch.build_local_fast((; compat=Processor[]), accel) === nothing
+        # a thread of another worker
+        @test Dagger.Sch.build_local_fast((; compat=Processor[ThreadProc(me, 1), ThreadProc(me + 1, 1)]), accel) === nothing
+        # a processor that is not a thread
+        @test Dagger.Sch.build_local_fast((; compat=Processor[ThreadProc(me, 1), FakeProc()]), accel) === nothing
+        # only the distributed acceleration is handled
+        @test Dagger.Sch.build_local_fast((; compat=local_set), FPOtherAccel()) === nothing
+    end
+
+    @testset "the fast path places tasks" begin
+        if nprocs() == 1
+            Dagger.Sch.invalidate_compat_procs_cache!()
+            @test !any(e -> e.fast isa LocalFast && (@atomic e.fast.counters) !== nothing, fast_values())
+            fetch.([Dagger.@spawn FP_TINY(i) for i in 1:50])
+            @test any(e -> e.fast isa LocalFast && (@atomic e.fast.counters) !== nothing, fast_values())
+        end
+    end
+
+    @testset "options the fast path does not model are not decided by it" begin
+        if nprocs() == 1
+            for (name, f) in (("proclist", () -> Dagger.@spawn proclist=[ThreadProc] FP_TINY(1)),
+                              ("single", () -> Dagger.@spawn single=1 FP_TINY(1)),
+                              ("occupancy", () -> Dagger.@spawn occupancy=Dict(ThreadProc=>0.5) FP_TINY(1)),
+                              ("time_util", () -> Dagger.@spawn time_util=Dict(ThreadProc=>1_000_000) FP_TINY(1)),
+                              ("alloc_util", () -> Dagger.@spawn alloc_util=Dict(ThreadProc=>UInt64(1024)) FP_TINY(1)))
+                Dagger.Sch.invalidate_compat_procs_cache!()
+                @test fetch(f()) == 2
+                @test !any(e -> e.fast isa LocalFast && (@atomic e.fast.counters) !== nothing, fast_values())
+            end
+        end
+    end
+
+    @testset "a scope restriction on a chunk argument is honoured" begin
+        nt = Threads.nthreads()
+        if nt > 1
+            tp = ThreadProc(me, nt)
+            ch = Dagger.tochunk(5, tp, Dagger.ExactScope(tp))
+            ps = fetch.([Dagger.@spawn FP_PROCARG(ch) for _ in 1:40])
+            @test all(==(tp), ps)
+        end
+    end
+
+    @testset "with workers, unscoped tasks also run on other workers" begin
+        if nprocs() > 1
+            owners = Set(p.owner for p in fetch.([Dagger.@spawn fp_proc() for _ in 1:120]))
+            @test length(owners) > 1
+        end
+    end
+
+    @testset "pick_fast_candidate chooses the less loaded thread" begin
+        pick = Dagger.Sch.pick_fast_candidate
+        @test pick(fp_refs([5])) == 1
+        # up to TWO_CHOICES_MIN candidates: always the least loaded
+        refs8 = fp_refs([5, 9, 0, 7, 3, 8, 6, 4])
+        @test length(refs8) == Dagger.Sch.TWO_CHOICES_MIN
+        @test all(_ -> pick(refs8) == 3, 1:300)
+        # ties are broken at random
+        @test length(Set(pick(fp_refs(zeros(Int, 8))) for _ in 1:400)) == 8
+        # more candidates: two random ones are compared. The most loaded never wins, the least
+        # loaded wins when it is drawn, and it is not always the one picked
+        refs9 = fp_refs([5, 9, 0, 7, 3, 8, 6, 4, 2])
+        picks = [pick(refs9) for _ in 1:3000]
+        @test 2 ∉ picks
+        @test 3 in picks
+        @test any(!=(3), picks)
+    end
+
+    @testset "candidate ranking switches to two choices above TWO_CHOICES_MIN" begin
+        # One heavily loaded thread among n. The full ranking selects the PLACEMENT_SELECT cheapest
+        # exactly, so the loaded one is never among the first places; two choices compares only two
+        # random candidates, so the loaded one is the second place whenever it is drawn
+        busy_early(n) = begin
+            procs = Processor[ThreadProc(me, t) for t in 1:n]
+            pressure = Dict{Processor,Threads.Atomic{UInt64}}(p => Threads.Atomic{UInt64}(UInt64(p === procs[1] ? 10^9 : 0)) for p in procs)
+            state = (; worker_time_pressure=Dagger.LockedObject(Dict{Int,Dict{Processor,Threads.Atomic{UInt64}}}(me => pressure)),
+                       signature_time_cost=Dagger.LockedObject(Dict{Any,Any}()),
+                       worker_transfer_rate=Dagger.LockedObject(Dict{Any,Any}()))
+            task = (; inputs=Any[], f=identity)
+            sorted = Vector{Processor}(undef, n)
+            early = 0
+            for _ in 1:300
+                Dagger.Sch.estimate_task_costs!(sorted, nothing, state, procs, task; sig=:sig)
+                early += findfirst(==(procs[1]), sorted) <= Dagger.Sch.PLACEMENT_SELECT
+                @test sorted[1] !== procs[1]
+            end
+            early
+        end
+        @test busy_early(Dagger.Sch.TWO_CHOICES_MIN) == 0
+        @test busy_early(Dagger.Sch.TWO_CHOICES_MIN + 1) > 0
+    end
+
+    @testset "the lock-free snapshot is bounded and follows invalidation" begin
+        procs = Processor[ThreadProc(me, 1)]
+        Dagger.Sch.invalidate_compat_procs_cache!()
+        @test isempty(@atomic Dagger.Sch.FAST_INDEX.dict)
+        fetch(Dagger.@spawn FP_TINY(1))
+        nprocs() == 1 && @test !isempty(@atomic Dagger.Sch.FAST_INDEX.dict)
+        Dagger.Sch.invalidate_compat_procs_cache!()
+        @test isempty(@atomic Dagger.Sch.FAST_INDEX.dict)
+        scopes = [Dagger.ExactScope(ThreadProc(me, t)) for t in 1:(Dagger.Sch.FAST_INDEX_MAX + 50)]
+        entries = [Dagger.Sch.fast_compat_entry(accel, sc, procs) for sc in scopes]
+        # beyond the bound an entry is still returned, it is just not kept in the snapshot
+        @test all(i -> entries[i].scope === scopes[i], eachindex(scopes))
+        @test length(@atomic Dagger.Sch.FAST_INDEX.dict) <= Dagger.Sch.FAST_INDEX_MAX
+        Dagger.Sch.invalidate_compat_procs_cache!()
     end
 end
