@@ -157,6 +157,17 @@ using Dagger, Test, Random
         end
     end
 
+    @testset "LightAfter: wait for a task whose failure is ignored" begin
+        bad = @light error("light boom")
+        ran = Threads.Atomic{Int}(0)
+        t = Dagger.light_spawn((x, y) -> (Threads.atomic_add!(ran, 1); (x, y)), 7, Dagger.LightAfter(bad))
+        @test fetch(t) == (7, nothing)
+        @test ran[] == 1
+        @test_throws CapturedException fetch(Dagger.light_spawn((x, y) -> x, 1, bad))   # a plain dependency still propagates the failure
+        done = @light (() -> 3)()
+        @test fetch(Dagger.light_spawn((x, y) -> y, 1, Dagger.LightAfter(done))) === nothing
+    end
+
     @testset "DTask interop" begin
         ltd(l) = Dagger.light_to_dtask(await(l))   # `light_to_dtask` waits for `l`: bound that wait
         # DTask -> light task, DTask already finished and still running

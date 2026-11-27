@@ -31,6 +31,11 @@ struct LightFailed
     ex::Any
 end
 
+"A dependency of a light task whose *failure is ignored*: the task waits for it but runs even if it failed (used to keep a transfer going)."
+struct LightAfter
+    t::Any
+end
+
 """
     LightTask
 
@@ -39,10 +44,11 @@ The handle returned by [`@light`](@ref). Supports `wait`, `fetch` and `istaskdon
 mutable struct LightTask
     f::Any
     args::Any
+    pool::Symbol                                   # thread pool the task is launched on: :default (workers) or :interactive (see `light_spawn_on`)
     @atomic result::Any                            # the value, or a LightFailed
     @atomic left::Int
     @atomic deps::Any                              # nothing | LightNode | LIGHT_DONE
-    LightTask(f, args, left) = new(f, args, nothing, left, nothing)
+    LightTask(f, args, left, pool::Symbol=:default) = new(f, args, pool, nothing, left, nothing)
 end
 
 @inline light_isdone(t::LightTask) = (@atomic :acquire t.deps) === LIGHT_DONE
@@ -61,9 +67,14 @@ end
 # Start `f` as an ordinary Julia task on the default pool.  Unlike `Threads.@spawn` the task does not inherit the dynamic scope (ScopedValues,
 # `with_options`, logger) of the thread that happens to release it: whichever task finishes a light task's last predecessor would otherwise
 # decide which options the body sees.  A light task runs with no ambient scope.
-function light_start(f)
+function light_start(f, pool::Symbol=:default)
     t = Task(f)
     set_task_migratable!(t)
+    if pool === :interactive && Threads.threadpoolsize(:interactive) > 0
+        @static if isdefined(Base.Threads, :_spawn_set_thrpool)
+            Base.Threads._spawn_set_thrpool(t, :interactive)
+        end
+    end
     clear_task_scope!(t)
     schedule(t)
     return nothing
@@ -73,7 +84,7 @@ light_release!(w::Base.Event) = (notify(w); nothing)
 function light_release!(w::LightTask)
     if (@atomic :acquire_release w.left -= 1) == 0
         light_point(:launch)
-        light_start(() -> _light_run!(w))
+        light_start(() -> _light_run!(w), w.pool)
     end
     return nothing
 end
@@ -81,6 +92,7 @@ end
 @inline _light_resolve(x) = x
 @inline _light_resolve(x::LightTask) = @atomic :acquire x.result
 @inline _light_resolve(x::DTask) = fetch(x)
+@inline _light_resolve(x::LightAfter) = nothing
 
 function _light_run!(t::LightTask)
     args = t.args
@@ -130,16 +142,26 @@ end
 
 Run `f(args...)` as a light task once all `LightTask`/`DTask` arguments are done. See [`@light`](@ref).
 """
-function light_spawn(f, args...)
+light_spawn(f, args...) = light_spawn_on(:default, f, args...)
+"""
+    light_spawn_on(pool::Symbol, f, args...) -> LightTask
+
+Like [`light_spawn`](@ref) but the task runs on thread `pool` (`:default` or `:interactive`; without interactive threads it uses `:default`).
+Kernels never yield, so a short task that must not wait for them (a message send) belongs on the interactive thread.
+A `LightAfter(task)` argument is waited for like a `LightTask` argument, but its failure is not propagated (the value passed is `nothing`).
+"""
+function light_spawn_on(pool::Symbol, f, args...)
     k = 0
     for a in args
-        (a isa LightTask || a isa DTask) && (k += 1)
+        (a isa LightTask || a isa DTask || (a isa LightAfter && a.t isa LightTask)) && (k += 1)
     end
-    t = LightTask(f, args, 1 + k)
+    t = LightTask(f, args, 1 + k, pool)
     for a in args
         light_point(:register)
         if a isa LightTask
             light_add_dependent!(a, t) || (@atomic :acquire_release t.left -= 1)   # cannot reach 0: the guard is held
+        elseif a isa LightAfter && a.t isa LightTask
+            light_add_dependent!(a.t, t) || (@atomic :acquire_release t.left -= 1)
         elseif a isa DTask
             light_start(() -> _light_wait_dtask(a, t))
         end
