@@ -157,12 +157,16 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
     state = DataDepsState()
     write_num = 1
     proc_to_scope_lfu = BasicLFUCache{Processor,AbstractScope}(1024)
+    # Timed like the hierarchical planner's phases (`@hier_phase`), when timing is on
+    hier_log!(LogHierPhase, 0x00, LogHierPhaseId(:schedule), nothing)
     for pair in queue.seen_tasks
         spec = pair.spec
         task = pair.task
         write_num = distribute_task!(queue, state, all_procs, all_scope, spec, task, spec.fargs, proc_to_scope_lfu, write_num)
     end
+    hier_log!(LogHierPhase, 0x01, LogHierPhaseId(:schedule), nothing)
 
+    hier_log!(LogHierPhase, 0x00, LogHierPhaseId(:epilogue), nothing)
     # Copy args from remote to local
     # N.B. We sort the keys to ensure a deterministic order for uniformity
     @check_uniform(length(state.arg_owner))
@@ -242,6 +246,11 @@ function distribute_tasks!(queue::DataDepsTaskQueue)
             Dagger.@spawn scope=free_scope syncdeps=free_syncdeps tag=datadeps_task_tag() Dagger.unsafe_free!(remote_arg)
         end
     end
+    hier_log!(LogHierPhase, 0x01, LogHierPhaseId(:epilogue), nothing)
+
+    # Report (and drain) this region's timing events, so they do not end up in the next region's report
+    report_hier_stats(length(queue.seen_tasks), length(state.arg_owner), 1; planner=:flat)
+    return
 end
 map_or_ntuple(f, xs::Vector) = map(f, 1:length(xs))
 # N.B. Accept any `Tuple` (typed specs produce heterogeneous tuples of
@@ -264,6 +273,15 @@ function written_positions(task_arg_ws, deps_vec)
     return something(writes, Int[])
 end
 
+# Time since `t0` as `section` of `distribute_task!` (a `LogHierSection` event, summed per region by
+# `report_hier_stats`); returns the start of the next section. Callers check `HIER_TIMING[]` first, so a
+# disabled timer never reads the clock.
+@inline function hier_section!(section::Symbol, t0::UInt64)
+    t = time_ns()
+    hier_log!(LogHierSection, 0x01, LogHierSectionId(section), t - t0)
+    return t
+end
+
 function distribute_task!(queue::DataDepsTaskQueue, state::DataDepsState, all_procs, all_scope, spec::DTaskSpec{typed}, task::DTask, fargs, proc_to_scope_lfu, write_num::Int; ownership=nothing) where typed
     @specialize spec fargs
 
@@ -274,6 +292,8 @@ function distribute_task!(queue::DataDepsTaskQueue, state::DataDepsState, all_pr
     end
 
     DATADEPS_CURRENT_TASK[] = task
+    timing = HIER_TIMING[]
+    tm = timing ? time_ns() : UInt64(0)
 
     task_scope = @something(spec.options.compute_scope, spec.options.scope, DefaultScope())
     scheduler = queue.scheduler
@@ -282,6 +302,7 @@ function distribute_task!(queue::DataDepsTaskQueue, state::DataDepsState, all_pr
     our_space = only(memory_spaces(our_proc))
     @check_uniform(our_proc)
     @check_uniform(our_space)
+    timing && (tm = hier_section!(:schedule, tm))
 
     # Query once per task: this is also used for tags and occupancy below.
     uniform = uniform_execution()
@@ -318,6 +339,7 @@ function distribute_task!(queue::DataDepsTaskQueue, state::DataDepsState, all_pr
         throw(Sch.SchedulingException("Scopes are not compatible: $(our_scope.x), $(our_scope.y)"))
     end
 
+    timing && (tm = hier_section!(:scope, tm))
     tid = task.uid
     # N.B. `with_value` returns a fresh argument rather than mutating; this is
     # required for typed specs, whose `TypedArgument`s disallow `setproperty!`.
@@ -330,6 +352,7 @@ function distribute_task!(queue::DataDepsTaskQueue, state::DataDepsState, all_pr
     # position 1.
     task_arg_ws = populate_task_info!(state, f, spec.fargs, spec, task)
     deps_vec = state.scratch_deps
+    timing && (tm = hier_section!(:populate, tm))
 
     # Truncate the history for each argument
     for arg_ws in task_arg_ws
@@ -338,6 +361,7 @@ function distribute_task!(queue::DataDepsTaskQueue, state::DataDepsState, all_pr
         end
     end
 
+    timing && (tm = hier_section!(:history, tm))
     # Hierarchical scheduling only: for shared backing chunks whose current
     # version was produced by another partition, seed this partition's state so
     # the copy-to below pulls a fresh whole-chunk copy from the true owner (and
@@ -387,6 +411,7 @@ function distribute_task!(queue::DataDepsTaskQueue, state::DataDepsState, all_pr
         remote_args[idx] = arg_remote
     end
     write_num += 1
+    timing && (tm = hier_section!(:copy_to, tm))
 
     # Validate that we're not accidentally performing a copy
     for (idx, arg_ws) in enumerate(task_arg_ws)
@@ -428,6 +453,7 @@ function distribute_task!(queue::DataDepsTaskQueue, state::DataDepsState, all_pr
         end
     end
     @dagdebug tid :spawn_datadeps "($(repr(value(f)))) Task has $(length(syncdeps)) syncdeps"
+    timing && (tm = hier_section!(:syncdeps, tm))
 
     # Launch user's task
     # N.B. Always as an untyped Vector{Argument} spec: the task's return type
@@ -461,6 +487,7 @@ function distribute_task!(queue::DataDepsTaskQueue, state::DataDepsState, all_pr
         end
     end
 
+    timing && (tm = hier_section!(:spec_enqueue, tm))
     # Update read/write tracking for arguments
     for (idx, arg_ws) in enumerate(task_arg_ws)
         (arg_ws.may_alias && arg_ws.inplace_move) || continue
@@ -486,6 +513,7 @@ function distribute_task!(queue::DataDepsTaskQueue, state::DataDepsState, all_pr
     end
 
     write_num += 1
+    timing && hier_section!(:track, tm)
 
     DATADEPS_CURRENT_TASK[] = nothing
 

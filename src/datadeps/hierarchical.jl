@@ -278,8 +278,10 @@ const DATADEPS_UNIFORM_DEFER = Ref(true)
 
 ### Planning instrumentation ###
 #
-# Where a region's planning time went, per phase, printed once per region when
-# `JULIA_DAGGER_HIER_TIMING=1` (or `Dagger.HIER_TIMING[] = true`). Planning cost
+# Where a region's planning time went, per phase and per section of
+# `distribute_task!`, recorded once per region (flat or hierarchical) while timing
+# is on: `Dagger.with_datadeps_timing(f)` for one call, `Dagger.datadeps_timing!`
+# for the session, or `JULIA_DAGGER_HIER_TIMING=1` at load time. Planning cost
 # is the thing that limits datadeps at scale -- especially under MPI, where every
 # rank replays the whole plan -- and it is hard to attribute from a profile,
 # because the expensive parts are blocking waits inside communication rather than
@@ -335,15 +337,25 @@ end
 
 "Stats for the most recently planned region, for programmatic inspection."
 const LAST_HIER_STATS = Ref{Union{NamedTuple,Nothing}}(nothing)
+# The result vectors of the `with_datadeps_timing` calls in progress: each region's
+# stats are pushed to all of them
+const HIER_STATS_COLLECTORS = Vector{Vector{NamedTuple}}()
+const HIER_STATS_LOCK = ReentrantLock()
+
+# The sections of `distribute_task!` timed by `hier_section!`, in order
+const HIER_SECTIONS = (:schedule, :scope, :populate, :history, :copy_to, :syncdeps, :spec_enqueue, :track)
 
 """
-    report_hier_stats(ntasks, nargs, npartitions)
+    report_hier_stats(ntasks, nargs, npartitions; planner=:hierarchical)
 
 Steal this region's `LogHier*` events (recorded only when `HIER_TIMING[]`),
 print a breakdown (unless `HIER_TIMING_REPORT[]` is false), and record it in
-`LAST_HIER_STATS[]` for programmatic inspection. No-op unless `HIER_TIMING[]`.
+`LAST_HIER_STATS[]` (and in every `with_datadeps_timing` call in progress) for
+programmatic inspection. No-op unless `HIER_TIMING[]`. Called at the end of every
+region, flat (`planner=:flat`) or hierarchical, so a region's events never end up
+in the next region's report.
 """
-function report_hier_stats(ntasks::Int, nargs::Int, npartitions::Int)
+function report_hier_stats(ntasks::Int, nargs::Int, npartitions::Int; planner::Symbol=:hierarchical)
     HIER_TIMING[] || return nothing
 
     phase_ns = _hier_phase_ns(TimespanLogging.steal_typed(LogHierPhase))
@@ -375,29 +387,121 @@ function report_hier_stats(ntasks::Int, nargs::Int, npartitions::Int)
     end
     slot_samples[:ainfo] = ainfo_samples
 
-    stats = (;ntasks, nargs, npartitions,
+    # Per-section totals of `distribute_task!`; one `:schedule` event per planned task
+    section_ns = Dict{Symbol,UInt64}()
+    section_tasks = 0
+    for ev in TimespanLogging.steal_typed(LogHierSection)
+        section = ev.id.section
+        section_ns[section] = get(section_ns, section, UInt64(0)) + ev.data
+        section === :schedule && (section_tasks += 1)
+    end
+    sections = NamedTuple{HIER_SECTIONS}(map(s -> get(section_ns, s, UInt64(0)), HIER_SECTIONS))
+
+    stats = (;planner, ntasks, nargs, npartitions,
              prescan_ns=ns(:prescan), aliasing_ns=ns(:aliasing), dag_ns=ns(:dag),
              partition_ns=ns(:partition), schedule_ns=ns(:schedule), epilogue_ns=ns(:epilogue),
+             flush_ns=ns(:flush), close_ns=ns(:close), sections, section_tasks,
              slot_ns, slot_count, moved_ns, moved_count, samespace_ns, samespace_count,
              ainfo_ns, ainfo_count, samples=slot_samples)
     LAST_HIER_STATS[] = stats
+    lock(HIER_STATS_LOCK) do
+        for collector in HIER_STATS_COLLECTORS
+            push!(collector, stats)
+        end
+    end
     HIER_TIMING_REPORT[] && _print_hier_stats(stats)
     return stats
 end
 
 function _print_hier_stats(stats)
-    total = stats.prescan_ns + stats.aliasing_ns + stats.dag_ns +
-            stats.partition_ns + stats.schedule_ns + stats.epilogue_ns
     ms(x) = round(x / 1e6; digits=2)
-    @info """
-    datadeps plan: $(stats.ntasks) tasks, $(stats.nargs) args, $(stats.npartitions) partitions, $(ms(total)) ms total
-      phase 1 prescan   $(ms(stats.prescan_ns)) ms
-      phase 1 aliasing  $(ms(stats.aliasing_ns)) ms  ($(stats.ainfo_count) ainfos, $(ms(stats.ainfo_ns)) ms in aliasing())
-      phase 2 dag       $(ms(stats.dag_ns)) ms
-      phase 3 partition $(ms(stats.partition_ns)) ms
-      phase 4 schedule  $(ms(stats.schedule_ns)) ms  ($(stats.slot_count) slots, $(ms(stats.slot_ns)) ms, of which $(stats.moved_count) moved data in $(ms(stats.moved_ns)) ms, $(stats.samespace_count) of those within one space in $(ms(stats.samespace_ns)) ms)
-      epilogue          $(ms(stats.epilogue_ns)) ms"""
+    us(x) = round(x / 1e3; digits=1)
+    if stats.planner === :flat
+        total = stats.schedule_ns + stats.epilogue_ns
+        head = """
+        datadeps plan (flat): $(stats.ntasks) tasks, $(stats.nargs) args, $(ms(total)) ms total
+          schedule          $(ms(stats.schedule_ns)) ms  ($(stats.slot_count) slots, $(ms(stats.slot_ns)) ms, of which $(stats.moved_count) moved data in $(ms(stats.moved_ns)) ms)
+          epilogue          $(ms(stats.epilogue_ns)) ms"""
+    else
+        total = stats.prescan_ns + stats.aliasing_ns + stats.dag_ns +
+                stats.partition_ns + stats.schedule_ns + stats.epilogue_ns
+        head = """
+        datadeps plan: $(stats.ntasks) tasks, $(stats.nargs) args, $(stats.npartitions) partitions, $(ms(total)) ms total
+          phase 1 prescan   $(ms(stats.prescan_ns)) ms
+          phase 1 aliasing  $(ms(stats.aliasing_ns)) ms  ($(stats.ainfo_count) ainfos, $(ms(stats.ainfo_ns)) ms in aliasing())
+          phase 2 dag       $(ms(stats.dag_ns)) ms
+          phase 3 partition $(ms(stats.partition_ns)) ms
+          phase 4 schedule  $(ms(stats.schedule_ns)) ms  ($(stats.slot_count) slots, $(ms(stats.slot_ns)) ms, of which $(stats.moved_count) moved data in $(ms(stats.moved_ns)) ms, $(stats.samespace_count) of those within one space in $(ms(stats.samespace_ns)) ms)
+          epilogue          $(ms(stats.epilogue_ns)) ms"""
+    end
+    n = max(stats.section_tasks, 1)
+    per_task = join(("$(s) $(us(getfield(stats.sections, s) / n)) us" for s in HIER_SECTIONS), ", ")
+    tail = "\n  per task ($(stats.section_tasks) tasks): " * per_task
+    if stats.flush_ns + stats.close_ns > 0
+        tail *= "\n  final flush $(ms(stats.flush_ns)) ms, close_submitter! (waits for the submitter) $(ms(stats.close_ns)) ms"
+    end
+    @info head * tail
     return nothing
+end
+
+"""
+    Dagger.datadeps_timing!(on::Bool=true; report::Bool=true) -> Bool
+
+Turn the timing of Datadeps planning on or off for this process. While it is on,
+every region records where its planning time went (per phase, and per section of
+the per-task planning step; see [`Dagger.last_datadeps_timing`](@ref)) and, with
+`report=true`, logs a breakdown once per region. Off by default; for a single call,
+see [`Dagger.with_datadeps_timing`](@ref). The switch is process-wide, so regions
+planned concurrently by other tasks are timed too and their numbers can mix.
+"""
+function datadeps_timing!(on::Bool=true; report::Bool=true)
+    HIER_TIMING_REPORT[] = report
+    HIER_TIMING[] = on
+    return on
+end
+
+"""
+    Dagger.last_datadeps_timing() -> Union{NamedTuple,Nothing}
+
+The planning timings of the most recently planned Datadeps region, recorded while
+timing was on (see [`Dagger.datadeps_timing!`](@ref)), or `nothing`. Times are in
+nanoseconds; `sections` holds the per-section totals of the per-task planning step
+over `section_tasks` tasks.
+"""
+last_datadeps_timing() = LAST_HIER_STATS[]
+
+"""
+    Dagger.with_datadeps_timing(f; report::Bool=false) -> Vector{NamedTuple}
+
+Call `f()` with Datadeps planning timing on and return the timings of every region
+planned during the call, in order (one `NamedTuple` per region, as described for
+[`Dagger.last_datadeps_timing`](@ref)). The previous setting is restored afterwards.
+With `report=true`, each region's breakdown is also logged.
+
+```julia
+timings = Dagger.with_datadeps_timing() do
+    Dagger.spawn_datadeps() do
+        Dagger.@spawn copyto!(InOut(A), In(B))
+    end
+end
+timings[1].sections.copy_to   # ns spent preparing copies, summed over the region's tasks
+```
+"""
+function with_datadeps_timing(f; report::Bool=false)
+    collected = NamedTuple[]
+    old_timing, old_report = HIER_TIMING[], HIER_TIMING_REPORT[]
+    lock(() -> push!(HIER_STATS_COLLECTORS, collected), HIER_STATS_LOCK)
+    HIER_TIMING_REPORT[] = report
+    HIER_TIMING[] = true
+    try
+        f()
+    finally
+        HIER_TIMING[], HIER_TIMING_REPORT[] = old_timing, old_report
+        lock(HIER_STATS_LOCK) do
+            filter!(c -> c !== collected, HIER_STATS_COLLECTORS)
+        end
+    end
+    return collected
 end
 
 struct HierarchicalTaskMeta
@@ -1568,8 +1672,10 @@ function schedule_partitions_sequential!(queue::DataDepsTaskQueue,
                     proc_to_scope_lfus[pid], write_num, ownership)
             end
         finally
-            maybe_flush_batch!(submit_queue)
-            close_submitter!(submit_queue)
+            # Timed as phases of the region's report: the final flush, and `close_submitter!`, which
+            # waits for the submitter to drain
+            @hier_phase flush maybe_flush_batch!(submit_queue)
+            @hier_phase close close_submitter!(submit_queue)
         end
     end
 

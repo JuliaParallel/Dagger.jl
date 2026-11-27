@@ -20,8 +20,9 @@ TimespanLogging.@logcategory LogFire as=:fire id=(uid::UInt, worker::Int) data=N
 
 # Hierarchical datadeps planning instrumentation -- see `hier_log!` in
 # datadeps/hierarchical.jl. Gated by `Dagger.HIER_TIMING[]`, not the shared
-# `enable!` bits, so these three are declared (and their ids constructed) even
+# `enable!` bits, so these four are declared (and their ids constructed) even
 # when the rest of logging is off.
 TimespanLogging.@logcategory LogHierPhase as=:hier_phase id=(phase::Symbol,) data=Nothing
 TimespanLogging.@logcategory LogHierSlot as=:hier_slot id=(kind::Symbol,) data=UInt64
 TimespanLogging.@logcategory LogHierAinfo as=:hier_ainfo id=() data=Tuple{UInt64,Int}
+TimespanLogging.@logcategory LogHierSection as=:hier_section id=(section::Symbol,) data=UInt64
