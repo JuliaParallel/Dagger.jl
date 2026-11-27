@@ -50,6 +50,59 @@ using LinearAlgebra, Graphs
     end
 end
 
+@testset "Datadeps planning timing" begin
+    old = (Dagger.HIER_TIMING[], Dagger.HIER_TIMING_REPORT[])
+    A = zeros(4, 4); B = ones(4, 4)
+    two_copies!(; kw...) = Dagger.spawn_datadeps(; kw...) do
+        Dagger.@spawn copyto!(InOut(A), In(B))
+        Dagger.@spawn copyto!(InOut(B), In(A))
+    end
+    try
+        # Off: nothing is recorded
+        Dagger.datadeps_timing!(false)
+        two_copies!(; hierarchical=false)
+        @test isempty(Dagger.with_datadeps_timing(() -> nothing))
+
+        # One call: every region of the call, flat and hierarchical, in order, each with its own events
+        before = (Dagger.HIER_TIMING[], Dagger.HIER_TIMING_REPORT[])
+        timings = Dagger.with_datadeps_timing() do
+            two_copies!(; hierarchical=false)
+            # Processors on several workers: the hierarchical planner partitions
+            nprocs() > 1 && two_copies!(; hierarchical=true)
+        end
+        @test (Dagger.HIER_TIMING[], Dagger.HIER_TIMING_REPORT[]) == before
+        @test length(timings) == (nprocs() > 1 ? 2 : 1)
+        flat = first(timings)
+        @test flat.planner === :flat
+        @test flat.ntasks == 2 && flat.section_tasks == 2
+        @test keys(flat.sections) == Dagger.HIER_SECTIONS
+        @test sum(values(flat.sections)) > 0
+        @test flat.schedule_ns > 0
+        if nprocs() > 1
+            hier = last(timings)
+            @test hier.planner === :hierarchical
+            @test hier.ntasks == 2 && hier.section_tasks == 2
+            @test hier.prescan_ns > 0 && hier.schedule_ns > 0
+            @test sum(values(hier.sections)) > 0
+        end
+
+        # With `report=true`, each region logs its breakdown
+        @test_logs (:info, r"datadeps plan \(flat\): 2 tasks.*per task \(2 tasks\)"s) match_mode=:any begin
+            Dagger.with_datadeps_timing(; report=true) do
+                two_copies!(; hierarchical=false)
+            end
+        end
+
+        # Session switch
+        Dagger.datadeps_timing!(true; report=false)
+        two_copies!(; hierarchical=false)
+        @test Dagger.last_datadeps_timing().planner === :flat
+        @test Dagger.last_datadeps_timing().section_tasks == 2
+    finally
+        Dagger.HIER_TIMING[], Dagger.HIER_TIMING_REPORT[] = old
+    end
+end
+
 @testset "Distributed aliasing batch memo" begin
     chunks = Chunk[wid == myid() ? Dagger.tochunk(zeros(4,4)) :
                                   remotecall_fetch(Dagger.tochunk, wid, zeros(4,4))
