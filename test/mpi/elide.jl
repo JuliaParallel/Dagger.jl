@@ -14,6 +14,16 @@ elide_where() = (MPI.Comm_rank(MPI.COMM_WORLD), Threads.threadid())   # concrete
     pinned(r) = Dagger.ExactScope(last(filter(p -> p.rank == r, cpus)))
     # Uniformity checks are collective over all ranks and so disable elision
     Dagger.check_uniformity!(false)
+    # The switch is off by default and read at run time: with it off nothing is elided
+    @testset "switch off: nothing is elided" begin
+        @test !Dagger.ELIDE_FOREIGN_TASKS[]
+        for target in 0:nranks-1
+            t = Dagger.@spawn scope=pinned(target) elide_inc(41)
+            @test fetch(t) == 42
+            @test t.stub === nothing
+            @test t.owner < 0
+        end
+    end
     Dagger.elide_foreign_tasks!(true)
     try
         @testset "pinned tasks: results, stubs, uniform ids" begin
