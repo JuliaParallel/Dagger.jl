@@ -13,6 +13,15 @@ export LightTask, @light
 
 const LIGHT_DONE = :__light_done__                 # sentinel in the dependents stack: the task has finished
 
+# Test hook.  `light_point(name)` is called wherever another thread can interleave with the protocol; the default is `nothing` (one load and a
+# branch).  The tests install a function there that yields, spins or sleeps at random, to make those windows wide.
+const LIGHT_HOOK = Ref{Union{Nothing,Function}}(nothing)
+@inline function light_point(p::Symbol)
+    h = LIGHT_HOOK[]
+    h === nothing || h(p)
+    return nothing
+end
+
 struct LightNode                                   # immutable stack node (CAS on the head of the stack)
     target::Any                                    # a LightTask that waits for us, or an Event that a fetch waits on
     next::Any                                      # LightNode or nothing
@@ -43,15 +52,28 @@ function light_add_dependent!(d::LightTask, waiter)
     while true
         head = @atomic :acquire d.deps
         head === LIGHT_DONE && return false
+        light_point(:cas)
         _, ok = @atomicreplace :acquire_release :monotonic d.deps head => LightNode(waiter, head)
         ok && return true
     end
 end
 
+# Start `f` as an ordinary Julia task on the default pool.  Unlike `Threads.@spawn` the task does not inherit the dynamic scope (ScopedValues,
+# `with_options`, logger) of the thread that happens to release it: whichever task finishes a light task's last predecessor would otherwise
+# decide which options the body sees.  A light task runs with no ambient scope.
+function light_start(f)
+    t = Task(f)
+    set_task_migratable!(t)
+    clear_task_scope!(t)
+    schedule(t)
+    return nothing
+end
+
 light_release!(w::Base.Event) = (notify(w); nothing)
 function light_release!(w::LightTask)
     if (@atomic :acquire_release w.left -= 1) == 0
-        Threads.@spawn _light_run!(w)
+        light_point(:launch)
+        light_start(() -> _light_run!(w))
     end
     return nothing
 end
@@ -83,8 +105,10 @@ function _light_run!(t::LightTask)
     end
     t.f = nothing; t.args = nothing                 # the result stays, the inputs can be collected
     @atomic :release t.result = res
+    light_point(:result)
     n = @atomicswap :acquire_release t.deps = LIGHT_DONE
     while n isa LightNode
+        light_point(:release)
         light_release!(n.target)
         n = n.next
     end
@@ -113,12 +137,14 @@ function light_spawn(f, args...)
     end
     t = LightTask(f, args, 1 + k)
     for a in args
+        light_point(:register)
         if a isa LightTask
             light_add_dependent!(a, t) || (@atomic :acquire_release t.left -= 1)   # cannot reach 0: the guard is held
         elseif a isa DTask
-            Threads.@spawn _light_wait_dtask(a, t)
+            light_start(() -> _light_wait_dtask(a, t))
         end
     end
+    light_point(:guard)
     light_release!(t)                               # drop the guard
     return t
 end
@@ -126,13 +152,17 @@ end
 """
     @light f(args...)
 
-Opt-in fast path for fine-grained shared-memory tasks (a few µs of overhead instead of
-~100 µs). Returns a [`LightTask`](@ref) that supports `wait` and `fetch`. Arguments that are
-`LightTask`s or `DTask`s are dependencies and are passed as their values. A light task
-has no scopes, options, Datadeps, MPI/Distributed placement, cancellation or logging events.
+Opt-in fast path for fine-grained shared-memory tasks, with much less per-task overhead than
+[`Dagger.@spawn`](@ref). Returns a [`LightTask`](@ref) that supports `wait`, `fetch` and
+`istaskdone`. Arguments that are `LightTask`s or `DTask`s are dependencies and are passed as
+their values. A light task has no scopes, options, Datadeps, MPI/Distributed placement,
+cancellation or logging events, and keyword arguments are not supported. It always runs in the
+process that created it.
 """
 macro light(ex)
     (ex isa Expr && ex.head == :call) || throw(ArgumentError("@light expects a function call, e.g. @light f(x, y)"))
+    any(a -> a isa Expr && (a.head === :parameters || a.head === :kw), ex.args) &&
+        throw(ArgumentError("@light does not support keyword arguments; wrap them in a closure, e.g. @light (() -> f(x; k=1))()"))
     return esc(Expr(:call, GlobalRef(Dagger, :light_spawn), ex.args...))
 end
 
@@ -141,6 +171,7 @@ function Base.wait(t::LightTask)
     ev = Base.Event()
     # Inside a Dagger task, hand the processor back while waiting (exactly what `wait(::ThunkFuture)`
     # does), so that the tasks this light task depends on can run on it. Outside a task `thunk_yield(f)` is `f()`.
+    light_point(:wait)
     light_add_dependent!(t, ev) && Dagger.Sch.thunk_yield(() -> wait(ev))
     return nothing
 end
