@@ -932,6 +932,18 @@ Phase 1 / Phase 3 critical sections; **callers must not already hold
 `state.lock`**, so that Phase 2 runs genuinely lock-free and
 concurrently across threads.
 """
+# A short description of `x` for the "No processors available" message, built on the
+# failure path only. `:limit` and the cap keep it short: a callable struct prints all
+# of its fields, so a `Base.Fix1(f, big_array)` would otherwise put the whole array in
+# the exception. A `show` that throws costs only the description, not the exception.
+function short_show(x)
+    try
+        return first(sprint(show, x; context=(:compact => true, :limit => true)), 200)
+    catch
+        return string(typeof(x))
+    end
+end
+
 @reuse_scope function schedule_one!(state, task, procs=procs_to_use(state.ctx, state.sch_options))
     # Phase 1 — brief state.lock hold: resolve inputs and bail early if already done.
     # The expensive work (cost estimation, processor selection, pressure reservation)
@@ -1107,8 +1119,8 @@ concurrently across threads.
         end
     end
     if !scheduled
-        no_proc_diag = string(" for task ", task.id, " (", sprint(show, task.f; context=:compact => true), "): ", length(sorted_procs),
-                              " candidate processor(s) after scope ", first(sprint(show, scope; context=:compact => true), 200),
+        no_proc_diag = string(" for task ", task.id, " (", short_show(task.f), "): ", length(sorted_procs),
+                              " candidate processor(s) after scope ", short_show(scope),
                               ", ", length(procs_filt), " processor(s) known to this scheduler")
     end
     empty!(sorted_procs)
