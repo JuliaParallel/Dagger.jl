@@ -88,6 +88,7 @@ function spawn_datadeps(f::Base.Callable; static::Bool=true,
             # aliasing info from Phase 1, from every slot, and from the write-back
             # epilogue, and each answer costs a round-trip to the owner.
             with(CHUNK_AINFO_MEMO => ChunkAinfoMemo()) do
+                owner_computes_region!(queue) && return          # opt-in (`owner_computes_regions!(true)`): a region of whole dense tiles runs on the owner-computes path
                 if hierarchical
                     distribute_tasks_hierarchical!(queue)
                 else

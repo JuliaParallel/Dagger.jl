@@ -23,6 +23,8 @@ tests = [
     ("Processors", "processors.jl"),
     ("Uniform Placement", "uniform-placement.jl"),
     ("Light Tasks", "microtask.jl"),
+    ("Owner-Computes", "owner_computes.jl"),
+    ("Owner-Computes Regions", "datadeps_owner_computes.jl"),
     ("Processor Grids", "procgrid.jl"),
     ("Memory Spaces", "memory-spaces.jl"),
     ("Logging", "logging.jl"),

@@ -74,16 +74,29 @@ mutable struct DTask
     uid::UInt
     future::ThunkFuture
     metadata::DTaskMetadata
+    # Set instead of a `Thunk` for a task that ran on the owner-computes path (a lowered
+    # `spawn_datadeps` region, see `owner_computes_region!`); `nothing` for every
+    # ordinary task.
+    stub::Any
     thunk_ref::DRef
 
-    DTask(uid, future, metadata) = new(uid, future, metadata)
+    DTask(uid, future, metadata) = new(uid, future, metadata, nothing)
+end
+
+"The `stub` of a task that ran on the owner-computes path (a lowered `spawn_datadeps` region): there is no Thunk, and the result lives on rank `rank`."
+struct TileStub
+    rank::Int
+end
+"What a rank that did not run a lowered task finds in its future (an internal marker: `fetch` replaces it by the value broadcast from the rank that ran the task)."
+struct TileRemoteResult
+    rank::Int
 end
 
 const EagerThunk = DTask
 
 Base.isready(t::DTask) = isready(t.future)
 Base.istaskdone(t::DTask) = isready(t.future)
-Base.istaskstarted(t::DTask) = isdefined(t, :thunk_ref)
+Base.istaskstarted(t::DTask) = t.stub !== nothing || isdefined(t, :thunk_ref)
 function Base.wait(t::DTask)
     if !istaskstarted(t)
         throw(ConcurrencyViolationError("Cannot `wait` on an unlaunched `DTask`"))
@@ -94,6 +107,13 @@ end
 function Base.fetch(t::DTask; raw=false, move_value=!raw, unwrap=!raw, uniform=false)
     if !istaskstarted(t)
         throw(ConcurrencyViolationError("Cannot `fetch` an unlaunched `DTask`"))
+    end
+    if t.stub isa TileStub
+        # A task of a region that ran on the owner-computes path: the value exists on the rank that ran it. Like every fetch under MPI this is collective:
+        # that rank sends the value to the others, so the result is the same everywhere. (The internal waits ask with move_value=false and do not.)
+        v = fetch(t.future; move_value=false, unwrap=false)          # raises if the task failed
+        move_value || return v
+        return tile_bcast_value(tile_transport(current_acceleration()), t.stub.rank, v isa TileRemoteResult ? nothing : v)
     end
     return fetch(t.future; move_value, unwrap, uniform)
 end

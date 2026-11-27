@@ -2685,4 +2685,104 @@ accel_matches_proc(accel::MPIAcceleration, proc::MPIClusterProc) = true
 accel_matches_proc(accel::MPIAcceleration, proc::MPIProcessor) = true
 accel_matches_proc(accel::MPIAcceleration, proc) = false
 
+# ------------------------------------------------------------------------------------------------------------------------------------------
+# Owner-computes transport (src/owner_computes.jl).  One progress task polls every outstanding tile request; a sender or receiver only waits on an Event.
+# (A poll loop per request would put a `yield()` spinner on the queue for each message.)
+struct MPITileTransport <: Dagger.TileTransport
+    comm::MPI.Comm
+end
+Dagger.tile_transport(accel::MPIAcceleration) = MPITileTransport(accel.comm)
+Dagger.tile_rank(t::MPITileTransport) = MPI.Comm_rank(t.comm)
+Dagger.tile_nranks(t::MPITileTransport) = MPI.Comm_size(t.comm)
+
+const TILE_PENDING = Tuple{MPI.Request,Base.Event}[]
+const TILE_LOCK = ReentrantLock()
+const TILE_PROGRESS = Ref{Union{Nothing,Task}}(nothing)
+
+function tile_progress_loop()
+    idle = 0
+    while !MPI.Finalized()
+        done = 0; npend = 0
+        lock(TILE_LOCK)
+        try
+            i = 1
+            while i <= length(TILE_PENDING)
+                req, ev = TILE_PENDING[i]
+                if MPI.Test(req)
+                    notify(ev); TILE_PENDING[i] = TILE_PENDING[end]; pop!(TILE_PENDING); done += 1
+                else
+                    i += 1
+                end
+            end
+            npend = length(TILE_PENDING)
+        finally
+            unlock(TILE_LOCK)
+        end
+        if done > 0
+            idle = 0
+        elseif npend == 0
+            sleep(0.0005)                       # nothing in flight: a cooperative sleep costs nothing
+        else
+            idle += 1
+            if idle < 200
+                yield()                         # a message is probably about to arrive
+            else
+                Libc.systemsleep(20e-6)         # short blocking nap (Julia's sleep() has ~1 ms granularity) ...
+                yield()                         # ... and let anything bound to this thread run
+            end
+        end
+    end
+end
+
+function tile_ensure_progress!()
+    lock(TILE_LOCK) do
+        t = TILE_PROGRESS[]
+        (t === nothing || istaskdone(t)) || return
+        if Dagger.TILE_COMM_POOL === :interactive && Threads.threadpoolsize(:interactive) > 0
+            t = Threads.@spawn :interactive tile_progress_loop()      # the otherwise idle first thread: not behind the kernels of the workers
+        else
+            t = Task(tile_progress_loop)
+            Dagger.clear_task_scope!(t)         # no inherited dynamic scope on a long-lived task
+            Dagger.set_task_migratable!(t)      # do not stay on the creator's thread
+            schedule(t)
+        end
+        TILE_PROGRESS[] = t
+    end
+    return
+end
+
+function tile_register!(req)
+    ev = Base.Event()
+    tile_ensure_progress!()
+    lock(TILE_LOCK) do; push!(TILE_PENDING, (req, ev)); end
+    return ev
+end
+Dagger.tile_post_send(t::MPITileTransport, arr, dest, tag) = tile_register!(MPI.Isend(arr, t.comm; dest, tag))
+Dagger.tile_post_recv(t::MPITileTransport, arr, source, tag) = tile_register!(MPI.Irecv!(arr, t.comm; source, tag))
+Dagger.tile_chunk_owner(c::Dagger.Chunk{<:Any,<:MPIRef}) = c.handle.rank
+Dagger.tile_chunk_array(c::Dagger.Chunk{<:Any,<:MPIRef}) = c.handle.rank == MPI.Comm_rank(c.handle.comm) ? unwrap(c.handle) : nothing
+Dagger.tile_chunk_transport_ok(t::MPITileTransport, c::Dagger.Chunk{<:Any,<:MPIRef}) = c.handle.comm == t.comm
+# a scope that pins a task to one rank: an ExactScope of an MPIProcessor, or a union of such with one rank
+function Dagger.tile_scope_rank(s::Dagger.ExactScope)
+    p = s.processor
+    return p isa MPIProcessor ? p.rank : nothing
+end
+function Dagger.tile_scope_rank(s::Dagger.UnionScope)
+    r = nothing
+    for m in s.scopes
+        m isa Dagger.ExactScope || return nothing
+        q = Dagger.tile_scope_rank(m)
+        q === nothing && return nothing
+        (r === nothing || r == q) || return nothing
+        r = q
+    end
+    return r
+end
+function Dagger.tile_barrier(t::MPITileTransport)
+    req = MPI.Ibarrier(t.comm)
+    while !MPI.Test(req); yield(); end
+    return
+end
+
+
 end # module MPIExt
