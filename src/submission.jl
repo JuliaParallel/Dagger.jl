@@ -550,12 +550,14 @@ end
 chunktype(t::DTask) = t.metadata.return_type
 
 """
-    ELIDE_FOREIGN_TASKS
+    elide_foreign_tasks!(on::Bool=true)
 
-Opt-in switch (`Dagger.elide_foreign_tasks!`, or the environment variable
-`JULIA_DAGGER_ELIDE_FOREIGN_TASKS=1` at startup) for [`elide_task!`](@ref).
+Switch owner elision on or off for this process (off by default); see
+[`elide_task!`](@ref). The flag is read each time a task is submitted, so it can be
+changed at run time. Under SPMD every rank must call it with the same value at the
+same point of the program.
 """
-const ELIDE_FOREIGN_TASKS = Ref{Bool}(false) # set from the environment in `__init__`
+const ELIDE_FOREIGN_TASKS = Ref{Bool}(false)
 elide_foreign_tasks!(on::Bool=true) = (ELIDE_FOREIGN_TASKS[] = on)
 
 """
