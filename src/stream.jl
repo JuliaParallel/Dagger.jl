@@ -437,9 +437,9 @@ function spawn_streaming(f::Base.Callable; teardown::Bool=true)
                 # Wait for any task to finish
                 waitany(dtasks)
 
-                # Cancel all tasks
+                # Cancel all tasks (routine teardown, not a user cancellation: no warning)
                 for task in dtasks
-                    cancel!(task; graceful=false)
+                    cancel!(task; graceful=false, warn=false)
                 end
             end)
         end

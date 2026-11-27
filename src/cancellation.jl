@@ -81,6 +81,7 @@ it.
 - `force`: If `true`, the task will be interrupted with an `InterruptException` (not recommended, this is unsafe).
 - `graceful`: If `true`, the task will be allowed to finish its current execution before being cancelled; otherwise, it will be cancelled as soon as possible.
 - `halt_sch`: If `true`, the scheduler will be halted after the task is cancelled (it will restart automatically upon the next `@spawn`/`spawn` call).
+- `warn`: If `true` (the default), log a warning saying what was cancelled (and that the scheduler was halted, with `halt_sch`). Nothing is logged when there was nothing to cancel.
 
 As an example, the following code will cancel task `t` before it finishes
 executing:
@@ -96,13 +97,14 @@ tasks which are waiting to run. Using `cancel!` is generally a much safer
 alternative to Ctrl+C, as it cooperates with the scheduler and runtime and
 avoids unintended side effects.
 """
-function cancel!(task::DTask; force::Bool=false, graceful::Bool=true, halt_sch::Bool=false)
-    # Eager DTask uid and Sch thunk id are the same value.
-    cancel!(Int(task.uid); force, graceful, halt_sch)
+function cancel!(task::DTask; force::Bool=false, graceful::Bool=true, halt_sch::Bool=false, warn::Bool=true)
+    # Eager DTask uid and Sch thunk id are the same value. A task that already
+    # finished has nothing left to cancel, so it is not reported.
+    cancel!(Int(task.uid); force, graceful, halt_sch, warn=warn && !isready(task))
 end
 function cancel!(tid::Union{Int,Nothing}=nothing;
-                 force::Bool=false, graceful::Bool=true, halt_sch::Bool=false)
-    halted = remotecall_fetch(1, tid, force, halt_sch) do tid, force, halt_sch
+                 force::Bool=false, graceful::Bool=true, halt_sch::Bool=false, warn::Bool=true)
+    acted = remotecall_fetch(1, tid, force, halt_sch) do tid, force, halt_sch
         state = Sch.EAGER_STATE[]
 
         # The eager scheduler may still be starting up, in which case
@@ -126,12 +128,20 @@ function cancel!(tid::Union{Int,Nothing}=nothing;
         # Check that the scheduler isn't stopping or has already stopped
         if !isnothing(state) && !state.halt.set
             @lock state.lock _cancel!(state, tid, force, graceful, halt_sch)
-            return halt_sch
+            return true
         end
         return false
     end
-    # A halt stops every task of the session, so say so (on the caller's side)
-    halted && @warn "Halted Dagger's eager scheduler (`cancel!` with `halt_sch=true`); it restarts on the next `spawn`"
+    # Say what was cancelled, on the caller's side. Internal teardown (streaming)
+    # passes `warn=false`; nothing is reported when no scheduler was running.
+    if acted && warn
+        what = tid === nothing ? "every Dagger task" : "Dagger task $tid"
+        if halt_sch
+            @warn "Cancelled $what and halted Dagger's eager scheduler (`cancel!` with `halt_sch=true`); it restarts on the next `spawn`"
+        else
+            @warn "Cancelled $what (`cancel!`)"
+        end
+    end
     return
 end
 # Put a signal onto the scheduler's channel, tolerating the case where the

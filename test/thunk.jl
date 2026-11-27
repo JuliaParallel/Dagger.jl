@@ -71,7 +71,7 @@ end
         path, io = mktemp()
         try
             redirect_stderr(io) do
-                @test_logs (:warn, r"Halted Dagger's eager scheduler") Dagger.cancel!(;halt_sch=true)
+                @test_logs (:warn, r"Cancelled every Dagger task and halted Dagger's eager scheduler") Dagger.cancel!(;halt_sch=true)
             end
             close(io)
             @test !occursin("Error in eager scheduler", read(path, String))
@@ -90,7 +90,7 @@ end
         path, io = mktemp()
         try
             redirect_stderr(io) do
-                @test_logs Dagger.cancel!()   # no halt, no warning
+                @test_logs (:warn, r"Cancelled every Dagger task \(`cancel!`\)") Dagger.cancel!()
                 err = try fetch(t); nothing catch e; e end
                 @test Dagger.Sch.unwrap_nested_exception(err) isa InterruptException
                 # The scheduler would stop shortly after its root task was interrupted
@@ -103,6 +103,19 @@ end
         end
         @test Dagger.Sch.EAGER_STATE[] === state
         @test fetch(Dagger.@spawn 1+1) == 2
+    end
+    @testset "cancelling one task warns, unless asked not to or already finished" begin
+        t = Dagger.@spawn sleep(2)
+        sleep(0.5)
+        @test_logs (:warn, Regex("Cancelled Dagger task $(Int(t.uid)) \\(`cancel!`\\)")) Dagger.cancel!(t)
+        @test_throws Exception fetch(t)
+        t = Dagger.@spawn sleep(2)
+        sleep(0.5)
+        @test_logs Dagger.cancel!(t; warn=false)
+        @test_throws Exception fetch(t)
+        t = Dagger.@spawn 1+1
+        @test fetch(t) == 2
+        @test_logs Dagger.cancel!(t)   # nothing left to cancel
     end
     @testset "per-call" begin
         x = 2

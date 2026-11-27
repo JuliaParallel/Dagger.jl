@@ -178,6 +178,9 @@ reason, one can call `Dagger.cancel!(;halt_sch=true)` to stop the scheduler and
 all tasks. The scheduler will be automatically restarted on the next
 `@spawn`/`spawn` call.
 
+Each of these calls logs a warning saying what was cancelled (and whether the
+scheduler was halted); pass `warn=false` to `cancel!` to leave it out.
+
 ## Lazy API
 
 Alongside the modern eager API, Dagger also has a legacy lazy API, accessible
