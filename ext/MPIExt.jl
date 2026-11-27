@@ -3036,6 +3036,13 @@ function mpi_arg_participates(v, local_rank::Int)
     return false
 end
 
+# The tag a failure is broadcast under, or `nothing` when the id cannot be one: MPI only guarantees tags up
+# to `MPI.tag_ub()` (32767 at the least), and Open MPI's is 8388607.
+function mpi_failure_tag(id::Integer)
+    0 <= id < MPI.tag_ub() || return nothing
+    return UInt32(id)
+end
+
 # The owner tells everyone when a failure-only task fails, whatever the cause: an
 # error in the task, in moving its arguments, or an upstream failure. This runs
 # under the scheduler lock, so the send is handed to another task.
@@ -3045,7 +3052,15 @@ function Dagger.Sch.task_failed!(::MPIAcceleration, thunk, value)
     proc = mpi_scope_processor(opts)
     MPI.Comm_rank(proc.comm) == proc.rank || return
     ex = mpi_wire_exception(value isa Dagger.DTaskFailedException ? value.ex : value)
-    tag = UInt32(thunk.id)
+    tag = mpi_failure_tag(thunk.id)
+    if tag === nothing
+        # The id is no valid tag (a long run on an MPI with a small `tag_ub`), so nobody can be waiting under it:
+        # the failure is on the task for whoever fetches it here. Say what it was instead of dying in `Isend`
+        # with MPI_ERR_TAG and losing the exception.
+        id = thunk.id
+        @error "Task failed; not broadcast (id $id is not a valid MPI tag)" exception=value
+        return
+    end
     Dagger.Sch.errormonitor_tracked("mpi_task_failed", Threads.@spawn begin
         bcast_meta_yield(proc.comm, proc.rank, tag, (:error, ex))
     end)
