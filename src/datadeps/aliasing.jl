@@ -668,6 +668,18 @@ end
 # task. A mutable struct has a stable heap identity and is passed by pointer
 # instead, so those boxes disappear. It is never used as a `Dict` key, so the
 # resulting identity-based `hash`/`==` are not observed.
+# One dependency of one argument whose aliasing has already been fully populated in this region (`populate_argument_info!` has run
+# for it), so a later task that uses the same argument object with the same In/Out/InOut and `dep_mod` can reuse the
+# `DataDepsTaskDependency` instead of rebuilding the `ArgumentWrapper` (a hash) and walking `arg_owner`, `arg_history`,
+# `remote_arg_w` and `ainfo_cache` again. A gemm tile is used by 32 tasks (4096/128), a Cholesky tile by up to 32.
+struct DepMemoEntry
+    dep_mod::Any
+    readdep::Bool
+    writedep::Bool
+    full::DataDepsTaskDependency
+end
+const DEP_MEMO_MAX = 8      # per argument; a `dep_mod` that is a fresh object every time (views) would otherwise grow the list
+
 mutable struct DataDepsState
     # The mapping of original raw argument to its Chunk
     # N.B. Values are Chunks, or raw remote handles (e.g. ChunkView under MPI)
@@ -757,6 +769,9 @@ mutable struct DataDepsState
     scratch_deps::Vector{DataDepsTaskDependency}
     scratch_remote::Vector{Any}
 
+    # Per argument object (identity): the dependencies already populated for it, see `DepMemoEntry`
+    dep_memo::IdDict{Any,Vector{DepMemoEntry}}
+
     function DataDepsState()
         arg_to_chunk = IdDict{Any,Any}()
         sparse_arg_wrap = IdDict{Any,Any}()
@@ -785,7 +800,7 @@ mutable struct DataDepsState
 
         return new(arg_to_chunk, sparse_arg_wrap, arg_origin, remote_args, remote_arg_to_original, remote_arg_w, ainfo_arg, arg_history, arg_owner, arg_current, arg_overlaps, ainfo_backing_chunk,
                    supports_inplace_cache, ainfo_cache, ainfos_lookup, ainfos_overlaps, ainfos_owner, ainfos_readers,
-                   TaskArgInfo[], DataDepsTaskDependency[], Any[])
+                   TaskArgInfo[], DataDepsTaskDependency[], Any[], IdDict{Any,Vector{DepMemoEntry}}())
     end
 end
 
@@ -944,17 +959,31 @@ function _populate_arg_deps!(state::DataDepsState, infos::Vector{TaskArgInfo},
     # Generate a Chunk for the argument if necessary
     arg_chunk = get_or_make_arg_chunk!(state, arg, task)
 
-    # Track the origin space of the argument
-    origin_space = memory_space(arg_chunk)
-    @check_uniform(origin_space)
-    state.arg_origin[arg_chunk] = origin_space
-    state.remote_arg_to_original[arg_chunk] = arg_chunk
+    memo = get(state.dep_memo, arg_chunk, nothing)
+    if memo === nothing
+        # First sight of this argument in the region: track its origin space
+        origin_space = memory_space(arg_chunk)
+        @check_uniform(origin_space)
+        state.arg_origin[arg_chunk] = origin_space
+        state.remote_arg_to_original[arg_chunk] = arg_chunk
+        memo = state.dep_memo[arg_chunk] = DepMemoEntry[]
+    end
 
     # Record and populate argument info for all aliasing dependencies
     for dep in raw_deps
-        dep_full = DataDepsTaskDependency(arg_chunk, dep)
+        dep_full = nothing
+        for e in memo
+            if e.dep_mod === dep[1] && e.readdep == dep[2] && e.writedep == dep[3]
+                dep_full = e.full
+                break
+            end
+        end
+        if dep_full === nothing
+            dep_full = DataDepsTaskDependency(arg_chunk, dep)
+            populate_argument_info!(state, dep_full.arg_w, memory_space(arg_chunk))
+            length(memo) < DEP_MEMO_MAX && push!(memo, DepMemoEntry(dep[1], dep[2], dep[3], dep_full))
+        end
         push!(deps_vec, dep_full)
-        populate_argument_info!(state, dep_full.arg_w, origin_space)
     end
     push!(infos, TaskArgInfo(arg_chunk, pos, may_alias, inplace_move, dep_start, length(deps_vec)))
     return

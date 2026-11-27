@@ -145,8 +145,9 @@ eager_submit_internal!(ctx, state, task, tid, payload::Tuple{<:AnyPayload}) =
     # locking discipline and the lock ordering with `state.equiv_chunks` (which
     # is only ever taken with `thunk_dict` unheld).
     for (idx, arg) in enumerate(fargs)
-        if valuetype(arg) <: DTask
-            arg_tid = Int((value(arg)::DTask).uid)
+        v = arg.value
+        if v isa DTask
+            arg_tid = Int(v.uid)
             lock(state.thunk_dict)
             try
                 d = Dagger.payload(state.thunk_dict)
@@ -154,8 +155,8 @@ eager_submit_internal!(ctx, state, task, tid, payload::Tuple{<:AnyPayload}) =
             finally
                 unlock(state.thunk_dict)
             end
-        elseif valuetype(arg) <: Sch.ThunkID
-            arg_tid = (value(arg)::Sch.ThunkID).id
+        elseif v isa Sch.ThunkID
+            arg_tid = v.id
             lock(state.thunk_dict)
             try
                 d = Dagger.payload(state.thunk_dict)
@@ -163,8 +164,8 @@ eager_submit_internal!(ctx, state, task, tid, payload::Tuple{<:AnyPayload}) =
             finally
                 unlock(state.thunk_dict)
             end
-        elseif valuetype(arg) <: Chunk
-            chunk = find_equivalent_chunk(state, value(arg)::Chunk)
+        elseif v isa Chunk
+            chunk = find_equivalent_chunk(state, v)
             #=FIXME:UNIQUE=#
             # N.B. Stored STRONGLY: the consuming task owns its inputs until
             # its own teardown. Argument chunks were previously weakened here
@@ -386,11 +387,16 @@ end
 # Submission -> Local
 # Convert already-launched DTask args to ThunkID. Eager uid == Sch thunk id, so
 # no side table is needed; `istaskstarted` tells us the task has been submitted.
+# N.B. `isa` on the value, not `<:` on `valuetype(arg)`: `Thunk` and `DTask` are
+# concrete, so `isa` is a pointer comparison, while a subtype query on a runtime
+# type goes through the type-matching machinery (`_compute_sparams`,
+# `exists_subtype`), which made it ~90 % of this function's samples, per argument
+# per task.
 function eager_process_elem_submission_to_local!(arg::Argument)
-    T = valuetype(arg)
-    @assert !(T <: Thunk) "Cannot use `Thunk`s in `@spawn`/`spawn`"
-    if T <: DTask
-        task = value(arg)::DTask
+    v = arg.value
+    @assert !(v isa Thunk) "Cannot use `Thunk`s in `@spawn`/`spawn`"
+    if v isa DTask
+        task = v
         if istaskstarted(task)
             #=FIXME:UNIQUE=#
             arg.value = Sch.ThunkID(Int(task.uid), task.thunk_ref)
@@ -457,8 +463,35 @@ function call_signature_key(@nospecialize(f), @nospecialize(arg_types::Tuple))
     return Tuple{typeof(f), arg_types...}
 end
 
-cached_return_type(@nospecialize(f), @nospecialize(arg_types::Tuple)) =
-    cached_return_type(call_signature_key(f, arg_types), f, arg_types)
+# A direct-mapped, lock-free front cache for `cached_return_type`: forming the signature key (`Tuple{typeof(f), arg_types...}`, a
+# dynamic `apply_type`) and looking it up under a global lock was 9 % of the Datadeps planner's own time per task (41 of 447
+# samples, gemm 4096/128). The slot is chosen from the `objectid`s of the types, and a hit must be `===` in `typeof(f)` and in
+# the whole argument-type tuple, so a collision only costs a miss. Slots hold an immutable entry, replaced as a whole (a
+# racing writer can only lose an entry). Same staleness caveat as `RETURN_TYPE_CACHE`: `promote_op` is a pure function of the
+# signature.
+struct ReturnTypeEntry
+    ftype::Any
+    argtypes::Any
+    rt::Any
+end
+const RETURN_TYPE_FAST = Vector{Any}(nothing, 1 << 12)
+@inline function return_type_fast_slot(@nospecialize(f), @nospecialize(arg_types::Tuple))
+    h = UInt(objectid(typeof(f)))
+    for T in arg_types
+        h = (h ⊻ UInt(objectid(T))) * 0x9e3779b97f4a7c15
+    end
+    return Int((h >> 20) & UInt(length(RETURN_TYPE_FAST) - 1)) + 1
+end
+function cached_return_type(@nospecialize(f), @nospecialize(arg_types::Tuple))
+    idx = return_type_fast_slot(f, arg_types)
+    e = @inbounds RETURN_TYPE_FAST[idx]
+    if e isa ReturnTypeEntry && e.ftype === typeof(f) && e.argtypes === arg_types
+        return e.rt::Type
+    end
+    rt = cached_return_type(call_signature_key(f, arg_types), f, arg_types)
+    @inbounds RETURN_TYPE_FAST[idx] = ReturnTypeEntry(typeof(f), arg_types, rt)
+    return rt
+end
 function cached_return_type(@nospecialize(key), @nospecialize(f), @nospecialize(arg_types::Tuple))
     key === nothing && return Base.promote_op(f, arg_types...)
     # `@safe_lock1`, not `lock(...) do`: the closure captures `key`/`f`/`arg_types`
@@ -538,9 +571,14 @@ end
 
 chunktype(t::DTask) = t.metadata.return_type
 
-function eager_launch!(pair::DTaskPair)
-    spec = pair.spec
-    task = pair.task
+# N.B. `DTaskPair.spec` is abstractly typed, so every use of it directly (the
+# `is_typed(spec)` and `spec.fargs` / `spec.options` property calls) is a dynamic
+# dispatch that recomputes the spec's type parameters; about half a dozen per task
+# made the call sites ~90 % of this function's samples. One dispatch here, onto the
+# concrete spec type, leaves everything below statically typed.
+eager_launch!(pair::DTaskPair) = _eager_launch!(pair.spec, pair.task)
+function _eager_launch!(spec::DTaskSpec, task::DTask)
+    @nospecialize spec
 
     # Assign a name, if specified
     eager_assign_name!(spec, task)
@@ -577,12 +615,22 @@ function eager_launch!(pair::DTaskPair)
     task.thunk_ref = thunk_id.ref
 end
 # FIXME: Don't convert Tuple to Vector{Argument}
+# The `Vector{Argument}` of `spec`, with already-launched `DTask` arguments turned into
+# `ThunkID`s; one dynamic dispatch onto the concrete spec type (see `eager_launch!`).
+function _submission_fargs!(spec::DTaskSpec)
+    if is_typed(spec)
+        return Argument[map(Argument, eager_process_args_submission_to_local(spec))...]
+    else
+        eager_process_args_submission_to_local!(spec)
+        return spec.fargs
+    end
+end
 function eager_launch!(pairs::Vector{DTaskPair})
     ntasks = length(pairs)
 
     # Assign a name, if specified
     for pair in pairs
-        eager_assign_name!(pair.spec, pair.task)
+        getfield(getfield(pair.spec, :options), :name) === nothing || eager_assign_name!(pair.spec, pair.task)
     end
 
     #=FIXME:REALLOC_N=#
@@ -592,18 +640,10 @@ function eager_launch!(pairs::Vector{DTaskPair})
     # Get all functions, args/kwargs, and options
     #=FIXME:REALLOC_N=#
     # Lookup DTask -> ThunkID
-    all_fargs = map(pairs) do pair
-        spec = pair.spec
-        if is_typed(spec)
-            return Argument[map(Argument, eager_process_args_submission_to_local(spec))...]
-        else
-            eager_process_args_submission_to_local!(spec)
-            return spec.fargs
-        end
-    end
+    all_fargs = map(pair -> _submission_fargs!(pair.spec), pairs)
     # Propagate DTask return_type into options so created Thunks have chunktype for downstream inference
     all_options = Options[
-        let opts = pair.spec.options
+        let opts = getfield(pair.spec, :options)
             isconcretetype(pair.task.metadata.return_type) ? (o = copy(opts); o.return_type = pair.task.metadata.return_type; o) : opts
         end
         for pair in pairs

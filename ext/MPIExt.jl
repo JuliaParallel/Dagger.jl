@@ -2393,6 +2393,12 @@ end
 mpi_result_space(result, proc::MPIProcessor) =
     MPIMemorySpace(value_memory_space(result), proc.comm, proc.rank)
 
+# The chunk types of a task's arguments as a plain tuple. `map(chunktype, args)` is compiled anew for every
+# tuple type of `args`, i.e. for every new argument count and mix of types a rank meets (80-140 ms each, and
+# a rank sees new ones whenever the data distribution changes: AGENTS.md lesson 149); the callee only needs the
+# types as values (its lookups are `@nospecialize`), so build the tuple without specializing on `args`.
+mpi_arg_types(@nospecialize(args::Tuple)) = ntuple(i -> chunktype(args[i]), length(args))
+
 # Decide how much result metadata execute! must broadcast.
 # - need_type_bcast: return type/space unknown → full (:ok,T,space)/(:error,ex)
 # - !need_type_bcast && nothrow: concrete + proven non-throwing → zero MPI
@@ -2404,8 +2410,8 @@ mpi_result_space(result, proc::MPIProcessor) =
 # N.B. Both inference queries go through Dagger's memos: this runs per task on
 # every rank, and an uncached compiler invocation per dispatch costs far more than
 # the task bodies it is deciding about.
-function mpi_execute_bcast_plan(f, args, proc::MPIProcessor)
-    arg_types = map(chunktype, args)
+function mpi_execute_bcast_plan(f, @nospecialize(args), proc::MPIProcessor)
+    arg_types = mpi_arg_types(args)
     # One key for both memo lookups: building it splats `arg_types` into a
     # `Type` and allocates, and this runs per task on every rank.
     key = Dagger.call_signature_key(f, arg_types)

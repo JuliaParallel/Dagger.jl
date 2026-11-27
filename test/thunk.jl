@@ -425,3 +425,40 @@ end
         @test Dagger.fetch_all(fetch(t; raw=true)) == 2
     end
 end
+
+@testset "cached_return_type: lock-free front cache" begin
+    g1(x) = x + 1; g2(x, y) = x * y; g3(x::Int) = string(x)
+    sigs = Any[(g1, (Int,)), (g1, (Float64,)), (g2, (Int, Int)), (g2, (Float64, Int)), (g3, (Int,)), (g1, (Matrix{Float64},))]
+    for _ in 1:3, (f, ats) in sigs
+        @test Dagger.cached_return_type(f, ats) == Base.promote_op(f, ats...)
+    end
+    # far more signatures than slots: every answer must stay exact (a collision is a miss, never a wrong hit)
+    for i in 1:6000
+        T = NTuple{i % 17 + 1, Int}
+        @test Dagger.cached_return_type(identity, (T,)) == T
+    end
+    # an argument type of Union{} (an upstream task inferred never to return) is answered, not cached wrongly
+    @test Dagger.cached_return_type(g1, (Union{},)) == Base.promote_op(g1, Union{})
+end
+
+# A task with many arguments (a variable-length splat above all) must not pay a compile of the typed submit path for every new number of arguments: 80-140 ms each on a
+# laptop, seen as a 0.23 s stall of half the ranks of a Barnes-Hut run (the first step that needed a longer merge). Above `TYPED_SPAWN_MAX_ARGS` the macro takes the untyped path.
+@everywhere begin
+    struct SplatBox; n::Int; end
+    splat_sum(xs::SplatBox...) = SplatBox(sum(x.n for x in xs))
+end
+@testset "Spawn with many arguments does not specialize the typed submit path per length" begin
+    # the argument-tuple lengths of the specializations Dagger has compiled for the typed entry point
+    typed_lengths() = Set(begin
+                              m = match(r"NTuple\{(\d+),", string(mi.specTypes))
+                              m === nothing ? 0 : parse(Int, m.captures[1])
+                          end for mi in Base.specializations(only(methods(Dagger._typed_spawn_owned))))
+    spawn_n(k) = fetch(Dagger.@spawn splat_sum([Dagger.@spawn(SplatBox(i)) for i in 1:k]...)).n
+    kc = Dagger.TYPED_SPAWN_MAX_ARGS                               # the longest task that still goes the typed way
+    @test spawn_n(kc) == sum(1:kc)
+    @test kc in typed_lengths()                                    # (control: the check can see a specialization)
+    for k in (Dagger.TYPED_SPAWN_MAX_ARGS + 1, Dagger.TYPED_SPAWN_MAX_ARGS + 4, 14)
+        @test spawn_n(k) == sum(1:k)                              # correct ...
+        @test !(k in typed_lengths())                             # ... and no typed specialization for that length
+    end
+end

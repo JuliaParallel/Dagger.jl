@@ -725,7 +725,19 @@ function _collect_aliased_args_range!(task_metas::Vector{HierarchicalTaskMeta},
                                       task_to_idx::IdDict{DTask,Int})
     for task_idx in range
         pair = seen_tasks[task_idx]
-        spec = pair.spec
+        # One dispatch onto the concrete spec type per task (see `eager_launch!`)
+        task_metas[task_idx] = _collect_task_meta!(
+            pair.spec, pair, task_idx, unique_arg_ws, supports_cache, raw_arg_cache,
+            cache_lock, task_to_idx)
+    end
+end
+function _collect_task_meta!(spec::DTaskSpec, pair::DTaskPair, task_idx::Int,
+                             unique_arg_ws::Dict{ArgumentWrapper,ArgumentWrapper},
+                             supports_cache::IdDict{Any,Bool},
+                             raw_arg_cache::IdDict{Any,Any},
+                             cache_lock::Union{ReentrantLock,Nothing},
+                             task_to_idx::IdDict{DTask,Int})
+    let
         task = pair.task
         fargs = spec.fargs
 
@@ -736,68 +748,92 @@ function _collect_aliased_args_range!(task_metas::Vector{HierarchicalTaskMeta},
         task_inplace = false
 
         for arg_idx in (is_typed(spec) ? (1:length(fargs)) : eachindex(fargs))
-            _arg = fargs[arg_idx]
-            _arg_with_deps = value(_arg)
-
-            arg_pre_unwrap, deps = unwrap_inout(_arg_with_deps)
-
-            # An unlaunched `DTask` argument cannot be `fetch`ed here -- that is
-            # what `distribute_task!` does later, once the producer has actually
-            # been submitted. For a *same-region* producer we record a value
-            # dependency, which `build_dependency_dag` turns into a hard edge;
-            # aliasing of its result is picked up in `distribute_task!`.
-            #
-            # N.B. An unlaunched producer from *outside* the region (`pred_idx ==
-            # 0`, reachable when the region is nested inside a `spawn_bulk` that
-            # has not flushed) is skipped entirely: no value dep and no aliasing
-            # entry. `distribute_task!` still fetches and tracks it, so the task
-            # itself is correct, but it contributes no DAG edges -- so if another
-            # in-region task aliases the same underlying data, the dependency
-            # between them is missed. Handling this needs the pre-scan to be able
-            # to wait on out-of-region producers.
-            if arg_pre_unwrap isa DTask && !istaskstarted(arg_pre_unwrap)
-                pred_idx = get(task_to_idx, arg_pre_unwrap, 0)
-                if pred_idx != 0 && pred_idx != task_idx
-                    push!(value_deps, pred_idx)
-                end
-                continue
-            end
-
-            arg = arg_pre_unwrap isa DTask ? fetch(arg_pre_unwrap; raw=true) : arg_pre_unwrap
-
-            may_alias = type_may_alias(typeof(arg))
-            inplace_move = may_alias && _cached_get!(supports_cache, cache_lock, arg) do
-                supports_inplace_move(arg)
-            end
-
-            if !may_alias || !inplace_move
-                continue
-            end
-
-            arg_chunk = _cached_get!(raw_arg_cache, cache_lock, arg) do
-                # Match `populate_task_info!`: acceleration-aware wrap (MPIRef
-                # under MPI) rather than a bare `tochunk` that can produce a
-                # rank-local DRef when TLS acceleration is unset.
-                arg isa Chunk ? arg : datadeps_arg_wrap(arg)
-            end
-
-            if first_chunk === nothing
+            # N.B. Function barrier: `fargs[arg_idx]` is abstract here, and the
+            # fetched argument below is `Any`, so processing them inline makes
+            # `type_may_alias`, `unwrap_inout`'s result, the cache closures and
+            # `ArgumentWrapper` dynamic dispatches -- once per argument per
+            # task, on the serial (MPI) pre-pass. See `_populate_one_arg!`.
+            arg_chunk = _collect_arg_meta!(all_deps, value_deps, unique_arg_ws,
+                                           supports_cache, raw_arg_cache, cache_lock,
+                                           task_to_idx, task_idx, fargs[arg_idx])
+            if arg_chunk !== nothing && first_chunk === nothing
                 first_chunk = arg_chunk
                 task_may_alias = true
                 task_inplace = true
             end
-
-            for (dep_mod, readdep, writedep) in deps
-                arg_w = ArgumentWrapper(arg_chunk, dep_mod)
-                unique_arg_ws[arg_w] = arg_w
-                push!(all_deps, HierarchicalTaskInfo(arg_w, readdep, writedep))
-            end
         end
 
-        task_metas[task_idx] = HierarchicalTaskMeta(
+        return HierarchicalTaskMeta(
             pair, first_chunk, task_may_alias, task_inplace, all_deps, value_deps
         )
     end
+end
+
+# Per-argument body of `_collect_task_meta!`. Returns the argument's `Chunk` (or
+# raw handle) when it aliases and supports in-place move, else `nothing`.
+function _collect_arg_meta!(all_deps::Vector{HierarchicalTaskInfo}, value_deps::Vector{Int},
+                            unique_arg_ws::Dict{ArgumentWrapper,ArgumentWrapper},
+                            supports_cache::IdDict{Any,Bool}, raw_arg_cache::IdDict{Any,Any},
+                            cache_lock::Union{ReentrantLock,Nothing},
+                            task_to_idx::IdDict{DTask,Int}, task_idx::Int, _arg)
+    _arg_with_deps = value(_arg)
+    arg_pre_unwrap, deps = unwrap_inout(_arg_with_deps)
+
+    # An unlaunched `DTask` argument cannot be `fetch`ed here -- that is what
+    # `distribute_task!` does later, once the producer has actually been
+    # submitted. For a *same-region* producer we record a value dependency,
+    # which `build_dependency_dag` turns into a hard edge; aliasing of its
+    # result is picked up in `distribute_task!`.
+    #
+    # N.B. An unlaunched producer from *outside* the region (`pred_idx == 0`,
+    # reachable when the region is nested inside a `spawn_bulk` that has not
+    # flushed) is skipped entirely: no value dep and no aliasing entry.
+    # `distribute_task!` still fetches and tracks it, so the task itself is
+    # correct, but it contributes no DAG edges -- so if another in-region task
+    # aliases the same underlying data, the dependency between them is missed.
+    # Handling this needs the pre-scan to be able to wait on out-of-region
+    # producers.
+    if arg_pre_unwrap isa DTask
+        if !istaskstarted(arg_pre_unwrap)
+            pred_idx = get(task_to_idx, arg_pre_unwrap, 0)
+            if pred_idx != 0 && pred_idx != task_idx
+                push!(value_deps, pred_idx)
+            end
+            return nothing
+        end
+        # The fetched value's type is unknown; the barrier below specializes on it.
+        return _collect_arg_value!(all_deps, unique_arg_ws, supports_cache, raw_arg_cache,
+                                   cache_lock, fetch(arg_pre_unwrap; raw=true), deps)
+    end
+    return _collect_arg_value!(all_deps, unique_arg_ws, supports_cache, raw_arg_cache,
+                               cache_lock, arg_pre_unwrap, deps)
+end
+function _collect_arg_value!(all_deps::Vector{HierarchicalTaskInfo},
+                             unique_arg_ws::Dict{ArgumentWrapper,ArgumentWrapper},
+                             supports_cache::IdDict{Any,Bool}, raw_arg_cache::IdDict{Any,Any},
+                             cache_lock::Union{ReentrantLock,Nothing}, arg, deps)
+    may_alias = type_may_alias(typeof(arg))
+    inplace_move = may_alias && _cached_get!(supports_cache, cache_lock, arg) do
+        supports_inplace_move(arg)
+    end
+
+    if !may_alias || !inplace_move
+        return nothing
+    end
+
+    arg_chunk = _cached_get!(raw_arg_cache, cache_lock, arg) do
+        # Match `populate_task_info!`: acceleration-aware wrap (MPIRef under
+        # MPI) rather than a bare `tochunk` that can produce a rank-local DRef
+        # when TLS acceleration is unset.
+        arg isa Chunk ? arg : datadeps_arg_wrap(arg)
+    end
+
+    for (dep_mod, readdep, writedep) in deps
+        arg_w = ArgumentWrapper(arg_chunk, dep_mod)
+        unique_arg_ws[arg_w] = arg_w
+        push!(all_deps, HierarchicalTaskInfo(arg_w, readdep, writedep))
+    end
+    return arg_chunk
 end
 
 """
@@ -1164,7 +1200,7 @@ function partition_dag(dag::SimpleDiGraph, task_metas::Vector{HierarchicalTaskMe
         read_affinity = zeros(Int, n_owners)
         for v in 1:n
             meta = task_metas[v]
-            task_scope = @something(meta.pair.spec.options.compute_scope, meta.pair.spec.options.scope, default_scope)
+            task_scope = @something(getfield(getfield(meta.pair.spec, :options), :compute_scope), getfield(getfield(meta.pair.spec, :options), :scope), default_scope)
 
             # Owners whose processors are eligible under this task's scope.
             # A non-default scope that spans multiple owners must still spread
@@ -1243,7 +1279,7 @@ function partition_dag(dag::SimpleDiGraph, task_metas::Vector{HierarchicalTaskMe
         partition_load = zeros(Int, n_partitions)
         for v in topo
             meta = task_metas[v]
-            task_scope = @something(meta.pair.spec.options.compute_scope, meta.pair.spec.options.scope, default_scope)
+            task_scope = @something(getfield(getfield(meta.pair.spec, :options), :compute_scope), getfield(getfield(meta.pair.spec, :options), :scope), default_scope)
 
             if task_scope != default_scope
                 assigned = false
@@ -1315,13 +1351,16 @@ function _schedule_vertex!(v::Int, partition_id::Int,
     spec = pair.spec
     task = pair.task
 
-    if spec.options.syncdeps === nothing
-        spec.options.syncdeps = Set{ThunkSyncdep}()
+    # N.B. `spec` is abstractly typed here (`DTaskPair.spec`); read `options` with
+    # `getfield` rather than the dispatching `spec.options` (see `eager_launch!`)
+    opts = getfield(spec, :options)
+    if opts.syncdeps === nothing
+        opts.syncdeps = Set{ThunkSyncdep}()
     end
     for pred_v in inneighbors(dag, v)
         if vertex_to_partition[pred_v] != partition_id
             pred_task = seen_tasks[pred_v].task
-            push!(spec.options.syncdeps, ThunkSyncdep(pred_task))
+            push!(opts.syncdeps, ThunkSyncdep(pred_task))
         end
     end
 
