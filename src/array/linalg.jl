@@ -320,16 +320,17 @@ function _chkfinite_chunk(A)
     return nothing
 end
 
+# The check only ever throws (a non-finite tile fails its task, and the region's wait rethrows it), so the tasks
+# return nothing and write nothing. A `Ref` per tile as `Out` made Datadeps track and copy back one object per tile,
+# which under MPI cost 0.059 s of a 0.158 s `lunp` (2 ranks x 4 threads, 2048^2, 128^2 tiles) against 0.007 s in shared memory.
 function LinearAlgebra.LAPACK.chkfinite(A::DArray)
     Ac = A.chunks
-    chunk_finite = [Ref(true) for _ in Ac]
-    chkfinite!(finite, A) = (_chkfinite_chunk(A); finite[] = true)
     Dagger.spawn_datadeps() do
         for idx in eachindex(Ac)
-            Dagger.@spawn chkfinite!(Out(chunk_finite[idx]), In(Ac[idx]))
+            Dagger.@spawn _chkfinite_chunk(In(Ac[idx]))
         end
     end
-    return all(getindex, chunk_finite)
+    return true
 end
 
 DMatrix{T}(::LinearAlgebra.UniformScaling, m::Int, n::Int, IBlocks::Blocks) where T = DMatrix(Matrix{T}(I, m, n), IBlocks)

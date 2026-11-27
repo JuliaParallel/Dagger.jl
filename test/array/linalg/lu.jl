@@ -118,3 +118,16 @@ end
     # Singular Values
     @test_throws LinearAlgebra.SingularException lu(ones(Blocks(64,64), T, 128, 128)) # FIXME: NoPivot needs to handle info
 end
+
+# A non-finite tile must fail the factorization (the check tasks write nothing, so the failure is the only signal)
+@testset "chkfinite" begin
+    A = rand(128, 128) + 128I
+    good = view(A, Blocks(64, 64))
+    @test LinearAlgebra.LAPACK.chkfinite(good)
+    for bad_val in (NaN, Inf)
+        B = copy(A); B[100, 33] = bad_val
+        bad = view(B, Blocks(64, 64))
+        @test_throws Dagger.DTaskFailedException LinearAlgebra.LAPACK.chkfinite(bad)
+        @test_throws Dagger.DTaskFailedException lu(bad, NoPivot())
+    end
+end

@@ -1023,3 +1023,18 @@ lesson.
     and MPI paths. When diagnosing MPI uniformity errors, check for an earlier
     task failure that left ranks on different operations. Compare the actual
     Julia versions behind rolling CI labels such as `pre`.
+
+99. **Once a copy is skipped on `arg_current`, every entry in it must be exact.**
+    On its own, the Datadeps history over-copies but never under-copies: a copy
+    looks like a write into its destination, so a replica made by a copy gets
+    copied back and forth. `compute_remainder_for_arg!` therefore skips the copy
+    when `arg_current` lists the target space. That turns `arg_current` from a
+    region-end hint (where a wrong entry was hidden by an overlapping argument's
+    own write-back) into something a mid-region reader trusts. A wrong entry is
+    then a silent stale read, and the final data still comes out correct. The
+    trap is "no entry means current at the origin": an overlapping write made
+    before an argument was first seen is in its merged history but never created
+    an entry. Every place that creates an entry must check the history
+    (`origin_holds_latest`). Test with views: write one on another worker, first
+    touch an overlapping one afterwards, then read it at its origin mid-region,
+    and check the task's result, not just the array after the region.

@@ -1286,9 +1286,30 @@ function gather_free_syncdeps!(state::DataDepsState, space::MemorySpace, buf_ain
     assert_free_syncdeps!(state, wrapped, write_num, syncdeps)
     return
 end
+# Whether the origin space of `arg_w` still holds its latest bytes: every write in
+# its history (direct, or through an overlapping argument) happened there. This is
+# what an argument without an `arg_current` entry may assume. An overlapping write
+# made before `arg_w` was first seen is in its history (merged when its aliasing
+# was populated) but never created an entry, so "no entry" alone does not mean
+# "current at the origin". `compute_remainder_for_arg!` skips copies on the strength
+# of `arg_current`, so a space wrongly listed there means a task reads stale data.
+# A copy elsewhere also counts as a non-origin entry: that only costs a copy later.
+function origin_holds_latest(state::DataDepsState, arg_w::ArgumentWrapper)
+    origin = state.arg_origin[arg_w.arg]
+    for entry in state.arg_history[arg_w]
+        entry.space == origin || return false
+    end
+    return true
+end
 function add_writer!(state::DataDepsState, arg_w::ArgumentWrapper, dest_space::MemorySpace, ainfo::AbstractAliasing, task::WriterProducer, write_num; copied::Bool=false)
     state.ainfos_owner[ainfo] = task=>write_num
     empty!(state.ainfos_readers[ainfo])
+
+    # A copy into an argument that has no currency record yet starts from the
+    # origin only if the origin still holds its latest bytes. Decide before the
+    # history is cleared below.
+    origin_current = copied && !haskey(state.arg_current, arg_w) &&
+                     origin_holds_latest(state, arg_w)
 
     # Clear the history for this target, since this is a new write event
     empty!(state.arg_history[arg_w])
@@ -1319,18 +1340,26 @@ function add_writer!(state::DataDepsState, arg_w::ArgumentWrapper, dest_space::M
             if other_current !== nothing
                 intersect!(other_current, (dest_space,))
             else
-                # Lazily-tracked args are current only at their origin
+                # Lazily-tracked args are current only at their origin, and only
+                # if no write elsewhere is in their history (this write, already
+                # recorded above, is in `dest_space`)
                 other_origin = state.arg_origin[other_arg_w.arg]
-                state.arg_current[other_arg_w] = other_origin == dest_space ?
-                    Set{MemorySpace}((dest_space,)) : Set{MemorySpace}()
+                other_set = Set{MemorySpace}()
+                if other_origin == dest_space && origin_holds_latest(state, other_arg_w)
+                    push!(other_set, dest_space)
+                end
+                state.arg_current[other_arg_w] = other_set
             end
         end
     else
         # Copy: the destination joins the current set; the source (and any
         # other current replica) stays current, and since a copy only moves
         # already-canonical bytes, overlapping arguments are unaffected
-        current = get!(state.arg_current, arg_w) do
-            Set{MemorySpace}((state.arg_origin[arg_w.arg],))
+        current = get(state.arg_current, arg_w, nothing)
+        if current === nothing
+            current = Set{MemorySpace}()
+            origin_current && push!(current, state.arg_origin[arg_w.arg])
+            state.arg_current[arg_w] = current
         end
         push!(current, dest_space)
     end

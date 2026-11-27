@@ -1209,6 +1209,104 @@ end
     end
 end
 
+@everywhere read_only_sum(X) = (sum(X); nothing)
+@testset "A copied replica is not copied again" begin
+    # A copy leaves the history holding only the copy into its destination, so
+    # a reader in the *other* space used to see "the owner is over there" and
+    # copy the unchanged data back, and again forward for the next reader.
+    if nprocs() >= 2
+        w_home = myid()
+        w_other = first(workers())
+        @test w_home != w_other
+        A = rand(4, 4)
+        logs = with_logs() do
+            Dagger.spawn_datadeps() do
+                for i in 1:6
+                    w = isodd(i) ? w_other : w_home
+                    Dagger.@spawn scope=Dagger.scope(worker=w) read_only_sum(In(A))
+                end
+            end
+        end
+        ncopies = 0
+        for wl in keys(logs)
+            _logs = logs[wl]
+            for idx in 1:length(_logs[:core])
+                core_log = _logs[:core][idx]
+                if core_log.category == :datadeps_copy && core_log.kind == :finish
+                    ncopies += 1
+                end
+            end
+        end
+        @test ncopies == 1
+
+        # A write invalidates the other replica: the next reader there copies again.
+        B = zeros(4, 4)
+        logs = with_logs() do
+            Dagger.spawn_datadeps() do
+                Dagger.@spawn scope=Dagger.scope(worker=w_other) read_only_sum(In(B))
+                Dagger.@spawn scope=Dagger.scope(worker=w_home) mut_V!(InOut(B))
+                Dagger.@spawn scope=Dagger.scope(worker=w_other) read_only_sum(In(B))
+                Dagger.@spawn scope=Dagger.scope(worker=w_home) read_only_sum(In(B))
+            end
+        end
+        ncopies = 0
+        for wl in keys(logs)
+            _logs = logs[wl]
+            for idx in 1:length(_logs[:core])
+                core_log = _logs[:core][idx]
+                if core_log.category == :datadeps_copy && core_log.kind == :finish
+                    ncopies += 1
+                end
+            end
+        end
+        # copy out, (write at home), copy out again after the write
+        @test ncopies == 2
+        @test all(==(1), B)
+    end
+end
+
+@everywhere set_to!(Y, v) = (Y .= v; nothing)
+@everywhere collect_view(V) = collect(V)
+@testset "First seen after an overlapping write elsewhere: not current at the origin" begin
+    # An argument has no `arg_current` entry until something writes or copies
+    # it, but an overlapping write made before it was first seen is already in
+    # its history. Its origin must not be taken as current then: copies are
+    # skipped on the strength of `arg_current`, so the reader would see stale data.
+    if nprocs() >= 2
+        w_home = myid()
+        w_b = first(workers())
+        # Task-write path: W (inside V) is written at V's origin, which used to
+        # mark V current there although M's write on `w_b` overlaps V.
+        X = zeros(10)
+        M = view(X, 1:5); V = view(X, 2:4); W = view(X, 3:3)
+        r = Ref{Any}()
+        Dagger.spawn_datadeps() do
+            Dagger.@spawn scope=Dagger.scope(worker=w_b) set_to!(InOut(M), 1.0)
+            Dagger.@spawn scope=Dagger.scope(worker=w_b) collect_view(In(V))  # V first seen; no copy needed on w_b
+            Dagger.@spawn scope=Dagger.scope(worker=w_home) set_to!(InOut(W), 2.0)
+            r[] = Dagger.@spawn scope=Dagger.scope(worker=w_home) collect_view(In(V))
+        end
+        @test fetch(r[]) == [1.0, 2.0, 1.0]
+        @test X[1:6] == [1.0, 1.0, 2.0, 1.0, 1.0, 0.0]
+    end
+    if nprocs() >= 3
+        w_home = myid()
+        w_b, w_c = workers()[1], workers()[2]
+        # Copy path: V is first seen when it is copied to `w_c`, which used to
+        # list V's origin as current alongside `w_c`.
+        X = zeros(10)
+        M = view(X, 1:5); V = view(X, 2:4)
+        r = Ref{Any}()
+        Dagger.spawn_datadeps() do
+            Dagger.@spawn scope=Dagger.scope(worker=w_b) set_to!(InOut(M), 1.0)
+            Dagger.@spawn scope=Dagger.scope(worker=w_c) collect_view(In(V))  # V first seen; copied to w_c
+            r[] = Dagger.@spawn scope=Dagger.scope(worker=w_home) collect_view(In(V))
+        end
+        @test fetch(r[]) == [1.0, 1.0, 1.0]
+        @test X[1:6] == [1.0, 1.0, 1.0, 1.0, 1.0, 0.0]
+    end
+end
+
 # Regression tests for the free-syncdeps hole: `gather_free_syncdeps!`
 # (src/datadeps/aliasing.jl) must never hand back an empty syncdep set while
 # some task could still be reading or writing the buffer about to be freed.
