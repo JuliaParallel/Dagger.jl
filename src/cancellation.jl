@@ -188,8 +188,8 @@ function _cancel!(state, tid, force, graceful, halt_sch)
     for wid in wids
         remotecall_fetch(wid, tid, sch_uid, force) do _tid, sch_uid, force
             states = Dagger.Sch.proc_states(sch_uid)
-            MemPool.lock_read(states.lock) do
-                for (proc, state) in states.dict
+            let
+                for (proc, state) in (@atomic states.snap)
                     istate = state.state
                     any_cancelled = false
                     @lock istate.queue begin
@@ -269,6 +269,7 @@ function _cancel!(state, tid, force, graceful, halt_sch)
                             any_cancelled = true
                             push!(istate.cancelled, tid_q)
                             delete!(raw_queue, task_spec)
+                            Threads.atomic_sub!(states.queued, 1)
                             # Clean up TASKS_RUNNING so re-submission works if needed
                             lock(Dagger.Sch.TASK_SYNC) do
                                 pop!(Dagger.Sch.TASKS_RUNNING, tid_q, nothing)

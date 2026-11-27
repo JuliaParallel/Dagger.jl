@@ -382,15 +382,14 @@ end
 function _cleanup_proc(uid, log_sink)
     empty!(CHUNK_CACHE) # FIXME: Should be keyed on uid!
     states = proc_states(uid)
-    MemPool.lock_read(states.lock) do
-        for (proc, state) in states.dict
-            istate = state.state
-            istate.done[] = true
-            notify(istate.reschedule)
-        end
+    for (proc, state) in (@atomic states.snap)
+        istate = state.state
+        istate.done[] = true
+        notify(istate.reschedule)
     end
     MemPool.lock(states.lock) do
         empty!(states.dict)
+        @atomic states.snap = Dict{Processor,ProcessorState}()
         Threads.atomic_add!(states.version, 1)
     end
 end
@@ -539,29 +538,32 @@ function scheduler_init(ctx, state::ComputeState, d::Thunk, options::SchedulerOp
     end
 end
 
-"""
-    handle_result!(ctx, state, pid, proc, thunk_id, res, metadata)
+function update_cost_model!(state, pid, proc, sig, metadata)
+    lock(state.signature_time_cost) do stc
+        stc[sig] = (metadata.threadtime + get(stc, sig, 0)) ÷ 2
+    end
+    lock(state.signature_alloc_cost) do sac
+        sac[sig] = (metadata.gc_allocd + get(sac, sig, 0)) ÷ 2
+    end
+    if metadata.transfer_rate !== nothing
+        lock(state.worker_transfer_rate) do wtr
+            old_rate = get(get(wtr, pid, Dict{Processor,UInt64}()), proc, UInt64(0))
+            proc_map = get!(wtr, pid) do; Dict{Processor,UInt64}(); end
+            proc_map[proc] = old_rate == 0 ? metadata.transfer_rate :
+                                             (old_rate + metadata.transfer_rate) ÷ 2
+        end
+    end
+    return
+end
 
-Handle one completed task end-to-end: release its reserved pressure, fold its
-cost-model metadata back in, store its result (single-finisher CAS), run its
-checkpoint, finish it (`finish_task!`), and schedule any newly-ready dependents
-**outside** `state.lock` (via `schedule_ready!`).
 
-This is the runner-callable finish entry point. It is invoked both:
-- from `scheduler_run` for results that travel over `state.chan` (cross-worker
-  results, cancellation signals), and
-- directly on the producing worker thread for in-process results (the local
-  fast-path in `DoTaskSpec`), so N worker threads can finish N tasks
-  concurrently.
-
-The only serialized region is the brief `state.lock` critical section; the
-dependent placement runs lock-free and in parallel. `ProcessExitedException`
-(worker death) is *not* handled here — it arrives only over the channel and is
-handled by `scheduler_run`.
-"""
-function handle_result!(ctx, state::ComputeState, pid, proc, thunk_id, res, metadata)
-    ready = Thunk[]
-    proceed = lock(state.lock) do
+# The `state.lock` critical section of `handle_result!`. Returns `nothing` when
+# the result was dropped (untracked task, lost single-finisher CAS), else the
+# task's signature (`missing` without metadata) for the cost-model update.
+# A function, not a `do` block, so nothing is captured and boxed.
+function finish_result_locked!(ctx, state::ComputeState, thunk_id, res, metadata, ready::Vector{Thunk})
+    lock(state.lock)
+    try
         thunk_failed = false
         if res isa Exception
             # A non-fault task error. In allow-errors mode we propagate it to the
@@ -586,58 +588,18 @@ function handle_result!(ctx, state::ComputeState, pid, proc, thunk_id, res, meta
             #      Thunk was GC'd, and the result arrived just after.
             # Ignore it rather than crashing the scheduler.
             @dagdebug thunk_id :take "Ignoring result for untracked or GC'd task"
-            return false
+            return nothing
         end
-        # Release the reserved pressure via the captured counter ref
-        # (capture-the-ref invariant: same Atomic object as was atomic_add!'d
-        # at schedule time, stable even if the worker was removed between
-        # reserve and release).
-        entry = lock(state.running_pressure_refs) do rpr
-            pop!(rpr, thunk_id, nothing)
-        end
-        if entry !== nothing
-            counter_ref, est = entry
-            Threads.atomic_sub!(counter_ref, est)
-        end
-        if metadata !== nothing
-            #to_storage = fetch(node.options.storage)
-            #state.worker_storage_pressure[pid][to_storage] = metadata.storage_pressure
-            #state.worker_storage_capacity[pid][to_storage] = metadata.storage_capacity
-            #state.worker_loadavg[pid] = metadata.loadavg
-            sig = signature(state, node)
-            lock(state.signature_time_cost) do stc
-                stc[sig] = (metadata.threadtime + get(stc, sig, 0)) ÷ 2
-            end
-            lock(state.signature_alloc_cost) do sac
-                sac[sig] = (metadata.gc_allocd + get(sac, sig, 0)) ÷ 2
-            end
-            if metadata.transfer_rate !== nothing
-                lock(state.worker_transfer_rate) do wtr
-                    old_rate = get(get(wtr, pid, Dict{Processor,UInt64}()), proc, UInt64(0))
-                    proc_map = get!(wtr, pid) do; Dict{Processor,UInt64}(); end
-                    proc_map[proc] = old_rate == 0 ? metadata.transfer_rate :
-                                                     (old_rate + metadata.transfer_rate) ÷ 2
-                end
-            end
-        end
-        if res isa Chunk && res.handle isa DRef
-            lock(state.equiv_chunks) do ec
-                existing = get(ec, res.handle, nothing)
-                if existing === nothing || existing.value === nothing
-                    # N.B. The value is a WeakRef: a strong Chunk value would
-                    # root its own key (chunk.handle === key), making the
-                    # WeakKeyDict entry — and the result data behind the DRef —
-                    # immortal
-                    ec[res.handle] = WeakRef(res)
-                end
-            end
-        end
+        # The signature is memoized on the node, which is recycled by
+        # `finish_task!` below: read it now, fold it into the cost model after
+        # unlocking.
+        sig = metadata !== nothing ? signature(state, node) : missing
         won = store_result!(state, node, res; error=thunk_failed)
         if !won
             # The single-finisher CAS lost: another path (cancellation,
             # fault recovery) already stored a result. Discard this one.
             @dagdebug thunk_id :take "Ignoring duplicate result for already-finished task"
-            return false
+            return nothing
         end
         if node.options !== nothing && node.options.checkpoint !== nothing
             try
@@ -650,9 +612,67 @@ function handle_result!(ctx, state::ComputeState, pid, proc, thunk_id, res, meta
         @logstart ctx LogFinish LogFinishId(state.uid, thunk_id) (;thunk_id, result=res)
         finish_task!(ctx, state, node, thunk_failed, ready)
         @logfinish ctx LogFinish LogFinishId(state.uid, thunk_id) (;thunk_id, result=res)
-        return true
+        return sig
+    finally
+        unlock(state.lock)
     end
-    proceed || return
+end
+
+"""
+    handle_result!(ctx, state, pid, proc, thunk_id, res, metadata)
+
+Handle one completed task end-to-end: release its reserved pressure, fold its
+cost-model metadata back in, store its result (single-finisher CAS), run its
+checkpoint, finish it (`finish_task!`), and schedule any newly-ready dependents
+**outside** `state.lock` (via `schedule_ready!`).
+
+This is the runner-callable finish entry point. It is invoked both:
+- from `scheduler_run` for results that travel over `state.chan` (cross-worker
+  results, cancellation signals), and
+- directly on the producing worker thread for in-process results (the local
+  fast-path in `DoTaskSpec`), so N worker threads can finish N tasks
+  concurrently.
+
+The only serialized region is the brief `state.lock` critical section; the
+dependent placement runs lock-free and in parallel. `ProcessExitedException`
+(worker death) is *not* handled here — it arrives only over the channel and is
+handled by `scheduler_run`.
+"""
+function handle_result!(ctx, state::ComputeState, pid, proc, thunk_id, res, metadata)
+    ready = Thunk[]
+    # Work that touches only its own locked maps (not task state) runs before
+    # `state.lock` is taken, so it neither lengthens the critical section nor
+    # waits behind other finishers.
+    #
+    # Release the reserved pressure via the captured counter ref
+    # (capture-the-ref invariant: same Atomic object as was atomic_add!'d
+    # at schedule time, stable even if the worker was removed between
+    # reserve and release). `pop!` makes a double release (cancellation
+    # also releases) harmless.
+    entry = lock(state.running_pressure_refs) do rpr
+        pop!(rpr, thunk_id, nothing)
+    end
+    if entry !== nothing
+        counter_ref, est = entry
+        Threads.atomic_sub!(counter_ref, est)
+    end
+    if res isa Chunk && res.handle isa DRef
+        lock(state.equiv_chunks) do ec
+            existing = get(ec, res.handle, nothing)
+            if existing === nothing || existing.value === nothing
+                # N.B. The value is a WeakRef: a strong Chunk value would
+                # root its own key (chunk.handle === key), making the
+                # WeakKeyDict entry — and the result data behind the DRef —
+                # immortal
+                ec[res.handle] = WeakRef(res)
+            end
+        end
+    end
+    sig = finish_result_locked!(ctx, state, thunk_id, res, metadata, ready)
+    sig === nothing && return
+    # Cost-model feedback, before the dependents are placed (they may share
+    # the signature). Own locks only.
+    sig === missing || update_cost_model!(state, pid, proc, sig, metadata)
 
     # Schedule newly-ready dependents with NO state.lock held — concurrent
     # finishers place their freed dependents in parallel.
@@ -1115,10 +1135,22 @@ concurrently across threads.
     # N.B. Explicit lock/try/finally rather than a `do`-closure: the closure
     # captured `scheduled`/`best_loc`/`best_spec` (all assigned in the loop
     # above), which forced a Core.Box for each per call.
+    # The common task (no `restore` callback) is only marked running under the lock; its spec is
+    # built and launched after the lock is released, which is most of what this section did.
+    fire_unlocked = false
+    fire_chans = nothing
     lock(state.lock)
     try
         if scheduled
-            fire_tasks!(ctx, best_loc, [best_spec], state, restore_ready)
+            if task.options.restore === nothing
+                @atomic task.running = true
+                task.running_on = best_loc.gproc
+                @assert !has_result(state, task)
+                fire_chans = state.worker_chans[root_worker_id(best_loc.gproc)]
+                fire_unlocked = true
+            else
+                fire_tasks!(ctx, best_loc, [best_spec], state, restore_ready)
+            end
         else
             ex = SchedulingException("No processors available, try widening scope")
             set_failed!(state, task; ex)
@@ -1132,6 +1164,7 @@ concurrently across threads.
     finally
         unlock(state.lock)
     end
+    fire_unlocked && fire_tasks!(ctx, best_loc, [best_spec], state, restore_ready, true, fire_chans)
     schedule_ready!(state, restore_ready, procs)
 end
 
@@ -1339,7 +1372,12 @@ function reset_task_spec!(task::TaskSpec)
     return task
 end
 
-@reuse_scope function fire_tasks!(ctx, task_loc::ScheduleTaskLocation, task_specs::Vector{ScheduleTaskSpec}, state, ready::Vector{Thunk})
+# `premarked`: the caller already marked every thunk running (under `state.lock`) and looked up
+# the destination worker's channels (`chans`), and none has a `restore` callback, so this
+# builds and launches the specs without holding the lock. Cancellation copes with a thunk
+# that is marked running but not yet registered at its processor (`pre_cancelled`), a window
+# the asynchronous launch below always had.
+@reuse_scope function fire_tasks!(ctx, task_loc::ScheduleTaskLocation, task_specs::Vector{ScheduleTaskSpec}, state, ready::Vector{Thunk}, premarked::Bool=false, chans=nothing)
     gproc, proc = task_loc.gproc, task_loc.proc
     to_send = @reusable_vector :fire_tasks!_to_send Union{TaskSpec,Nothing} nothing 1024
 
@@ -1369,16 +1407,18 @@ end
 
     for task_spec in task_specs
         thunk = task_spec.task
-        @atomic thunk.running = true
-        thunk.running_on = gproc
+        if !premarked
+            @atomic thunk.running = true
+            thunk.running_on = gproc
+        end
         # N.B. `running_count` was already incremented for `thunk` when it was
         # placed into a `ready_out` buffer (see `schedule_dependents!` /
         # `reschedule_syncdeps!` / `start_state`) — not here — so that the
         # increment always happens-before the decrement of whatever finishing
         # thunk made `thunk` ready, closing a race where `running_count` could
         # transiently read as 0 while `thunk` was still awaiting firing.
-        @assert !has_result(state, thunk)
-        if thunk.options.restore !== nothing
+        premarked || @assert !has_result(state, thunk)
+        if !premarked && thunk.options.restore !== nothing
             try
                 result = @invokelatest thunk.options.restore(thunk)
                 if result isa Chunk
@@ -1455,7 +1495,7 @@ end
         end
         @assert (options.single === nothing) || (pid == options.single)
         # TODO: Set `sch_handle.tid.ref` to the right `DRef`
-        sch_handle = SchedulerHandle(ThunkID(thunk.id, nothing), state.worker_chans[pid]...)
+        sch_handle = SchedulerHandle(ThunkID(thunk.id, nothing), (chans === nothing ? state.worker_chans[pid] : chans)...)
 
         # TODO: De-dup common fields (log_sink, uid, etc.)
         ctx_vars = (log_sink=ctx.log_sink, profile=ctx.profile)
@@ -1635,16 +1675,26 @@ mutable struct ProcessorInternalState
     # Free-list of reset `TaskSpec`s (with their `data` vectors and `Argument`
     # cells) for reuse by `fire_tasks!`. Guarded by `queue`'s lock.
     spec_pool::Vector{TaskSpec}
+    # The scheduler's queued-task counter (`ProcessorStateDict.queued`, shared by all runners of
+    # one scheduler), kept here so the hot paths read a field instead of taking the
+    # states-dict lock to find it
+    queued::Threads.Atomic{Int}
 end
 struct ProcessorState
     state::ProcessorInternalState
     runner::Task
 end
 
-const PROCESSOR_TASK_STATE_LOCK = MemPool.ReadWriteLock()
-struct ProcessorStateDict
-    lock::MemPool.ReadWriteLock
-    dict::Dict{Processor,ProcessorState}
+# Both tables below are read on every task (several times: placement, enqueue, completion) by every thread, and written
+# only when a scheduler or a processor appears or goes away. A read lock is an atomic read-modify-write on one shared
+# cache line, so with many threads the readers queued behind each other (Fulda, gemm 4096/128, 64 threads: 600 of 618
+# samples of `do_tasks` were in `maybe_proc_state`, and 64 threads were slower than 32). Readers therefore take no lock:
+# writers (under `lock`, as before) build a new immutable-by-convention Dict and publish it with one atomic store.
+const PROCESSOR_TASK_STATE_LOCK = ReentrantLock()      # writers of PROCESSOR_TASK_STATE only
+mutable struct ProcessorStateDict
+    lock::MemPool.ReadWriteLock                        # writers of `dict` / `snap` (readers use `snap`)
+    dict::Dict{Processor,ProcessorState}               # the writers' master copy
+    @atomic snap::Dict{Processor,ProcessorState}       # published copy for lock-free readers; never mutated after publishing
     # Bumped on every insert into `dict`; lets hot paths (steal/kick loops)
     # cache a values snapshot and re-collect only when membership changed
     version::Threads.Atomic{Int}
@@ -1653,29 +1703,36 @@ struct ProcessorStateDict
     # (without incrementing proc_occupancy) if the ID is present.
     pre_cancelled::Set{Int}
     pre_cancelled_lock::ReentrantLock
-    ProcessorStateDict() = new(MemPool.ReadWriteLock(), Dict{Processor,ProcessorState}(),
-                               Threads.Atomic{Int}(0), Set{Int}(), ReentrantLock())
+    # Number of tasks waiting in the processor queues of this scheduler (incremented
+    # after a push, decremented after every removal, all under the queue's lock). A
+    # runner with nothing of its own skips the steal scan while it is zero: the scan
+    # locks every other queue, O(threads) per idle wake-up.
+    queued::Threads.Atomic{Int}
+    ProcessorStateDict() = new(MemPool.ReadWriteLock(), Dict{Processor,ProcessorState}(), Dict{Processor,ProcessorState}(),
+                               Threads.Atomic{Int}(0), Set{Int}(), ReentrantLock(),
+                               Threads.Atomic{Int}(0))
 end
-const PROCESSOR_TASK_STATE = Dict{UInt64,ProcessorStateDict}()
+mutable struct ProcessorStateTable
+    @atomic table::Dict{UInt64,ProcessorStateDict}
+end
+const PROCESSOR_TASK_STATE = ProcessorStateTable(Dict{UInt64,ProcessorStateDict}())
 
 function proc_states(uid::UInt64=Dagger.get_tls().sch_uid)
-    states = MemPool.@lock_read PROCESSOR_TASK_STATE_LOCK begin
-        get(PROCESSOR_TASK_STATE, uid, nothing)
+    states = get(@atomic(PROCESSOR_TASK_STATE.table), uid, nothing)
+    states === nothing || return states
+    return lock(PROCESSOR_TASK_STATE_LOCK) do
+        cur = @atomic PROCESSOR_TASK_STATE.table
+        existing = get(cur, uid, nothing)
+        existing === nothing || return existing
+        dict = ProcessorStateDict()
+        new = copy(cur); new[uid] = dict
+        @atomic PROCESSOR_TASK_STATE.table = new
+        return dict
     end
-    if states === nothing
-        states = MemPool.lock(PROCESSOR_TASK_STATE_LOCK) do
-            dict = ProcessorStateDict()
-            PROCESSOR_TASK_STATE[uid] = dict
-            return dict
-        end
-    end
-    return states
 end
 function proc_states_values(uid::UInt64=Dagger.get_tls().sch_uid)
     states = proc_states(uid)
-    return MemPool.@lock_read states.lock begin
-        collect(values(states.dict))
-    end
+    return collect(values(@atomic states.snap))
 end
 
 """
@@ -1694,9 +1751,7 @@ StatesCache() = StatesCache(-1, ProcessorState[])
 function states_snapshot!(cache::StatesCache, states::ProcessorStateDict)
     version = states.version[]
     if cache.version != version
-        cache.values = MemPool.@lock_read states.lock begin
-            collect(values(states.dict))
-        end
+        cache.values = collect(values(@atomic states.snap))
         cache.version = version
     end
     return cache.values
@@ -1708,15 +1763,14 @@ end
 const STATES_CACHE_TLV = Dagger.TaskLocalValue{StatesCache}(()->StatesCache())
 function proc_state!(f, uid::UInt64, proc::Processor)
     states = proc_states(uid)
-    state = MemPool.@lock_read states.lock begin
-        get(states.dict, proc, nothing)
-    end
+    state = get(@atomic(states.snap), proc, nothing)
     if state === nothing
         state = MemPool.lock(states.lock) do
             existing = get(states.dict, proc, nothing)
             existing !== nothing && return existing
             new_state = f()::ProcessorState
             states.dict[proc] = new_state
+            @atomic states.snap = copy(states.dict)
             Threads.atomic_add!(states.version, 1)
             return new_state
         end
@@ -1726,9 +1780,7 @@ end
 proc_state!(f, proc::Processor) = proc_state!(f, Dagger.get_tls().sch_uid, proc)
 function maybe_proc_state(uid::UInt64, proc::Processor)
     states = proc_states(uid)
-    return MemPool.lock_read(states.lock) do
-        return get(states.dict, proc, nothing)
-    end
+    return get(@atomic(states.snap), proc, nothing)
 end
 maybe_proc_state(proc::Processor) = maybe_proc_state(Dagger.get_tls().sch_uid, proc)
 proc_state(uid::UInt64, proc::Processor) = something(maybe_proc_state(uid, proc))
@@ -1743,6 +1795,22 @@ stealing_permitted(proc::Dagger.ThreadProc) = proc.owner != 1 || proc.tid != 1
 proc_has_occupancy(proc_occupancy, task_occupancy) =
     UInt64(task_occupancy) + UInt64(proc_occupancy) <= typemax(UInt32)
 
+# The head of `queue` if `to_proc` may run it and has room for it; the caller holds the lock
+function steal_from_queue!(queue, to_proc, proc_occupancy_cached, queued_counter)
+    length(queue) == 0 && return nothing
+    task, occupancy = first(queue)
+    scope = task.scope::Dagger.AbstractScope
+    accel = something((task.options::Options).acceleration, Dagger.DistributedAcceleration())
+    if Dagger.proc_in_scope(to_proc, scope) && Dagger.accel_matches_proc(accel, to_proc) &&
+       typemax(UInt32) - proc_occupancy_cached >= occupancy
+        # Compatible, steal this task
+        result = popfirst!(queue)
+        Threads.atomic_sub!(queued_counter, 1)
+        return result
+    end
+    return nothing
+end
+
 function start_processor_runner!(istate::ProcessorInternalState, uid::UInt64, return_queue::RemoteChannel, start_event::Base.Event)
     to_proc = istate.proc
     proc_run_task = @task begin
@@ -1752,6 +1820,7 @@ function start_processor_runner!(istate::ProcessorInternalState, uid::UInt64, re
         tasks = istate.tasks
         proc_occupancy = istate.proc_occupancy
         time_pressure = istate.time_pressure
+        queued_counter = istate.queued
 
         wid = root_worker_id(to_proc)
         work_to_do = false
@@ -1795,6 +1864,7 @@ function start_processor_runner!(istate::ProcessorInternalState, uid::UInt64, re
                     return (nothing, false)
                 end
                 queue_result = popfirst!(queue)
+                Threads.atomic_sub!(queued_counter, 1)
                 return (queue_result, length(queue) > 0)
             end
             if task_and_occupancy === nothing
@@ -1819,9 +1889,24 @@ function start_processor_runner!(istate::ProcessorInternalState, uid::UInt64, re
                 # from a random start over a version-cached snapshot: fair
                 # enough, and allocation-free per attempt)
                 # TODO: Prioritize stealing from busiest processors
+                # Nothing queued anywhere: no victim can have work, skip the scan
+                # (it locks every other queue)
+                if queued_counter[] == 0
+                    @maybelog ctx timespan_finish(ctx, :proc_steal_local, (;uid, worker=wid, processor=to_proc), nothing)
+                    continue
+                end
                 states_vec = states_snapshot!(STATES_CACHE_TLV[], proc_states(uid))
                 nstates = length(states_vec)
                 start_idx = nstates <= 1 ? 1 : rand(1:nstates)
+                # Our own occupancy, read once per scan rather than once per victim
+                # FIXME: We need to lock two queues to compare occupancies
+                lock(istate.queue)
+                proc_occupancy_cached = try
+                    proc_occupancy[]
+                finally
+                    unlock(istate.queue)
+                end
+                task_and_occupancy = nothing
                 for state_offset in 0:(nstates-1)
                     state_idx = start_idx + state_offset
                     state_idx > nstates && (state_idx -= nstates)
@@ -1830,27 +1915,16 @@ function start_processor_runner!(istate::ProcessorInternalState, uid::UInt64, re
                     if other_istate.proc === to_proc
                         continue
                     end
-                    # FIXME: We need to lock two queues to compare occupancies
-                    proc_occupancy_cached = lock(istate.queue) do _
-                        proc_occupancy[]
-                    end
-                    task_and_occupancy = lock(other_istate.queue) do queue
-                        if length(queue) == 0
-                            return nothing
-                        end
-                        task, occupancy = first(queue)
-                        scope = task.scope::Dagger.AbstractScope
-                        accel = something((task.options::Options).acceleration, Dagger.DistributedAcceleration())
-                        if Dagger.proc_in_scope(to_proc, scope) && Dagger.accel_matches_proc(accel, to_proc) &&
-                           typemax(UInt32) - proc_occupancy_cached >= occupancy
-                            # Compatible, steal this task
-                            return popfirst!(queue)
-                        end
-                        return nothing
+                    # N.B. Explicit lock/unlock: a `do` closure per victim allocated
+                    lock(other_istate.queue)
+                    task_and_occupancy = try
+                        steal_from_queue!(Dagger.payload(other_istate.queue), to_proc, proc_occupancy_cached, queued_counter)
+                    finally
+                        unlock(other_istate.queue)
                     end
                     if task_and_occupancy !== nothing
                         from_proc = other_istate.proc
-                        thunk_id = task.thunk_id
+                        thunk_id = first(task_and_occupancy).thunk_id
                         @dagdebug thunk_id :processor "Stolen from $from_proc by $to_proc"
                         @maybelog ctx timespan_finish(ctx, :proc_steal_local, (;uid, worker=wid, processor=to_proc), (;from_proc, thunk_id))
                         # TODO: Keep stealing until we hit full occupancy?
@@ -2116,7 +2190,8 @@ function do_tasks(to_proc, return_queue, tasks)
                                         Set{Int}(),
                                         Dict{Int,Dagger.CancelToken}(),
                                         Ref(false),
-                                        TaskSpec[])
+                                        TaskSpec[],
+                                        proc_states(uid).queued)
         start_event = Base.Event()
         runner = start_processor_runner!(istate, uid, return_queue, start_event)
         @static if VERSION < v"1.9"
@@ -2128,6 +2203,7 @@ function do_tasks(to_proc, return_queue, tasks)
         notify(start_event)
     end
     istate = state.state
+    queued_counter = istate.queued
     # Refresh the runner's logging Context: the runner re-reads `istate.ctx`
     # every loop iteration, so log-sink toggles take effect at the next
     # enqueued batch. Plain (non-atomic) store: a racing runner iteration
@@ -2169,6 +2245,7 @@ function do_tasks(to_proc, return_queue, tasks)
             end
             should_launch || continue
             push!(queue, task => occupancy)
+            Threads.atomic_add!(queued_counter, 1)
             @logfinish ctx LogEnqueue LogEnqueueId(uid, to_proc, thunk_id) nothing
             @dagdebug thunk_id :processor "Enqueued task"
         end
