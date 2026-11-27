@@ -57,6 +57,9 @@ function LinearAlgebra._chol!(A::DArray{T,2}, ::Type{UpperTriangular}) where T
         err isa DTaskFailedException || rethrow()
         err = Dagger.Sch.unwrap_nested_exception(err.ex)
         err isa PosDefException || rethrow()
+        # Under MPI only the rank that owns `info` saw the failing `potrf!`
+        # write its status; the exception, however, reaches every rank.
+        info[1] = err.info
     end
 
     return UpperTriangular(A), info[1]
@@ -102,6 +105,9 @@ function LinearAlgebra._chol!(A::DArray{T,2}, ::Type{LowerTriangular}) where T
         err isa DTaskFailedException || rethrow()
         err = Dagger.Sch.unwrap_nested_exception(err.ex)
         err isa PosDefException || rethrow()
+        # Under MPI only the rank that owns `info` saw the failing `potrf!`
+        # write its status; the exception, however, reaches every rank.
+        info[1] = err.info
     end
 
     return LowerTriangular(A), info[1]

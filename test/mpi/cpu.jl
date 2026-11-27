@@ -826,6 +826,19 @@ end # @testset "Datadeps"
     recon = norm(U_dist' * U_dist - B) / norm(B)
     @test err < 1e-12
     @test recon < 1e-12
+
+    # Not positive definite: every rank must report the same nonzero `info`
+    # (only the owner of `info` sees the failing potrf! write it).
+    Random.seed!(7)
+    N = rand(Float64, 64, 64); N = N + N'
+    for W in (LowerTriangular, UpperTriangular)
+        DN = zeros(Blocks(16, 16), Float64, 64, 64)
+        copyto!(DN, N)
+        _, info = LinearAlgebra._chol!(DN, W)
+        @test info > 0
+        infos = MPI.Allgather(Int(info), comm)
+        @test all(==(infos[1]), infos)
+    end
 end
 
 include("lu.jl")
