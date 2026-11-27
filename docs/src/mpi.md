@@ -356,6 +356,20 @@ convenient for reductions or for writing results out from rank 0.
 payload, while non-owning ranks return their placeholder metadata. Guard
 rank-specific output (printing, file writes) with `if MPI.Comm_rank(comm) == 0`.
 
+### Rebalancing chunks between ranks
+
+A chunk's data lives on the rank that owns it, so work that is bound to a chunk
+cannot move by itself. When the cost of the chunks drifts apart over time (for
+example the partitions of a simulation), [`Dagger.rebalance`](@ref)`(chunks, costs)`
+moves chunks between ranks. It is collective: every rank passes the same chunks
+and the same `costs` (one number per chunk, equal on all ranks), computes the
+same deterministic plan ([`Dagger.rebalance_plan`](@ref), which can also be
+called on its own) and returns the chunks to use from now on. Tasks bound to a
+chunk then use `scope=Dagger.scope(mpi_rank=Dagger.owner_rank(chunk))`. A move
+copies the data, so call it only when the imbalance is worth that; `tolerance`
+(default 1.05) is how far the most loaded rank may exceed the mean before
+anything moves. All ranks are assumed equally fast.
+
 ## Testing MPI code
 
 Dagger ships a set of MPI test environments and suites (used by CI) that are a

@@ -86,3 +86,10 @@ Sch.exec!
 Sch.halt!
 Sch.get_dag_ids
 ```
+
+## Load Balancing Functions
+```@docs
+rebalance
+rebalance_plan
+owner_rank
+```
