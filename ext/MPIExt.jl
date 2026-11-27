@@ -3014,7 +3014,8 @@ end
 # With the task's processor already worked out (`elide_task!` needs it for other things too)
 function mpi_failure_only(opts::Options, proc::Union{Nothing,MPIProcessor})
     Dagger.ELIDE_FOREIGN_TASKS[] && !CHECK_UNIFORMITY[] && opts.tag === nothing || return false
-    return proc !== nothing
+    # Only the world communicator: ids and failure tags of other graphs are not uniform
+    return proc !== nothing && proc.comm == MPI.COMM_WORLD
 end
 
 # Whether `local_rank` takes part in moving `v` to the task's rank, or cannot tell
@@ -3163,6 +3164,8 @@ end
 
 function Dagger.elide_task!(accel::MPIAcceleration, spec, task)
     CHECK_UNIFORMITY[] && return false
+    # Placement, ids and failure tags here are those of the world communicator only
+    accel.comm == MPI.COMM_WORLD || return false
     opts = spec.options
     # Tasks without a scope are placed here, so that every rank knows the owner.
     # N.B. The processor a union scope names is looked up once per task: it is the same
