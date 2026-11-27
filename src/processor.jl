@@ -17,6 +17,13 @@ abstract type Processor end
 const PROCESSOR_CALLBACKS = Dict{Symbol,Any}()
 const OSPROC_PROCESSOR_CACHE = LockedObject(Dict{Int,Set{Processor}}())
 
+# Bumped whenever the processor callbacks change, after the caches above are
+# cleared. A cache built from processor lists that core cannot clear itself
+# (e.g. `processors(::MPIMemorySpace)` in MPIExt) stores the generation it was
+# built at and ignores entries from an older one.
+const PROCESSOR_GENERATION = Threads.Atomic{UInt}(0)
+processor_generation() = PROCESSOR_GENERATION[]
+
 add_processor_callback!(func, name::String) =
     add_processor_callback!(func, Symbol(name))
 function add_processor_callback!(func, name::Symbol)
@@ -24,6 +31,7 @@ function add_processor_callback!(func, name::Symbol)
     @safe_lock1 OSPROC_PROCESSOR_CACHE cache delete!(cache, myid())
     @safe_lock1 CPU_SPACE_PROCESSORS_CACHE cache delete!(cache, myid())
     Sch.invalidate_compat_procs_cache!()
+    Threads.atomic_add!(PROCESSOR_GENERATION, UInt(1))
 end
 delete_processor_callback!(name::String) =
     delete_processor_callback!(Symbol(name))
@@ -32,6 +40,7 @@ function delete_processor_callback!(name::Symbol)
     @safe_lock1 OSPROC_PROCESSOR_CACHE cache delete!(cache, myid())
     @safe_lock1 CPU_SPACE_PROCESSORS_CACHE cache delete!(cache, myid())
     Sch.invalidate_compat_procs_cache!()
+    Threads.atomic_add!(PROCESSOR_GENERATION, UInt(1))
 end
 
 """

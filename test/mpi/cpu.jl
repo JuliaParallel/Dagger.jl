@@ -197,6 +197,24 @@ end
     @test Dagger.check_uniform(7)
 end
 
+@testset "Processor list of an MPI space follows processor callbacks" begin
+    # `processors(::MPIMemorySpace)` is cached; removing a thread's callback and
+    # putting it back must show in the list both times (every rank does the same)
+    if Threads.nthreads() >= 2
+        space = space_for_rank(rank)
+        before = Dagger.processors(space)
+        cb_name = Symbol("__cpu_thread_$(Threads.nthreads())__")
+        cb = Dagger.PROCESSOR_CALLBACKS[cb_name]
+        try
+            Dagger.delete_processor_callback!(cb_name)
+            @test length(Dagger.processors(space)) == length(before) - 1
+        finally
+            Dagger.add_processor_callback!(cb, cb_name)
+        end
+        @test Dagger.processors(space) == before
+    end
+end
+
 @testset "Non-Chunk argument wrapping" begin
     # Non-Chunk mutable arguments wrap as rank-0-owned MPIRef chunks
     x = Ref(11)

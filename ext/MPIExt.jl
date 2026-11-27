@@ -705,14 +705,21 @@ partition_affinity_id(proc::MPIProcessor) = proc.rank
 partition_affinity_id(proc::MPIOSProc) = proc.rank
 
 function processors(memSpace::MPIMemorySpace)
-    # The sorted list of a space never changes (processors are fixed once the
-    # acceleration is up), and building it sorts by `short_name` strings: 1.2 us
+    # Building the sorted list of a space sorts by `short_name` strings: 1.2 us
     # and 63 allocations per call at 4 threads, 23 us and 1086 at 16 (laptop), on
     # paths that run several times per task (`first(processors(space))` in
-    # planning, copies and frees). So it is built once per space; each call gets
-    # a copy, because callers may modify what they receive.
-    cached = get((@atomic MPI_SPACE_PROCS.table), memSpace, nothing)
-    cached === nothing || return copy(cached::Vector{Processor})
+    # planning, copies and frees). So it is built once per space and processor
+    # generation (the list changes only when processor callbacks do, see
+    # `Dagger.processor_generation`); each call gets a copy, because callers may
+    # modify what they receive.
+    # N.B. The generation is read before the list is built: a list built while
+    # the callbacks change is stored under the old generation and never served.
+    gen = Dagger.processor_generation()
+    snap = @atomic MPI_SPACE_PROCS.snap
+    if snap.generation == gen
+        cached = get(snap.table, memSpace, nothing)
+        cached === nothing || return copy(cached::Vector{Processor})
+    end
     rawProc = Processor[]
     for innerProc in processors(memSpace.innerSpace)
         push!(rawProc, MPIProcessor(innerProc, memSpace.comm, memSpace.rank))
@@ -727,17 +734,26 @@ function processors(memSpace::MPIMemorySpace)
     # `check_uniform`.
     sort!(rawProc; by=p->short_name(p.innerProc))
     lock(MPI_SPACE_PROCS_LOCK) do
-        table = copy(@atomic MPI_SPACE_PROCS.table)
+        snap = @atomic MPI_SPACE_PROCS.snap
+        # A newer generation is already stored: this list is out of date
+        snap.generation > gen && return
+        table = snap.generation == gen ? copy(snap.table) : Dict{MPIMemorySpace,Vector{Processor}}()
         table[memSpace] = rawProc
-        @atomic MPI_SPACE_PROCS.table = table
+        @atomic MPI_SPACE_PROCS.snap = MPISpaceProcsSnapshot(gen, table)
     end
     return copy(rawProc)
 end
-# Read without a lock: the table is replaced as a whole
-mutable struct MPISpaceProcsCache
-    @atomic table::Dict{MPIMemorySpace,Vector{Processor}}
+# Read without a lock: the snapshot (generation and table) is replaced as a whole.
+# N.B. `mutable` so that the atomic field below holds a single pointer: an inline
+# 16-byte immutable made each read a 16-byte atomic (15.8 vs 0.5 ns per load).
+mutable struct MPISpaceProcsSnapshot
+    const generation::UInt
+    const table::Dict{MPIMemorySpace,Vector{Processor}}
 end
-const MPI_SPACE_PROCS = MPISpaceProcsCache(Dict{MPIMemorySpace,Vector{Processor}}())
+mutable struct MPISpaceProcsCache
+    @atomic snap::MPISpaceProcsSnapshot
+end
+const MPI_SPACE_PROCS = MPISpaceProcsCache(MPISpaceProcsSnapshot(UInt(0), Dict{MPIMemorySpace,Vector{Processor}}()))
 const MPI_SPACE_PROCS_LOCK = ReentrantLock()
 
 struct MPIRefID
