@@ -107,6 +107,8 @@ mutable struct CompatEntry
     const procs::Vector{Processor}
     const compat::Set{Processor}
     @atomic ordered::Union{Nothing,Vector{Processor}}
+    # The local fast path's view of this set (`missing` until first asked; see fastpath.jl)
+    @atomic fast::Any
 end
 const COMPAT_PROCS_CACHE = LockedObject(Dagger.BasicLFUCache{Tuple{UInt,UInt},CompatEntry}(256))
 # Drop all cached compatible-processor sets. Called whenever the processor
@@ -119,10 +121,27 @@ const COMPAT_PROCS_CACHE = LockedObject(Dagger.BasicLFUCache{Tuple{UInt,UInt},Co
 # sessions): `__init__`'s per-thread callback registrations trigger it.
 function invalidate_compat_procs_cache!()
     @safe_lock_spin1 COMPAT_PROCS_CACHE cache empty!(cache)
+    invalidate_fast_index!()
     return
 end
+# Cache key of a scope. `objectid` of a union scope hashes every member (one `ExactScope` per
+# thread for the scopes Datadeps hands out), O(threads) work per task: 40 us at 64 threads.
+# A large union is keyed by its length and its first and last member instead: still a function of
+# the *contents*, so the equal union a later Datadeps region builds finds the entry of the earlier
+# one (a key by address does not: every region would add 64 never-hit entries, and once the
+# frequency-ordered cache is full the new, frequency-1 keys are evicted at once, so every task of
+# the region misses). The hit test `entry.scope === scope` compares the members, and a collision
+# of two different unions only replaces the entry. A small union, or any other scope, keeps `objectid`.
+const SCOPE_KEY_UNION_MIN = 8
+scope_key(scope) = objectid(scope)
+function scope_key(scope::Dagger.UnionScope)
+    scopes = scope.scopes
+    n = length(scopes)
+    n > SCOPE_KEY_UNION_MIN || return objectid(scope)
+    return hash(n, hash(objectid(@inbounds(scopes[1])), UInt(objectid(@inbounds(scopes[n])))))
+end
 function compat_entry(accel, scope, procs::Vector{<:Processor})
-    key = (objectid(accel), objectid(scope))
+    key = (objectid(accel), scope_key(scope))
     cached = @safe_lock_spin1 COMPAT_PROCS_CACHE cache begin
         entry = get(cache.cache, key, nothing)
         if entry !== nothing && entry.scope === scope && entry.procs == procs
@@ -142,7 +161,7 @@ function compat_entry(accel, scope, procs::Vector{<:Processor})
     # happens not to have this (accel, scope) pair cached already -- see the
     # sibling fix in generic `compatible_processors`, which had the same defect
     # with `Set(gen)`.
-    entry = CompatEntry(scope, Vector{Processor}(procs), compat, nothing)
+    entry = CompatEntry(scope, Vector{Processor}(procs), compat, nothing, missing)
     return @safe_lock_spin1 COMPAT_PROCS_CACHE cache begin
         # N.B. `get!` would keep a *stale* entry for this key (one whose `procs` no longer
         # matches, because the processor list changed without a cache flush) and hand it
@@ -166,7 +185,10 @@ placement sorts a given candidate set once, not once per task. The returned
 vector is shared: callers must not mutate it.
 """
 function compatible_processors_ordered(accel, scope, procs::Vector{<:Processor})
-    entry = compat_entry(accel, scope, procs)
+    # The lock-free snapshot of the local fast path (see fastpath.jl) instead of the cache behind one lock:
+    # every placing thread of every task took that lock, 12-29 us per task at 64 threads on our cluster.
+    # Same entries, same canonical order; a miss falls through to `compat_entry`.
+    entry = fast_compat_entry(accel, scope, procs)
     ordered = @atomic :acquire entry.ordered
     if ordered === nothing
         # Two threads may both get here and sort the same set; the result is
@@ -176,6 +198,8 @@ function compatible_processors_ordered(accel, scope, procs::Vector{<:Processor})
     end
     return ordered
 end
+
+include("fastpath.jl")
 
 # N.B. `mutable` (with no field ever assigned) so the 23-field struct has a
 # stable heap identity and is passed by pointer; as an immutable struct it was
@@ -997,115 +1021,128 @@ concurrently across threads.
     Dagger.options_merge!(options, state.sch_options)
     Dagger.populate_defaults!(options, sig)
 
-    # Calculate scope.  Errors are stored in `scope_ex` and applied in Phase 3.
-    local scope
-    local scope_ex = nothing
-    if options.exec_scope !== nothing
-        # Bypass scope calculation if it's been done for us already
-        scope = options.exec_scope
-    else
-        scope = constrain(@something(options.compute_scope, options.scope, DefaultScope()),
-                          @something(options.result_scope, AnyScope()))
-        if scope isa InvalidScope
-            scope_ex = SchedulingException("compute_scope and result_scope are not compatible: $(scope.x), $(scope.y)")
-        else
-            for arg in task.inputs
-                scope_ex === nothing || break
-                value = unwrap_weak_checked(Dagger.value(arg))
-                # After collect_task_inputs!, Thunk inputs are resolved to Chunks.
-                @assert !istask(value)
-                chunk = if value isa Chunk
-                    value
-                else
-                    nothing
-                end
-                chunk isa Chunk || continue
-                scope = constrain(scope, chunk.scope)
-                if scope isa InvalidScope
-                    scope_ex = SchedulingException("Current scope and argument Chunk scope are not compatible: $(scope.x), $(scope.y)")
-                end
-            end
-        end
-    end
-
-    if scope_ex !== nothing
-        # scope is invalid — fail the task under state.lock (set_failed! requires it)
-        lock(state.lock) do
-            set_failed!(state, task; ex=scope_ex)
-            # Release the `running_count` credit `task` received when it
-            # entered `ready_out` (see comment at the other `set_failed!`
-            # call sites in this function for why this is necessary).
-            Threads.atomic_sub!(state.running_count, 1)
-            @logfinish ctx LogSchedule LogScheduleId(state.uid, task.id) (;thunk_id=task.id)
-        end
-        return
-    end
-
     # `accel` drives uniform (e.g. MPI) scheduling: it filters compatible
     # processors, imposes a deterministic processor order, and (under uniform
     # execution) makes selection ignore rank-local capacity/occupancy so every
     # rank picks the same processor for this task.
     accel = something(options.acceleration, current_acceleration())
 
-    sorted_procs = @reusable_vector :schedule_one!_sorted_procs Processor OSProc() 32
-    if uniform_execution(accel)
-        # Measured costs are rank-local, so under uniform execution the
-        # candidates are ordered by a deterministic, acceleration-dispatched key
-        # instead and the cost estimate would be discarded unread. Start from
-        # the cached canonical order of the candidate set and apply only the
-        # per-task part (owner preference and rotation).
-        ordered = compatible_processors_ordered(accel, scope, procs_filt)
-        resize!(sorted_procs, length(ordered))
-        copyto!(sorted_procs, ordered)
-        Dagger.place_processors_uniform!(sorted_procs, accel, task, state)
-    else
-        input_procs = @reusable_vector :schedule_one!_input_procs Processor OSProc() 32
-        compat = compatible_processors_cached(accel, scope, procs_filt)
-        # N.B. `compat` is a `Set`: its elements are already unique
-        append!(input_procs, compat)
-        resize!(sorted_procs, length(input_procs))
-        estimate_task_costs!(sorted_procs, nothing, state, input_procs, task; sig)
-        empty!(input_procs)
-    end
-
-    # Select the best available processor and reserve time pressure optimistically.
-    # These operations use their own fine-grained locks — no state.lock needed.
+    # Lightweight placement for a task that certainly runs on a thread of this process
+    # (fastpath.jl); anything it does not handle takes the general path below.
     scheduled = false
     local best_loc, best_spec
-    for proc in sorted_procs
-        gproc = get_parent(proc)
-        can_use, scope = can_use_proc(state, task, gproc, proc, options, scope)
-        if can_use
-            has_cap, est_time_util, est_alloc_util, est_occupancy =
-                has_capacity(state, proc, root_worker_id(gproc), options.time_util, options.alloc_util, options.occupancy, sig)
-            # Under uniform execution capacity is rank-local; every rank must
-            # take the first usable processor in the deterministic order.
-            if has_cap || scheduling_ignore_capacity(accel)
-                # Optimistic reservation: capture-the-ref, atomic_add!
-                counter_ref = lock(state.worker_time_pressure) do wtp
-                    proc_map = get!(wtp, root_worker_id(gproc)) do
-                        Dict{Processor,Threads.Atomic{UInt64}}()
-                    end
-                    get!(proc_map, proc) do
-                        Threads.Atomic{UInt64}(UInt64(0))
-                    end
-                end
-                Threads.atomic_add!(counter_ref, est_time_util)
-                lock(state.running_pressure_refs) do rpr
-                    rpr[task.id] = (counter_ref, est_time_util)
-                end
-                @dagdebug task :schedule "Scheduling to $gproc -> $proc (pressure: $(counter_ref[]))"
-                # Uniform execution overlaps communicating tasks on a processor
-                # (rank-local shares); avoid serializing them into wait cycles.
-                est_occupancy = scheduling_task_occupancy(accel, est_occupancy)
-                best_loc = ScheduleTaskLocation(gproc, proc)
-                best_spec = ScheduleTaskSpec(task, scope, est_time_util, est_alloc_util, est_occupancy)
-                scheduled = true
-                break
-            end
+    fast_cand = local_fast_candidates(state, task, options, procs, accel)
+    if fast_cand !== nothing
+        placed = local_fast_place!(state, task, options, sig, fast_cand[1], fast_cand[2])
+        if placed !== nothing
+            best_loc, best_spec = placed
+            scheduled = true
         end
     end
-    empty!(sorted_procs)
+
+    if !scheduled
+        # Calculate scope.  Errors are stored in `scope_ex` and applied in Phase 3.
+        local scope
+        local scope_ex = nothing
+        if options.exec_scope !== nothing
+            # Bypass scope calculation if it's been done for us already
+            scope = options.exec_scope
+        else
+            scope = constrain(@something(options.compute_scope, options.scope, DefaultScope()),
+                              @something(options.result_scope, AnyScope()))
+            if scope isa InvalidScope
+                scope_ex = SchedulingException("compute_scope and result_scope are not compatible: $(scope.x), $(scope.y)")
+            else
+                for arg in task.inputs
+                    scope_ex === nothing || break
+                    value = unwrap_weak_checked(Dagger.value(arg))
+                    # After collect_task_inputs!, Thunk inputs are resolved to Chunks.
+                    @assert !istask(value)
+                    chunk = if value isa Chunk
+                        value
+                    else
+                        nothing
+                    end
+                    chunk isa Chunk || continue
+                    scope = constrain(scope, chunk.scope)
+                    if scope isa InvalidScope
+                        scope_ex = SchedulingException("Current scope and argument Chunk scope are not compatible: $(scope.x), $(scope.y)")
+                    end
+                end
+            end
+        end
+
+        if scope_ex !== nothing
+            # scope is invalid — fail the task under state.lock (set_failed! requires it)
+            lock(state.lock) do
+                set_failed!(state, task; ex=scope_ex)
+                # Release the `running_count` credit `task` received when it
+                # entered `ready_out` (see comment at the other `set_failed!`
+                # call sites in this function for why this is necessary).
+                Threads.atomic_sub!(state.running_count, 1)
+                @logfinish ctx LogSchedule LogScheduleId(state.uid, task.id) (;thunk_id=task.id)
+            end
+            return
+        end
+
+        sorted_procs = @reusable_vector :schedule_one!_sorted_procs Processor OSProc() 32
+        if uniform_execution(accel)
+            # Measured costs are rank-local, so under uniform execution the
+            # candidates are ordered by a deterministic, acceleration-dispatched key
+            # instead and the cost estimate would be discarded unread. Start from
+            # the cached canonical order of the candidate set and apply only the
+            # per-task part (owner preference and rotation).
+            ordered = compatible_processors_ordered(accel, scope, procs_filt)
+            resize!(sorted_procs, length(ordered))
+            copyto!(sorted_procs, ordered)
+            Dagger.place_processors_uniform!(sorted_procs, accel, task, state)
+        else
+            input_procs = @reusable_vector :schedule_one!_input_procs Processor OSProc() 32
+            compat = compatible_processors_cached(accel, scope, procs_filt)
+            # N.B. `compat` is a `Set`: its elements are already unique
+            append!(input_procs, compat)
+            resize!(sorted_procs, length(input_procs))
+            estimate_task_costs!(sorted_procs, nothing, state, input_procs, task; sig)
+            empty!(input_procs)
+        end
+
+        # Select the best available processor and reserve time pressure optimistically.
+        # These operations use their own fine-grained locks — no state.lock needed.
+        for proc in sorted_procs
+            gproc = get_parent(proc)
+            can_use, scope = can_use_proc(state, task, gproc, proc, options, scope)
+            if can_use
+                has_cap, est_time_util, est_alloc_util, est_occupancy =
+                    has_capacity(state, proc, root_worker_id(gproc), options.time_util, options.alloc_util, options.occupancy, sig)
+                # Under uniform execution capacity is rank-local; every rank must
+                # take the first usable processor in the deterministic order.
+                if has_cap || scheduling_ignore_capacity(accel)
+                    # Optimistic reservation: capture-the-ref, atomic_add!
+                    counter_ref = lock(state.worker_time_pressure) do wtp
+                        proc_map = get!(wtp, root_worker_id(gproc)) do
+                            Dict{Processor,Threads.Atomic{UInt64}}()
+                        end
+                        get!(proc_map, proc) do
+                            Threads.Atomic{UInt64}(UInt64(0))
+                        end
+                    end
+                    Threads.atomic_add!(counter_ref, est_time_util)
+                    lock(state.running_pressure_refs) do rpr
+                        rpr[task.id] = (counter_ref, est_time_util)
+                    end
+                    @dagdebug task :schedule "Scheduling to $gproc -> $proc (pressure: $(counter_ref[]))"
+                    # Uniform execution overlaps communicating tasks on a processor
+                    # (rank-local shares); avoid serializing them into wait cycles.
+                    est_occupancy = scheduling_task_occupancy(accel, est_occupancy)
+                    best_loc = ScheduleTaskLocation(gproc, proc)
+                    best_spec = ScheduleTaskSpec(task, scope, est_time_util, est_alloc_util, est_occupancy)
+                    scheduled = true
+                    break
+                end
+            end
+        end
+        empty!(sorted_procs)
+    end
 
     # Phase 3 — brief state.lock hold: fire or fail the task.
     # `restore_ready` only becomes non-empty if a task completes synchronously
@@ -1518,6 +1555,9 @@ end
     empty!(to_send)
 end
 
+# Number of batches whose `do_tasks` threw (reported to the scheduler as a failure of the batch's first task). Read by tests.
+const FIRE_FAILURES = Threads.Atomic{Int}(0)
+
 struct FireTaskSpec
     init_proc::Processor
     return_chan::RemoteChannel
@@ -1531,6 +1571,9 @@ function (ets::FireTaskSpec)()
     ctx_vars = first_task.ctx_vars::NamedTuple
     ctx = Dagger.log_context(ctx_vars.log_sink, ctx_vars.profile)
     uid = first_task.sch_uid
+    # Read before `do_tasks` hands the specs over: afterwards the first one may already be recycled
+    # (its `thunk_id` reset to 0, or reused by another task), and a failure must be reported under the id it belongs to.
+    first_thunk_id = first_task.thunk_id
 
     proc = ets.init_proc
     chan = ets.return_chan
@@ -1545,10 +1588,10 @@ function (ets::FireTaskSpec)()
         end
     catch err
         bt = catch_backtrace()
-        # FIXME: Catch the correct task ID
-        thunk_id = first_task.thunk_id
+        # FIXME: Catch the correct task ID (this is the first of the batch, not necessarily the one that failed)
+        Threads.atomic_add!(FIRE_FAILURES, 1)
         if isopen(chan)
-            put!(chan, TaskResult(pid, proc, thunk_id, CapturedException(err, bt), nothing))
+            put!(chan, TaskResult(pid, proc, first_thunk_id, CapturedException(err, bt), nothing))
         end
     finally
         @logfinish ctx LogFire LogFireId(uid, pid) nothing
@@ -1635,6 +1678,9 @@ mutable struct ProcessorInternalState
     # Free-list of reset `TaskSpec`s (with their `data` vectors and `Argument`
     # cells) for reuse by `fire_tasks!`. Guarded by `queue`'s lock.
     spec_pool::Vector{TaskSpec}
+    # True from the moment the runner starts looking for work until it takes a task: `do_tasks` wakes
+    # only runners that are parked, because one that is not will look at the queues again by itself
+    parked::Threads.Atomic{Bool}
 end
 struct ProcessorState
     state::ProcessorInternalState
@@ -1762,6 +1808,10 @@ function start_processor_runner!(istate::ProcessorInternalState, uid::UInt64, re
             # runner creation
             ctx = istate.ctx
 
+            # From here until a task is taken, this runner is looking for work: a task enqueued
+            # from now on is seen by the dequeue/steal attempt below or wakes the doorbell
+            istate.parked[] = true
+
             # Wait for new tasks
             if !work_to_do
                 @dagdebug nothing :processor "Waiting for tasks"
@@ -1865,6 +1915,7 @@ function start_processor_runner!(istate::ProcessorInternalState, uid::UInt64, re
             end
 
             @label execute
+            istate.parked[] = false
             task, task_occupancy = task_and_occupancy
             thunk_id = task.thunk_id
             time_util = task.est_time_util
@@ -2096,6 +2147,13 @@ end
 Executes a batch of tasks on `to_proc`, returning their results through
 `return_queue`.
 """
+# Rotates where `do_tasks` starts looking for a runner to wake, so that the same runners are not always the thieves
+const KICK_CURSOR = Threads.Atomic{Int}(0)
+
+# Test hook: called by `do_tasks` right after it enqueued a batch, i.e. from the moment on at which another runner may take, run and
+# recycle the specs. Tests set it to a sleep to make that window wide; `nothing` (the default) costs one load and compare per batch.
+const AFTER_ENQUEUE_HOOK = Ref{Any}(nothing)
+
 function do_tasks(to_proc, return_queue, tasks)
     @dagdebug nothing :processor "Enqueuing task batch" batch_size=length(tasks)
 
@@ -2116,7 +2174,8 @@ function do_tasks(to_proc, return_queue, tasks)
                                         Set{Int}(),
                                         Dict{Int,Dagger.CancelToken}(),
                                         Ref(false),
-                                        TaskSpec[])
+                                        TaskSpec[],
+                                        Threads.Atomic{Bool}(false))
         start_event = Base.Event()
         runner = start_processor_runner!(istate, uid, return_queue, start_event)
         @static if VERSION < v"1.9"
@@ -2136,6 +2195,14 @@ function do_tasks(to_proc, return_queue, tasks)
         istate.ctx = ctx
     end
     states = proc_states(uid)
+    # What the wake-up decision below needs is read here, while `do_tasks` still owns each spec. The
+    # moment a spec is in the queue another runner may take it, run it and recycle it
+    # (`reset_task_spec!` sets `scope` and `options` to `nothing`), so reading `tasks` again after the
+    # enqueue loop saw `nothing` and stale occupancies (a `TypeError` in the `scope` assertion, on
+    # few threads with many short tasks).
+    kick_scopes = @reusable_vector :do_tasks_kick_scopes Dagger.AbstractScope nothing 32
+    kick_accels = @reusable_vector :do_tasks_kick_accels Dagger.Acceleration nothing 32
+    kick_occupancies = @reusable_vector :do_tasks_kick_occupancies UInt32 UInt32(0) 32
     lock(istate.queue) do queue
         for task in tasks
             thunk_id = task.thunk_id
@@ -2168,27 +2235,73 @@ function do_tasks(to_proc, return_queue, tasks)
                 end
             end
             should_launch || continue
+            push!(kick_scopes, task.scope::Dagger.AbstractScope)
+            push!(kick_accels, something((task.options::Options).acceleration, Dagger.DistributedAcceleration()))
+            push!(kick_occupancies, occupancy)
             push!(queue, task => occupancy)
             @logfinish ctx LogEnqueue LogEnqueueId(uid, to_proc, thunk_id) nothing
             @dagdebug thunk_id :processor "Enqueued task"
         end
     end
     notify(istate.reschedule)
+    hook = AFTER_ENQUEUE_HOOK[]
+    hook === nothing || hook()
 
     # Kick other processors to make them steal
     # TODO: Alternatively, automatically balance work instead of blindly enqueueing
-    for other_state in states_snapshot!(STATES_CACHE_TLV[], proc_states(uid))
-        other_istate = other_state.state
-        if other_istate.proc === to_proc
-            continue
+    #
+    # A task whose scope is an `ExactScope` can run on that one processor only (`proc_in_scope` is
+    # `proc == scope.processor`), so nobody can steal it and a kick would be wasted. Every kick wakes
+    # a runner that then scans the queues of all the others, so with T threads each enqueued task
+    # cost O(T) wake-ups and O(T^2) queue probes: pinned tasks went from ~8000 to ~5500 tasks/s
+    # between 32 and 64 threads.
+    all_pinned = true
+    for scope in kick_scopes
+        if !(scope isa Dagger.ExactScope)
+            all_pinned = false
+            break
         end
+    end
+    if all_pinned
+        empty!(kick_scopes); empty!(kick_accels); empty!(kick_occupancies)
+        return nothing
+    end
+    # Wake the runners that could take one of these tasks, at most one per task. Waking every
+    # processor made each enqueued task cost T wake-ups, each followed by a scan that locks the
+    # queues of all T processors: O(T^2) lock operations per task, which collapsed the throughput
+    # of unscoped tasks at 32 threads and more. A runner that is not parked will look at the
+    # queues again by itself (see `ProcessorInternalState.parked`), and one that cannot take any
+    # of the tasks (scope, acceleration, free occupancy) would only go back to sleep.
+    states_vec = states_snapshot!(STATES_CACHE_TLV[], proc_states(uid))
+    nstates = length(states_vec)
+    nkick = 0
+    maxkick = length(kick_scopes)
+    start_idx = nstates <= 1 ? 1 : mod1(Threads.atomic_add!(KICK_CURSOR, 1), nstates)
+    for state_offset in 0:(nstates-1)
+        state_idx = start_idx + state_offset
+        state_idx > nstates && (state_idx -= nstates)
+        other_istate = (@inbounds states_vec[state_idx]).state
+        other_istate.proc === to_proc && continue
         # A kick only makes the runner try to steal (see `start_processor_runner!`);
         # one that may not steal wakes up to do nothing. Under MPI that is every
         # processor of every rank, so each enqueued task would otherwise wake
         # `ranks x threads` runners on every rank.
         stealing_permitted(other_istate.proc) || continue
-        notify(other_istate.reschedule)
+        other_istate.parked[] || continue
+        free = typemax(UInt32) - other_istate.proc_occupancy[]
+        for idx in eachindex(kick_scopes)
+            scope = @inbounds kick_scopes[idx]
+            accel = @inbounds kick_accels[idx]
+            if Dagger.proc_in_scope(other_istate.proc, scope) && Dagger.accel_matches_proc(accel, other_istate.proc) &&
+               free >= @inbounds(kick_occupancies[idx])
+                notify(other_istate.reschedule)
+                nkick += 1
+                break
+            end
+        end
+        nkick >= maxkick && break
     end
+    empty!(kick_scopes); empty!(kick_accels); empty!(kick_occupancies)
     @dagdebug nothing :processor "Kicked processors"
 end
 
