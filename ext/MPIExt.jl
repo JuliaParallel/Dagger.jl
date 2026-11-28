@@ -2700,14 +2700,29 @@ function mpi_precompile_workload()
     end
     fetch(c1); fetch(c2)
     Dagger.accelerate!(Dagger.DistributedAcceleration())
+    # What the workload cached describes the precompilation process (one thread, one rank). It must not be baked
+    # into the image: a process that loads the image would see that one-thread processor list on every rank.
+    lock(MPI_PROC_CACHE_LOCK) do
+        empty!(MPIClusterProcChildren)
+        empty!(MPIUniformProcsCache)
+    end
+    lock(MPI_INITIALIZED_COMMS) do comms; empty!(comms); end
+    lock(MPI_NODE_UUIDS) do m; empty!(m); end
     return nothing
 end
+# `MPI_Init` aborts in a process that an MPI launcher started as a rank but that is not meant to be one (this is
+# the case when the extension is precompiled inside `mpiexec`/`prterun`): skip the workload there.
+mpi_launched() = any(k -> haskey(ENV, k), ("PMI_RANK", "PMIX_RANK", "OMPI_COMM_WORLD_RANK", "MPI_LOCALRANKID"))
 @compile_workload begin
-    try
-        mpi_precompile_workload()
-        Dagger.shutdown_precompile_workload!()
-    catch err
-        @warn "MPIExt precompile workload skipped" exception=err
+    if mpi_launched()
+        @warn "MPIExt precompile workload skipped: precompiling under an MPI launcher"
+    else
+        try
+            mpi_precompile_workload()
+            Dagger.shutdown_precompile_workload!()
+        catch err
+            @warn "MPIExt precompile workload skipped" exception=err
+        end
     end
 end
 

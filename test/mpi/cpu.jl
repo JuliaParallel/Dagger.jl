@@ -145,6 +145,11 @@ end
     MPI.Barrier(comm)
 end
 
+@testset "Every rank sees every thread of every rank (nothing baked in by precompilation)" begin
+    mpi_procs_seen = filter(p -> p isa MPIExt.MPIProcessor, collect(Dagger.compatible_processors()))
+    @test length(mpi_procs_seen) == nranks * Threads.nthreads(:default)
+end
+
 include("spawn.jl")
 include("noaliasing_args.jl")
 
