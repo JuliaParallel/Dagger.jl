@@ -30,8 +30,9 @@ end
 
 @testset "Cooperative collectives" begin
     @testset "barrier" begin
-        # rank 0 arrives late, nobody leaves before it
-        rank == 0 && sleep(0.3)
+        # rank 0 arrives late, nobody leaves before it. The other ranks measure from their own start, so the delay
+        # must be much longer than the skew between the ranks' starts (a loaded machine easily makes it 100 ms)
+        rank == 0 && sleep(1.0)
         t0 = time()
         Dagger.barrier()
         @test rank == 0 || time() - t0 > 0.2
