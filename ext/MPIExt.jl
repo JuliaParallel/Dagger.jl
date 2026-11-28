@@ -572,6 +572,9 @@ Dagger.iscompatible_arg(::MPIProcessor, opts, ::Any) = true
 # was deterministically scheduled to; local work stealing would diverge
 Dagger.Sch.stealing_permitted(::MPIProcessor) = false
 
+# The thread that plans a Datadeps region is thread 1 of every rank (the main task's)
+Dagger.is_driver_thread_proc(p::MPIProcessor) = p.innerProc isa Dagger.ThreadProc && p.innerProc.tid == 1
+
 default_enabled(proc::MPIProcessor) = default_enabled(proc.innerProc)
 
 Dagger.supports_lapack_panel(proc::MPIProcessor) = Dagger.supports_lapack_panel(proc.innerProc)
