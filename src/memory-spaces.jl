@@ -252,14 +252,147 @@ move_type(from_proc::Processor, to_proc::Processor, ::Type{<:Chunk{T}}) where T 
 
 # Decompose `x` -> `(parts::Tuple, header)`, where each part is a `DenseArray`
 # with a bitstype eltype. Return `nothing` to opt out of the raw-bytes path.
-inplace_mpi_parts(x) = nothing
+#
+# Types that define nothing get the automatic decomposition below when they qualify: a concrete
+# struct that holds at least one plain `Array` of bits, directly or inside an immutable struct field.
+# The arrays travel as raw buffers; every other field (bits, `String`, `Dict`, `Vector{Any}`, ...) travels
+# in the header, which is serialized as usual, so such a field costs what it always did. Measured on
+# our cluster for a struct of three arrays, 40 MB between two nodes: 580 ms with `serialize`, 172 ms as raw
+# buffers (`serialize` copies the data into a fresh buffer, the receiver reads it into another fresh
+# buffer and deserializes it into a third; the raw path receives straight into the final array).
+# A value in which one array is reachable twice (a shared field) opts out, so that the sharing, which
+# `serialize` keeps, survives the transfer.
+# Elements whose bytes are all data: the MPI datatype of a struct with padding between its fields
+# carries the packed bytes only, so a buffer of such elements would not match the one the receiver allocates
+raw_dense(::Type{T}) where {T} = isprimitivetype(T) ||
+    (isbitstype(T) && fieldcount(T) > 0 && all(i -> raw_dense(fieldtype(T, i)), 1:fieldcount(T)) &&
+     sum(i -> sizeof(fieldtype(T, i)), 1:fieldcount(T)) == sizeof(T))
+raw_field_kind(::Type{F}) where {F} =
+    isbitstype(F) ? :value :
+    (F <: Array && isconcretetype(F) && raw_dense(eltype(F))) ? :array :
+    (isconcretetype(F) && isstructtype(F) && !ismutabletype(F) && raw_has_array(F)) ? :struct : :value
+# An array *wrapper* (`SubArray`, `ReshapedArray`, `PermutedDimsArray`, ...) is never decomposed: its
+# array field is the whole parent, which it does not own. A 256 x 256 view of a 2048 x 2048 matrix
+# travelled as all 32 MB of the parent, so `copyto!(::DArray, ::Matrix)` (one view per block) grew
+# with blocks x matrix size: 2048^2 in 256^2 blocks, 2 ranks: 2.1-2.9 s. `serialize` sends only the
+# viewed elements.
+# A type with its own `Serialization.serialize` method (`Thunk`, `WeakChunk`, ...) must keep it: taking the
+# value apart would bypass it. Only the generic method (and the one for tuples) is replaced. This needs
+# reflection, which a generated function may not use, so it is decided at run time, once per type.
+function raw_plain_serialize(::Type{T}) where {T}
+    try
+        m = which(Serialization.serialize, Tuple{Serialization.AbstractSerializer, T})
+        p = Base.unwrap_unionall(m.sig).parameters[3]
+        return p === Any || p === Tuple
+    catch
+        return false
+    end
+end
+function raw_has_array(::Type{T}) where {T}
+    (isconcretetype(T) && isstructtype(T) && !(T <: AbstractArray) && fieldcount(T) > 0) || return false
+    any(i -> raw_field_kind(fieldtype(T, i)) in (:array, :struct), 1:fieldcount(T))
+end
+# Emit the expressions that read the parts / header values / array sizes of `x::T`, in field order. `checks`
+# collects `isdefined` tests, outermost first: a struct with an undefined field (an inner constructor that
+# leaves one unset) cannot be read field by field, so it is left to `serialize`, which handles it.
+function raw_collect!(parts, vals, sizes, checks, ::Type{T}, x) where {T}
+    for i in 1:fieldcount(T)
+        F = fieldtype(T, i)
+        f = :(getfield($x, $i))
+        isbitstype(F) || push!(checks, :(isdefined($x, $i)))
+        k = raw_field_kind(F)
+        if k === :array
+            push!(parts, f); push!(sizes, :(size($f)))
+        elseif k === :struct
+            raw_collect!(parts, vals, sizes, checks, F, f)
+        else
+            push!(vals, f)
+        end
+    end
+end
+function raw_all_plain(::Type{T}) where {T}
+    raw_plain_serialize(T) || return false
+    for i in 1:fieldcount(T)
+        F = fieldtype(T, i)
+        raw_field_kind(F) === :struct && !raw_all_plain(F) && return false
+    end
+    return true
+end
+const RAW_ENABLED = Dict{DataType,Bool}()
+const RAW_ENABLED_LOCK = ReentrantLock()
+function raw_enabled(::Type{T}) where {T}
+    lock(RAW_ENABLED_LOCK) do
+        get!(() -> raw_all_plain(T), RAW_ENABLED, T)
+    end
+end
+@generated raw_candidate(::T) where {T} = raw_has_array(T)    # decided at compile time: no lock for the common values
+inplace_mpi_parts(x::T) where {T} = raw_candidate(x) && raw_enabled(T) ? raw_parts(x) : nothing
+@generated function raw_parts(x::T) where {T}
+    parts = Any[]; vals = Any[]; sizes = Any[]; checks = Any[]
+    raw_collect!(parts, vals, sizes, checks, T, :x)
+    n = length(parts)
+    ok = isempty(checks) ? true : foldr((c, r) -> :($c && $r), checks)
+    return quote
+        $ok || return nothing
+        parts = ($(parts...),)
+        vals = ($(vals...),)
+        # Memory reachable twice (a shared field, or an array next to a view or reshape of it): leave it
+        # to `serialize`, which keeps the sharing; the raw path would rebuild two independent arrays
+        for i in 1:$n
+            for j in (i + 1):$n
+                Base.mightalias(parts[i], parts[j]) && return nothing
+            end
+            for v in vals
+                v isa AbstractArray && Base.mightalias(parts[i], v) && return nothing
+            end
+        end
+        (parts, (vals, ($(sizes...),)))
+    end
+end
 # Allocate the receive buffers for `T` from `header` (host-resident; the sender
 # host-stages device arrays, and callers convert to the destination space).
-inplace_mpi_alloc(::Type{T}, header) where T =
-    error("inplace_mpi_alloc not defined for $T")
-# Rebuild a value of type `T` from received `parts` and `header`.
-inplace_mpi_build(::Type{T}, parts, header) where T =
-    error("inplace_mpi_build not defined for $T")
+function raw_alloc!(allocs, counter, ::Type{T}) where {T}
+    for i in 1:fieldcount(T)
+        F = fieldtype(T, i)
+        k = raw_field_kind(F)
+        if k === :array
+            counter[] += 1
+            push!(allocs, :($F(undef, header[2][$(counter[])])))
+        elseif k === :struct
+            raw_alloc!(allocs, counter, F)
+        end
+    end
+end
+@generated function inplace_mpi_alloc(::Type{T}, header) where {T}
+    raw_has_array(T) || return :(error("inplace_mpi_alloc not defined for ", $T))
+    allocs = Any[]
+    raw_alloc!(allocs, Ref(0), T)
+    return :(($(allocs...),))
+end
+# Rebuild a value of type `T` from received `parts` and `header`. Like `Serialization`, this does
+# not call a constructor, so a type with an inner constructor round-trips as it was.
+function raw_build(::Type{T}, pi, vi) where {T}
+    fields = Any[]
+    for i in 1:fieldcount(T)
+        F = fieldtype(T, i)
+        k = raw_field_kind(F)
+        if k === :array
+            pi[] += 1; push!(fields, :(parts[$(pi[])]))
+        elseif k === :struct
+            push!(fields, raw_build(F, pi, vi))
+        else
+            vi[] += 1; push!(fields, :(header[1][$(vi[])]))
+        end
+    end
+    return quote
+        vals = Any[$(fields...)]
+        GC.@preserve vals ccall(:jl_new_structv, Any, (Any, Ptr{Any}, UInt32), $T, pointer(vals), $(length(fields)))::$T
+    end
+end
+@generated function inplace_mpi_build(::Type{T}, parts, header) where {T}
+    raw_has_array(T) || return :(error("inplace_mpi_build not defined for ", $T))
+    return raw_build(T, Ref(0), Ref(0))
+end
 
 ### Aliasing and Memory Spans
 
