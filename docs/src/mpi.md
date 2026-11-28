@@ -368,7 +368,16 @@ called on its own) and returns the chunks to use from now on. Tasks bound to a
 chunk then use `scope=Dagger.scope(mpi_rank=Dagger.owner_rank(chunk))`. A move
 copies the data, so call it only when the imbalance is worth that; `tolerance`
 (default 1.05) is how far the most loaded rank may exceed the mean before
-anything moves. All ranks are assumed equally fast.
+anything moves.
+
+Three further options cover common cases. An element of `chunks` can be a tuple
+or vector of chunks that must stay together (all of them have the same owner and
+move as a unit; one cost per group). If ranks differ in speed, pass the costs as
+work and `speeds=[...]` (one number per rank): the plan then equalises
+`work / speed`, so a rank of half the speed ends with about half the work.
+`move_cost` and `horizon` make a move pay for itself: a chunk moves only if the
+time it saves over `horizon` steps exceeds the time the move takes.
+[`Dagger.rebalance_loads`](@ref) gives the per-rank times a plan predicts.
 
 ## Testing MPI code
 

@@ -91,5 +91,6 @@ Sch.get_dag_ids
 ```@docs
 rebalance
 rebalance_plan
+rebalance_loads
 owner_rank
 ```

@@ -92,3 +92,141 @@ end
     @test_throws ArgumentError Dagger.rebalance([Dagger.tochunk(1)], [1.0]; tolerance=1.1)
     @test Dagger.owner_rank(Dagger.tochunk(1)) == 0
 end
+
+# Ranks of different speed, moves that must pay for themselves, and the loads a plan predicts.
+@testset "rebalance_plan: speeds" begin
+    # work 12 on a rank of half the speed (rank 0), none on rank 1: rank 1 ends with twice the work of rank 0
+    own = zeros(Int, 12); cost = fill(1.0, 12)
+    plan = Dagger.rebalance_plan(own, cost, 2; speeds=[0.5, 1.0])
+    work = plan_loads(own, cost, 2, plan)
+    @test work == [4.0, 8.0]
+    @test Dagger.rebalance_loads(own, cost, 2; speeds=[0.5, 1.0], plan) == [8.0, 8.0]   # both need the same time
+    # only the ratios matter
+    @test Dagger.rebalance_plan(own, cost, 2; speeds=[5.0, 10.0]) == plan
+    # equal speeds are the same as no speeds
+    @test Dagger.rebalance_plan(own, cost, 2; speeds=[3.0, 3.0]) == Dagger.rebalance_plan(own, cost, 2)
+    # the fast rank is the one that starts with everything: it keeps twice the work of the slow one
+    work = plan_loads(own, cost, 2, Dagger.rebalance_plan(own, cost, 2; speeds=[2.0, 1.0]))
+    @test work == [8.0, 4.0]
+    # three ranks of speed 1, 2, 3: work follows the speed
+    work = plan_loads(zeros(Int, 24), fill(1.0, 24), 3, Dagger.rebalance_plan(zeros(Int, 24), fill(1.0, 24), 3; speeds=[1.0, 2.0, 3.0]))
+    @test all(abs.(work ./ [1.0, 2.0, 3.0] .- 4.0) .<= 0.5 * 1.05 * 4.0)
+    @test work[1] < work[2] < work[3]
+    # a balanced-in-time placement is left alone, and the same placement without speeds is not
+    @test isempty(Dagger.rebalance_plan([0, 0, 1, 1, 1, 1], fill(1.0, 6), 2; speeds=[1.0, 2.0]))
+    @test !isempty(Dagger.rebalance_plan([0, 0, 1, 1, 1, 1], fill(1.0, 6), 2))
+    # a slow rank gives up a chunk that an equally fast one would keep
+    @test isempty(Dagger.rebalance_plan([0, 0, 1, 1], fill(1.0, 4), 2))
+    @test Dagger.rebalance_plan([0, 0, 1, 1], fill(1.0, 4), 2; speeds=[1.0, 3.0]) |> length >= 1
+    # validation
+    @test_throws ArgumentError Dagger.rebalance_plan([0, 1], [1.0, 1.0], 2; speeds=[1.0])
+    @test_throws ArgumentError Dagger.rebalance_plan([0, 1], [1.0, 1.0], 2; speeds=[1.0, 1.0, 1.0])
+    @test_throws ArgumentError Dagger.rebalance_plan([0, 1], [1.0, 1.0], 2; speeds=[1.0, 0.0])
+    @test_throws ArgumentError Dagger.rebalance_plan([0, 1], [1.0, 1.0], 2; speeds=[1.0, -2.0])
+    @test_throws ArgumentError Dagger.rebalance_plan([0, 1], [1.0, 1.0], 2; speeds=[1.0, NaN])
+    @test_throws ArgumentError Dagger.rebalance_plan([0, 1], [1.0, 1.0], 2; speeds=[Inf, 1.0])
+    @test_throws ArgumentError Dagger.rebalance_loads([0, 1], [1.0, 1.0], 2; speeds=[1.0, 0.0])
+    @test_throws ArgumentError Dagger.rebalance_loads([0, 1], [1.0, 1.0], 2; speeds=[1.0])
+    # deterministic
+    p1 = Dagger.rebalance_plan(zeros(Int, 9), fill(1.0, 9), 4; speeds=[1.0, 2.0, 2.0, 0.5])
+    @test all(_ -> Dagger.rebalance_plan(zeros(Int, 9), fill(1.0, 9), 4; speeds=[1.0, 2.0, 2.0, 0.5]) == p1, 1:100)
+end
+
+@testset "rebalance_plan: a move must pay for itself (move_cost, horizon)" begin
+    own = [0, 0]; cost = [1.0, 1.0]       # moving one chunk takes 1 off the slower rank (2 -> 1)
+    @test Dagger.rebalance_plan(own, cost, 2) == [1 => 1]                       # free move: made
+    @test Dagger.rebalance_plan(own, cost, 2; move_cost=0.9) == [1 => 1]        # saves 1, costs 0.9: made
+    @test isempty(Dagger.rebalance_plan(own, cost, 2; move_cost=1.1))           # saves 1, costs 1.1: not made
+    @test isempty(Dagger.rebalance_plan(own, cost, 2; move_cost=1.0))           # exactly break even: not made
+    # the saving counts for every step the placement lasts
+    @test Dagger.rebalance_plan(own, cost, 2; move_cost=1.1, horizon=2) == [1 => 1]   # 2 > 1.1
+    @test isempty(Dagger.rebalance_plan(own, cost, 2; move_cost=2.0, horizon=2))      # 2 > 2 is false
+    @test isempty(Dagger.rebalance_plan(own, cost, 2; move_cost=0.4, horizon=0.25))   # 0.25 < 0.4
+    # one cost per chunk: the chunk that is cheap to move is the one that is chosen... or nothing moves
+    @test Dagger.rebalance_plan(own, cost, 2; move_cost=[0.5, 5.0]) == [1 => 1]
+    @test isempty(Dagger.rebalance_plan(own, cost, 2; move_cost=[5.0, 0.5]))   # the preferred chunk (index 1) is too dear: the plan stops
+    # the plan stops at the first move that does not pay, after the ones that did
+    own6 = zeros(Int, 6); cost6 = [4.0, 3.0, 2.0, 1.0, 1.0, 1.0]
+    free = Dagger.rebalance_plan(own6, cost6, 3)
+    @test length(free) == 3
+    # the savings of the moves shrink (7, 3 and 1 ... ), so a higher cost allows fewer of them, always a prefix of the free plan
+    counts = [length(Dagger.rebalance_plan(own6, cost6, 3; move_cost=m)) for m in (0.5, 1.5, 3.5, 100.0)]
+    @test counts == [3, 2, 1, 0]
+    @test Dagger.rebalance_plan(own6, cost6, 3; move_cost=1.5) == free[1:2]
+    @test length(Dagger.rebalance_plan(own6, cost6, 3; move_cost=100.0, horizon=1000)) == length(free)
+    # with speeds the saving is a time: a move to a fast rank saves more than to a slow one
+    @test Dagger.rebalance_plan([0, 0], [1.0, 1.0], 2; speeds=[1.0, 4.0], move_cost=0.9) |> length == 1
+    # validation
+    @test_throws ArgumentError Dagger.rebalance_plan(own, cost, 2; move_cost=-1.0)
+    @test_throws ArgumentError Dagger.rebalance_plan(own, cost, 2; move_cost=[1.0])
+    @test_throws ArgumentError Dagger.rebalance_plan(own, cost, 2; move_cost=NaN)
+    @test_throws ArgumentError Dagger.rebalance_plan(own, cost, 2; horizon=0)
+    @test_throws ArgumentError Dagger.rebalance_plan(own, cost, 2; horizon=-1)
+    @test_throws ArgumentError Dagger.rebalance_plan(own, cost, 2; horizon=Inf)
+end
+
+@testset "rebalance_loads: the predicted per-rank times" begin
+    own = [0, 0, 1]; cost = [2.0, 3.0, 1.0]
+    @test Dagger.rebalance_loads(own, cost, 2) == [5.0, 1.0]
+    @test Dagger.rebalance_loads(own, cost, 2; speeds=[1.0, 2.0]) == [5.0, 0.5]
+    plan = Dagger.rebalance_plan(own, cost, 2)
+    @test plan == [1 => 1]
+    @test Dagger.rebalance_loads(own, cost, 2; plan) == [3.0, 3.0]
+    @test Dagger.rebalance_loads(own, cost, 2; plan, speeds=[1.0, 2.0]) == [3.0, 1.5]
+    @test Dagger.rebalance_loads(Int[], Float64[], 3) == zeros(3)
+    @test own == [0, 0, 1]                                      # not touched
+    # what the plan predicts is what plan_loads computes by hand
+    rng = MersenneTwister(7)
+    for _ in 1:100
+        nr = rand(rng, 1:5); n = rand(rng, 0:15)
+        o = rand(rng, 0:(nr - 1), n); c = rand(rng, (0.0, 1.0, 2.5, 4.0), n); s = rand(rng, (0.5, 1.0, 2.0), nr)
+        pl = Dagger.rebalance_plan(o, c, nr; speeds=s)
+        @test Dagger.rebalance_loads(o, c, nr; speeds=s, plan=pl) ≈ plan_loads(o, c, nr, pl) ./ s
+    end
+    @test_throws ArgumentError Dagger.rebalance_loads([0, 1], [1.0], 2)
+    @test_throws ArgumentError Dagger.rebalance_loads([0, 2], [1.0, 1.0], 2)
+    @test_throws ArgumentError Dagger.rebalance_loads([0, 1], [1.0, 1.0], 2; plan=[1 => 5])
+end
+
+# Groups are plain entries of the plan (one owner and one cost per group): a group moves as a whole. The members' placement is tested
+# under MPI; here: the plan of groups is the plan of their summed costs, and the loads are in groups' costs.
+@testset "rebalance_plan: groups are single entries with the cost of the group" begin
+    members = [[1.0, 2.0, 0.5, 0.5, 1.0], [3.0, 1.0, 1.0, 0.5, 0.5], [2.0, 2.0, 1.0, 1.0, 1.0], [1.0, 1.0, 1.0, 1.0, 1.0]]
+    gcost = sum.(members)
+    plan = Dagger.rebalance_plan([0, 0, 0, 0], gcost, 2)
+    @test !isempty(plan)
+    after = plan_loads([0, 0, 0, 0], gcost, 2, plan)
+    @test sum(after) ≈ sum(gcost) && maximum(after) < sum(gcost)
+    @test all(p -> 1 <= first(p) <= 4, plan)
+end
+
+# A randomized check against a brute-force bound: for small instances the best assignment is found by trying them all. The greedy plan
+# never makes the slowest rank slower, and ends within `tolerance` of the mean or within one chunk of the optimum.
+@testset "rebalance_plan: random instances against the optimum" begin
+    rng = MersenneTwister(11)
+    function best_time(cost, spd)
+        nr = length(spd); n = length(cost); best = Inf
+        for code in 0:(nr^n - 1)
+            t = zeros(nr); c = code
+            for i in 1:n
+                t[c % nr + 1] += cost[i]; c ÷= nr
+            end
+            best = min(best, maximum(t ./ spd))
+        end
+        return best
+    end
+    for trial in 1:150
+        nr = rand(rng, 2:3); n = rand(rng, 1:7)
+        own = rand(rng, 0:(nr - 1), n)
+        cost = rand(rng, (0.5, 1.0, 2.0, 3.0, 5.0), n)
+        spd = rand(rng, (1.0, 2.0, 4.0), nr)
+        plan = Dagger.rebalance_plan(own, cost, nr; speeds=spd)
+        before = maximum(Dagger.rebalance_loads(own, cost, nr; speeds=spd))
+        after = maximum(Dagger.rebalance_loads(own, cost, nr; speeds=spd, plan))
+        mean_t = sum(cost) / sum(spd)
+        opt = best_time(cost, spd)
+        @test after <= before + 1e-9
+        @test opt <= after + 1e-9
+        @test after <= max(1.05 * mean_t, opt + maximum(cost) / minimum(spd)) + 1e-9
+    end
+end

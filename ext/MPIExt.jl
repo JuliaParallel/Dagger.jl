@@ -2690,28 +2690,41 @@ accel_matches_proc(accel::MPIAcceleration, proc) = false
 # returns its argument (the data is copied there by the ordinary argument move). The assignment (`Dagger.rebalance_plan`) is a pure
 # function of the chunks' owners and the costs, so every rank derives the same plan and plans the same tasks.
 Dagger.owner_rank(c::Dagger.Chunk{<:Any,<:MPIRef}) = c.handle.rank
-# An element of `chunks` is a Chunk, or a DTask whose result is a Chunk (what `DArray.chunks` may hold).
+# An element of `chunks` is a Chunk, a DTask whose result is a Chunk (what `DArray.chunks` may hold), or a tuple / vector of those: a
+# group of chunks that must stay together. A group has one owner, one cost, and is moved as a unit.
 _rebalance_chunk(x::Dagger.Chunk) = x
 _rebalance_chunk(x::Dagger.DTask) = fetch(x; raw=true)
 _rebalance_chunk(x) = throw(ArgumentError("`Dagger.rebalance` moves Chunks (or DTasks that produce one), got $(typeof(x))"))
+_rebalance_members(x::Union{Tuple,AbstractVector}) = Dagger.Chunk[_rebalance_chunk(m) for m in x]
+_rebalance_members(x) = Dagger.Chunk[_rebalance_chunk(x)]
+_rebalance_isgroup(x) = x isa Union{Tuple,AbstractVector}
 
 function Dagger.rebalance(accel::MPIAcceleration, chunks::AbstractVector, costs::AbstractVector;
-                          tolerance::Real=1.05, max_moves::Integer=length(chunks))
+                          tolerance::Real=1.05, max_moves::Integer=length(chunks),
+                          speeds::Union{Nothing,AbstractVector{<:Real}}=nothing,
+                          move_cost::Union{Real,AbstractVector{<:Real}}=0.0, horizon::Real=1)
     comm = accel.comm
-    comm == MPI.COMM_WORLD || throw(ArgumentError("`Dagger.rebalance` works on the graph of the whole job, not on a graph of a subset of the ranks"))
-    resolved = Dagger.Chunk[_rebalance_chunk(x) for x in chunks]
-    all(c -> c isa Dagger.Chunk{<:Any,<:MPIRef}, resolved) || throw(ArgumentError("`Dagger.rebalance` moves MPI chunks"))
-    owners = Int[Dagger.owner_rank(c) for c in resolved]
-    # Always checked (not only under `check_uniformity!`): a rebalance is rare, and ranks that plan from different costs would
+    comm == MPI.COMM_WORLD || throw(ArgumentError("`Dagger.rebalance` works on the graph of the whole job, not on a rank-local or group graph"))
+    groups = [_rebalance_members(x) for x in chunks]
+    all(g -> !isempty(g) && all(c -> c isa Dagger.Chunk{<:Any,<:MPIRef}, g), groups) || throw(ArgumentError("`Dagger.rebalance` moves MPI chunks"))
+    owners = Int[Dagger.owner_rank(first(g)) for g in groups]
+    for (g, o) in zip(groups, owners)
+        all(c -> Dagger.owner_rank(c) == o, g) || throw(ArgumentError("the chunks of one group must have the same owner"))
+    end
+    # Always checked (not only under `check_uniformity!`): a rebalance is rare, and ranks that plan from different inputs would
     # plan different moves and wait for each other forever.
     compare_all(hash(Float64[x for x in costs]), comm) || throw(ArgumentError("`Dagger.rebalance`: `costs` differ between ranks"))
-    plan = Dagger.rebalance_plan(owners, costs, MPI.Comm_size(comm); tolerance, max_moves)
-    out = Dagger.Chunk[c for c in resolved]
-    moves = [(i, Dagger.@spawn(scope=Dagger.scope(mpi_rank=dst), identity(resolved[i]))) for (i, dst) in plan]
-    for (i, t) in moves
-        out[i] = fetch(t; raw=true)   # every rank takes part, so the new chunk exists on all of them
+    speeds === nothing || compare_all(hash(Float64[x for x in speeds]), comm) || throw(ArgumentError("`Dagger.rebalance`: `speeds` differ between ranks"))
+    compare_all(hash((Float64[x for x in (move_cost isa Real ? (move_cost,) : move_cost)], Float64(horizon))), comm) ||
+        throw(ArgumentError("`Dagger.rebalance`: `move_cost` or `horizon` differ between ranks"))
+    plan = Dagger.rebalance_plan(owners, costs, MPI.Comm_size(comm); tolerance, max_moves, speeds, move_cost, horizon)
+    out = Any[_rebalance_isgroup(chunks[i]) ? groups[i] : only(groups[i]) for i in eachindex(chunks)]
+    moves = [(i, [Dagger.@spawn(scope=Dagger.scope(mpi_rank=dst), identity(c)) for c in groups[i]]) for (i, dst) in plan]
+    for (i, ts) in moves
+        moved = Dagger.Chunk[fetch(t; raw=true) for t in ts]   # every rank takes part, so the new chunks exist on all of them
+        out[i] = _rebalance_isgroup(chunks[i]) ? moved : only(moved)
     end
-    return out, plan
+    return (all(x -> x isa Dagger.Chunk, out) ? Dagger.Chunk[x for x in out] : out), plan
 end
 
 end # module MPIExt
