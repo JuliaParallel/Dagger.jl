@@ -997,6 +997,8 @@ concurrently across threads.
     Dagger.options_merge!(options, state.sch_options)
     Dagger.populate_defaults!(options, sig)
 
+    accel = something(options.acceleration, current_acceleration())
+
     # Calculate scope.  Errors are stored in `scope_ex` and applied in Phase 3.
     local scope
     local scope_ex = nothing
@@ -1004,7 +1006,7 @@ concurrently across threads.
         # Bypass scope calculation if it's been done for us already
         scope = options.exec_scope
     else
-        scope = constrain(@something(options.compute_scope, options.scope, DefaultScope()),
+        scope = constrain(Dagger.localize_scope(accel, @something(options.compute_scope, options.scope, DefaultScope())),
                           @something(options.result_scope, AnyScope()))
         if scope isa InvalidScope
             scope_ex = SchedulingException("compute_scope and result_scope are not compatible: $(scope.x), $(scope.y)")
@@ -1045,7 +1047,6 @@ concurrently across threads.
     # processors, imposes a deterministic processor order, and (under uniform
     # execution) makes selection ignore rank-local capacity/occupancy so every
     # rank picks the same processor for this task.
-    accel = something(options.acceleration, current_acceleration())
 
     sorted_procs = @reusable_vector :schedule_one!_sorted_procs Processor OSProc() 32
     if uniform_execution(accel)

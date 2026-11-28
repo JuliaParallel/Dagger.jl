@@ -147,6 +147,9 @@ end
 
 include("spawn.jl")
 include("noaliasing_args.jl")
+include("comm_self.jl")
+include("rank_local_scope.jl")
+include("groups.jl")
 
 @testset "Datadeps" begin
 

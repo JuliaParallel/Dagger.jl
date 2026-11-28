@@ -378,6 +378,57 @@ julia --project=test/mpi/env test/mpi/run.jl 4 2 test/mpi/cpu.jl
 julia --project=test/cudaenv test/mpi/run.jl 2 2 test/mpi/cuda.jl
 ```
 
+## Rank-local task graphs
+
+Under SPMD every rank plans every task. When a phase of a program has a
+data-dependent amount of work that differs per rank (building a local tree, say), the
+shared graph forces all ranks to plan all of it, and the task counts have to agree.
+[`Dagger.with_rank_local`](@ref) runs a block whose tasks only the calling rank plans
+and runs; the other ranks never see them:
+
+```julia
+sums = Dagger.with_rank_local() do
+    # a different number of tasks on every rank is fine here
+    fetch.([Dagger.@spawn(sum(local_pieces[i])) for i in 1:length(local_pieces)])
+end
+```
+
+[`Dagger.per_rank`](@ref)`(f, T)` hands the result over to the shared graph: every
+rank runs `f()` as a rank-local graph and gets a vector with one shared chunk per
+rank, owned by that rank. `T` is the element type of the result and must be given
+by the caller; it is checked against what the task returned.
+
+Rules for data crossing the two graphs:
+
+- A rank-local task may read a chunk of the shared graph that this rank owns, in place.
+- A shared task cannot read a rank-local chunk; use `per_rank`. This is an error.
+- A rank-local task cannot read a chunk owned by another rank. This is an error.
+- A scope `Dagger.scope(mpi_rank=me)` inside a rank-local block means this rank's
+  processors of that graph; a scope naming another rank matches nothing.
+- The graph is selected through the task-local acceleration, so tasks started with
+  `Threads.@spawn` inside the block do not belong to it.
+
+## Group task graphs
+
+[`Dagger.with_group`](@ref)`(f, comm)` is the same idea for a communicator of `k` ranks
+(made by the application with `MPI.Comm_split` or `MPI.Comm_create_group`): only its members
+plan and run the tasks of the block, with their own task ids, so planning per rank does
+not grow with the total number of tasks. Every member runs the same program inside the block.
+The first use of a communicator is collective over its members.
+[`Dagger.per_group`](@ref)`(f, comm, T)` is `per_rank` on `comm`, and `per_rank` is
+`per_group` on the world. Data crosses between groups under the rules of rank-local graphs:
+only a process that is a member of both and owns the chunk reads it, in place.
+
+Each group runs a broadcast relay on a duplicate of its communicator. Call
+[`Dagger.free_group!`](@ref)`(comm)` (collective, after the group's tasks are done and before
+freeing `comm`) to stop it and free the duplicate; a chunk of a freed group cannot be fetched
+any more (an error). A group costs a communicator and a relay task, so a group graph is worth
+it when many ranks would otherwise plan each other's tasks, not for a few ranks. The ids of a
+group's tasks are limited to `2^24` per group: past that the next spawn is an error, so free
+the group and start a new one. The first use of a communicator exchanges a small message with
+every member on the tag `MPI.tag_ub() - 1` of `comm`; the application must not use that tag on it.
+Uniformity checks are off inside groups, and a task of the world cannot read a group chunk.
+
 ## Limitations and tips
 
 - **Keep planning uniform.** The single most important rule: every rank must

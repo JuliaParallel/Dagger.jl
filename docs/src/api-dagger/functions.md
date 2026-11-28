@@ -86,3 +86,13 @@ Sch.exec!
 Sch.halt!
 Sch.get_dag_ids
 ```
+
+## MPI Task Graph Functions
+```@docs
+with_rank_local
+per_rank
+with_group
+per_group
+free_group!
+with_acceleration
+```
