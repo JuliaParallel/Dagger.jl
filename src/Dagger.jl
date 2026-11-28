@@ -92,6 +92,7 @@ include("utils/interval_tree.jl")
 include("utils/libc-array.jl")
 include("memory-spaces.jl")
 include("acceleration.jl")
+include("rebalance.jl")
 
 # Task scheduling
 include("compute.jl")
