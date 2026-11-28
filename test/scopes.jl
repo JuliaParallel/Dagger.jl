@@ -286,3 +286,14 @@
 
     rmprocs([wid1, wid2])
 end
+
+@testset "UnionScope constrained by AnyScope is itself" begin
+    u = Dagger.UnionScope([Dagger.ExactScope(Dagger.ThreadProc(1, t)) for t in 1:8])
+    # `schedule_one!` does this for every task without a result scope; it must neither rebuild the union nor change it
+    @test Dagger.constrain(u, Dagger.AnyScope()) === u
+    @test Dagger.constrain(Dagger.AnyScope(), u) === u
+    @test Dagger.constrain(u, Dagger.AnyScope(), Dagger.AnyScope()) === u
+    # and a union is still narrowed by something that is not AnyScope
+    narrowed = Dagger.constrain(u, Dagger.ExactScope(Dagger.ThreadProc(1, 3)))
+    @test narrowed isa Dagger.UnionScope && length(narrowed.scopes) == 1
+end

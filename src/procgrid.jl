@@ -121,6 +121,7 @@ function emit_chunk_tasks!(domainchunks, procgrid, eltype::Type{T}, spawn_chunk:
             scope = procgrid === nothing ? default_scope : procgrid_scope(procgrid, I)
             i = LinearIndices(domainchunks)[I]
             tasks[i] = spawn_chunk(scope, I, i)
+            note_chunk_placement!(current_acceleration(), tasks[i], scope)
         end
     end
     # Under SPMD/MPI (uniform execution) the chunk-placement tasks must run
