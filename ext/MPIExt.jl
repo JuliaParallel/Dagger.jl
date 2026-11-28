@@ -2685,4 +2685,358 @@ accel_matches_proc(accel::MPIAcceleration, proc::MPIClusterProc) = true
 accel_matches_proc(accel::MPIAcceleration, proc::MPIProcessor) = true
 accel_matches_proc(accel::MPIAcceleration, proc) = false
 
+# --- cooperative collectives: barrier, bcast, gather, allgather, scatter, alltoall (and, on top of gather and allgather,
+# reduce_to and allreduce in src/acceleration.jl) ---------------------------------------------------------------------
+#
+# A blocking MPI collective called from the driver parks an OS thread inside MPI. That thread reaches no GC safepoint and
+# runs no relay, so a rank can freeze while a peer waits for something the frozen rank should forward. Here every collective
+# is posted as a non-blocking request (`MPI_Ibarrier`, `MPI_Ibcast`, `MPI_Igather(v)`, `MPI_Iallgather(v)`, `MPI_Iscatter(v)`,
+# `MPI_Ialltoall(v)`) and waited for with `MPI.Test` and `yield`, like every other MPI wait in this file (`coll_run`). MPI.jl
+# wraps only some of these, so the low-level `MPI.API` calls are used. Values travel serialized (for an array of bits
+# elements that is a small header and the raw bytes), so every contribution has its own size: the sizes are exchanged first,
+# then the bytes with the `v` variant of the collective.
+#
+# A contribution that cannot be serialized (or is too large for MPI's `Cint` counts) must not make one rank leave the
+# collective while the others wait in it. It is sent as an error contribution instead, and the ranks that receive it throw.
+#
+# MPI requires the processes of a communicator to start their collectives in the same order. Collectives on different
+# communicators may be in flight at the same time (for example one `MPI.Comm_dup` per task that communicates).
+
+const COLL_OK = 0x00
+const COLL_ERR = 0x01
+
+# One contribution is at most this many bytes, so that `P` of them still fit one `Cint` count in a gather or scatter.
+coll_limit(comm::MPI.Comm) = typemax(Cint) ÷ max(1, MPI.Comm_size(comm))
+
+function coll_error_blob(msg::String)
+    io = IOBuffer()
+    write(io, COLL_ERR)
+    Serialization.serialize(io, msg)
+    return take!(io)
+end
+
+function coll_encode(x, limit::Integer)
+    io = IOBuffer()
+    try
+        write(io, COLL_OK)
+        Serialization.serialize(io, x)
+        io.size - 1 <= limit || error("a contribution of $(io.size - 1) bytes exceeds the limit of $limit bytes (2 GiB divided by the number of ranks)")
+    catch err
+        err isa InterruptException && rethrow()
+        return coll_error_blob(sprint(showerror, err))
+    end
+    return take!(io)
+end
+
+function coll_decode(blob::AbstractVector{UInt8}, from_rank::Integer)
+    io = IOBuffer(blob)
+    flag = read(io, UInt8)
+    v = Serialization.deserialize(io)
+    flag == COLL_OK || error("collective failed, the contribution of rank $from_rank could not be sent: $v")
+    return v
+end
+
+coll_wait(req, comm::MPI.Comm, name::String) =
+    __wait_for_request(req, comm, MPI.Comm_rank(comm), -1, UInt32(0), name, "collective")
+
+# Post one non-blocking collective with `post(req)`, keep every buffer it uses alive, wait for it cooperatively.
+function coll_run(post, comm::MPI.Comm, name::String, keep...)
+    req = MPI.Request()
+    GC.@preserve keep begin
+        post(req)
+        MPI.setbuffer!(req, keep)
+        coll_wait(req, comm, name)
+    end
+    return nothing
+end
+
+function coll_check_root(comm::MPI.Comm, root::Integer)
+    0 <= root < MPI.Comm_size(comm) || throw(ArgumentError("root $root is not a rank of a communicator of size $(MPI.Comm_size(comm))"))
+    return Cint(root)
+end
+
+function coll_split(recv::Vector{UInt8}, counts::Vector{Cint})
+    blocks = Vector{Vector{UInt8}}(undef, length(counts))
+    off = 0
+    for r in eachindex(counts)
+        n = Int(counts[r])
+        blocks[r] = recv[off+1:off+n]
+        off += n
+    end
+    return blocks
+end
+
+function coll_bcast_bytes(comm::MPI.Comm, root::Cint, blob::Union{Nothing,Vector{UInt8}})
+    MPI.Comm_size(comm) == 1 && return blob::Vector{UInt8}
+    isroot = MPI.Comm_rank(comm) == root
+    nref = Ref(Cint(isroot ? length(blob::Vector{UInt8}) : 0))
+    nbuf = MPI.Buffer(nref)
+    coll_run(comm, "bcast", nbuf, nref) do req
+        MPI.API.MPI_Ibcast(nbuf.data, nbuf.count, nbuf.datatype, root, comm, req)
+    end
+    data = isroot ? blob::Vector{UInt8} : Vector{UInt8}(undef, Int(nref[]))
+    dbuf = MPI.Buffer(data)
+    coll_run(comm, "bcast", dbuf, data) do req
+        MPI.API.MPI_Ibcast(dbuf.data, dbuf.count, dbuf.datatype, root, comm, req)
+    end
+    return data
+end
+
+# The sizes of all contributions on the root (everywhere when `all`), by `MPI_Igather` / `MPI_Iallgather`; and then the bytes
+# by the matching `v` variant. Returns one `Vector{UInt8}` per rank on a receiving rank, `nothing` elsewhere.
+function coll_gather_bytes(comm::MPI.Comm, root::Cint, mine::Vector{UInt8}, all::Bool)
+    sz = MPI.Comm_size(comm)
+    sz == 1 && return Vector{UInt8}[mine]
+    recving = all || MPI.Comm_rank(comm) == root
+    name = all ? "allgather" : "gather"
+    counts = Vector{Cint}(undef, recving ? sz : 0)
+    sref = Ref(Cint(length(mine)))
+    sbuf = MPI.Buffer(sref)
+    if recving
+        rbuf = MPI.UBuffer(counts, 1)
+        coll_run(comm, name, sbuf, rbuf, sref, counts) do req
+            if all
+                MPI.API.MPI_Iallgather(sbuf.data, sbuf.count, sbuf.datatype, rbuf.data, rbuf.count, rbuf.datatype, comm, req)
+            else
+                MPI.API.MPI_Igather(sbuf.data, sbuf.count, sbuf.datatype, rbuf.data, rbuf.count, rbuf.datatype, root, comm, req)
+            end
+        end
+    else
+        coll_run(comm, name, sbuf, sref) do req
+            MPI.API.MPI_Igather(sbuf.data, sbuf.count, sbuf.datatype, C_NULL, Cint(0), sbuf.datatype, root, comm, req)
+        end
+    end
+    sbuf2 = MPI.Buffer(mine)
+    if recving
+        recv = Vector{UInt8}(undef, sum(counts; init=0))
+        vbuf = MPI.VBuffer(recv, counts)
+        coll_run(comm, name, sbuf2, vbuf, mine, recv, counts) do req
+            if all
+                MPI.API.MPI_Iallgatherv(sbuf2.data, sbuf2.count, sbuf2.datatype, vbuf.data, vbuf.counts, vbuf.displs, vbuf.datatype, comm, req)
+            else
+                MPI.API.MPI_Igatherv(sbuf2.data, sbuf2.count, sbuf2.datatype, vbuf.data, vbuf.counts, vbuf.displs, vbuf.datatype, root, comm, req)
+            end
+        end
+        return coll_split(recv, counts)
+    end
+    coll_run(comm, name, sbuf2, mine) do req
+        MPI.API.MPI_Igatherv(sbuf2.data, sbuf2.count, sbuf2.datatype, C_NULL, C_NULL, C_NULL, sbuf2.datatype, root, comm, req)
+    end
+    return nothing
+end
+
+# Root sends one blob to every rank (`blobs` has one per rank, only read on the root); every rank returns its own.
+function coll_scatter_bytes(comm::MPI.Comm, root::Cint, blobs::Union{Nothing,Vector{Vector{UInt8}}})
+    sz = MPI.Comm_size(comm)
+    sz == 1 && return (blobs::Vector{Vector{UInt8}})[1]
+    isroot = MPI.Comm_rank(comm) == root
+    sizes = isroot ? Cint[length(b) for b in blobs::Vector{Vector{UInt8}}] : Cint[]
+    nref = Ref(Cint(0))
+    nbuf = MPI.Buffer(nref)
+    if isroot
+        ubuf = MPI.UBuffer(sizes, 1)
+        coll_run(comm, "scatter", nbuf, ubuf, nref, sizes) do req
+            MPI.API.MPI_Iscatter(ubuf.data, ubuf.count, ubuf.datatype, nbuf.data, nbuf.count, nbuf.datatype, root, comm, req)
+        end
+    else
+        coll_run(comm, "scatter", nbuf, nref) do req
+            MPI.API.MPI_Iscatter(C_NULL, Cint(0), nbuf.datatype, nbuf.data, nbuf.count, nbuf.datatype, root, comm, req)
+        end
+    end
+    mine = Vector{UInt8}(undef, Int(nref[]))
+    mbuf = MPI.Buffer(mine)
+    if isroot
+        all = reduce(vcat, blobs::Vector{Vector{UInt8}})
+        vbuf = MPI.VBuffer(all, sizes)
+        coll_run(comm, "scatter", mbuf, vbuf, mine, all, sizes) do req
+            MPI.API.MPI_Iscatterv(vbuf.data, vbuf.counts, vbuf.displs, vbuf.datatype, mbuf.data, mbuf.count, mbuf.datatype, root, comm, req)
+        end
+    else
+        coll_run(comm, "scatter", mbuf, mine) do req
+            MPI.API.MPI_Iscatterv(C_NULL, C_NULL, C_NULL, mbuf.datatype, mbuf.data, mbuf.count, mbuf.datatype, root, comm, req)
+        end
+    end
+    return mine
+end
+
+# Every rank sends one blob to every rank (`blobs[r]` goes to rank r-1) and returns the blobs it received, by source rank.
+function coll_alltoall_bytes(comm::MPI.Comm, blobs::Vector{Vector{UInt8}})
+    sz = MPI.Comm_size(comm)
+    sz == 1 && return blobs
+    scounts = Cint[length(b) for b in blobs]
+    rcounts = Vector{Cint}(undef, sz)
+    sbuf = MPI.UBuffer(scounts, 1)
+    rbuf = MPI.UBuffer(rcounts, 1)
+    coll_run(comm, "alltoall", sbuf, rbuf, scounts, rcounts) do req
+        MPI.API.MPI_Ialltoall(sbuf.data, sbuf.count, sbuf.datatype, rbuf.data, rbuf.count, rbuf.datatype, comm, req)
+    end
+    all = reduce(vcat, blobs)
+    recv = Vector{UInt8}(undef, sum(rcounts; init=0))
+    svb = MPI.VBuffer(all, scounts)
+    rvb = MPI.VBuffer(recv, rcounts)
+    coll_run(comm, "alltoall", svb, rvb, all, recv, scounts, rcounts) do req
+        MPI.API.MPI_Ialltoallv(svb.data, svb.counts, svb.displs, svb.datatype, rvb.data, rvb.counts, rvb.displs, rvb.datatype, comm, req)
+    end
+    return coll_split(recv, rcounts)
+end
+
+# Allgather has a second implementation, hand-written dissemination rounds, because for small contributions it measured
+# faster than the library's collective, and the crossover depends on the MPI implementation:
+#
+# * Rounds (default): before a round a rank holds the contributions of the `have` ranks that follow it (cyclically), itself
+#   first. In the round it sends its first `min(have, P - j*have)` blocks to the rank j*have below it and receives as many
+#   from the rank j*have above it, for j = 1..k, so it holds (k+1)*have blocks afterwards: ceil(log_(k+1) P) rounds for any
+#   P. All sends of a round are posted, then all receives are waited for. Messages of a round come from distinct sources,
+#   and messages from one source arrive in order, so a single tag serves every round and every call.
+# * Native: `MPI_Iallgather` / `MPI_Iallgatherv` (`coll_gather_bytes`).
+#
+# Measured on our cluster with Open MPI (slowest rank, ms, exchange only): about 3-10 KB per rank at 26-104 ranks, the rounds
+# were about twice as fast (20 against 40 ms at 104 ranks, 15 against 24 ms at 52); at 4 KB per rank and 24 / 48 / 96 ranks
+# rounds 5.0 / 6.3 / 19 against native 7.8 / 11 / 20; at 16 KB 7.5 / 22 / 121 against 14 / 18 / 39; from about 16 KB per rank
+# the native one wins (64 KB: 34 / 43 / 258 against 17 / 28 / 171). On MPICH on a laptop the rounds were about twice as
+# fast at 4 KB with 4 and 8 ranks, on Open MPI on the same machine native was faster (41 / 96 us against 105 / 274 us). None
+# of this was re-measured on other systems. The size of a contribution differs between ranks, so it cannot choose the
+# algorithm per call: the choice is a scoped value that every rank must set alike, and so is the fanout.
+
+"Use the library's non-blocking allgather instead of the hand-written rounds in `Dagger.allgather`. Set it alike on every rank (with `with`)."
+const MPI_ALLGATHER_NATIVE = ScopedValue(false)
+"Number of partners per round of the hand-written allgather (3 rounds instead of 7 for 96 ranks at 4). Set it alike on every rank."
+const MPI_ALLGATHER_FANOUT = ScopedValue(4)
+
+# A tag of its own: `compare_all_mpi_tag()` carries the uniformity checks, which may run while a collective does.
+allgather_rounds_tag() = UInt32(MPI.tag_ub()) - UInt32(1)
+
+function coll_allgather_rounds(comm::MPI.Comm, mine::Vector{UInt8})
+    rank = MPI.Comm_rank(comm); sz = MPI.Comm_size(comm)
+    blocks = Vector{Vector{UInt8}}(undef, sz)
+    blocks[rank + 1] = mine
+    sz == 1 && return blocks
+    tag = allgather_rounds_tag()
+    k = max(1, MPI_ALLGATHER_FANOUT[])
+    have = 1
+    while have < sz
+        sreqs = Tuple{MPI.Request,Int}[]
+        for j in 1:k
+            cnt = min(have, sz - j * have)
+            cnt <= 0 && break
+            out = Vector{Vector{UInt8}}(undef, cnt)
+            for m in 0:cnt-1
+                out[m + 1] = blocks[mod(rank + m, sz) + 1]
+            end
+            to = mod(rank - j * have, sz)
+            push!(sreqs, (MPI.isend(out, comm; dest=to, tag), to))
+        end
+        for j in 1:k
+            cnt = min(have, sz - j * have)
+            cnt <= 0 && break
+            from = mod(rank + j * have, sz)
+            got = recv_yield(comm, from, tag)::Vector{Vector{UInt8}}
+            for m in 1:cnt
+                blocks[mod(rank + j * have + m - 1, sz) + 1] = got[m]
+            end
+        end
+        for (req, to) in sreqs
+            __wait_for_request(req, comm, rank, to, tag, "allgather", "send")
+        end
+        have = min(have * (k + 1), sz)
+    end
+    return blocks
+end
+
+coll_allgather_bytes(comm::MPI.Comm, mine::Vector{UInt8}) =
+    MPI_ALLGATHER_NATIVE[] ? coll_gather_bytes(comm, Cint(0), mine, true) : coll_allgather_rounds(comm, mine)
+
+function Dagger.barrier(accel::MPIAcceleration; comm::MPI.Comm=accel.comm)
+    MPI.Comm_size(comm) == 1 && return nothing
+    coll_wait(MPI.Ibarrier(comm), comm, "barrier")
+    return nothing
+end
+
+function Dagger.bcast(accel::MPIAcceleration, x; root::Integer=0, comm::MPI.Comm=accel.comm)
+    r = coll_check_root(comm, root)
+    isroot = MPI.Comm_rank(comm) == r
+    blob = coll_bcast_bytes(comm, r, isroot ? coll_encode(x, coll_limit(comm)) : nothing)
+    return coll_decode(blob, r)
+end
+
+function Dagger.allgather(accel::MPIAcceleration, x; comm::MPI.Comm=accel.comm)
+    blocks = coll_allgather_bytes(comm, coll_encode(x, coll_limit(comm)))::Vector{Vector{UInt8}}
+    return Any[coll_decode(b, r - 1) for (r, b) in enumerate(blocks)]
+end
+
+function Dagger.gather(accel::MPIAcceleration, x; root::Integer=0, comm::MPI.Comm=accel.comm)
+    r = coll_check_root(comm, root)
+    mine = coll_encode(x, coll_limit(comm))
+    blocks = coll_gather_bytes(comm, r, mine, false)
+    if blocks === nothing
+        # a contributor learns of its own failure too; the root throws when it decodes the error contribution
+        mine[1] == COLL_OK || coll_decode(mine, MPI.Comm_rank(comm))
+        return nothing
+    end
+    return Any[coll_decode(b, i - 1) for (i, b) in enumerate(blocks)]
+end
+
+# The task form of allgather: every rank contributes the results of the tasks it owns, so nothing is moved to a single rank first.
+function Dagger.allgather_tasks(accel::MPIAcceleration, tasks::AbstractVector)
+    comm = accel.comm
+    rank = MPI.Comm_rank(comm)
+    # The value of every task whose result this rank owns, or the failure it saw. Read from the task's future, not by
+    # `fetch(task)`: nothing here may take a task or reference id.
+    mine = Pair{Int,Any}[]
+    for (i, t) in enumerate(tasks)
+        try
+            raw = fetch(t.future; move_value=false, unwrap=false, uniform=false)
+            raw isa Chunk && raw.handle isa MPIRef ||
+                error("Dagger.allgather_tasks needs tasks whose results are MPI chunks, got $(typeof(raw))")
+            h = raw.handle
+            h.comm == comm || error("Dagger.allgather_tasks: a task belongs to another communicator than the current one")
+            h.rank == rank && push!(mine, i => poolget(h; uniform=false))
+        catch err
+            err isa InterruptException && rethrow()
+            push!(mine, i => CapturedException(err, catch_backtrace()))
+        end
+    end
+    values = Vector{Any}(undef, length(tasks))
+    filled = fill(false, length(tasks))
+    failure = nothing
+    for part in Dagger.allgather(accel, mine; comm), (i, v) in part
+        if v isa CapturedException
+            (failure === nothing || i < failure[1]) && (failure = (i, v))
+        else
+            values[i] = v; filled[i] = true
+        end
+    end
+    failure === nothing || throw(failure[2])
+    all(filled) || error("Dagger.allgather_tasks: no process owned the result of task $(findfirst(!, filled))")
+    return Any[v for v in values]
+end
+
+# One blob per rank from a vector with one element per rank; a wrong length or an element that cannot be sent becomes an
+# error blob for every rank, so that nobody is left waiting.
+function coll_encode_each(xs, comm::MPI.Comm, what::String)
+    sz = MPI.Comm_size(comm)
+    length(xs) == sz || return fill(coll_error_blob("$what needs one element per rank ($sz), got $(length(xs))"), sz)
+    limit = coll_limit(comm)
+    blobs = Vector{Vector{UInt8}}(undef, sz)
+    for i in 1:sz
+        blobs[i] = coll_encode(xs[i], limit)
+        if blobs[i][1] != COLL_OK
+            return fill(blobs[i], sz)
+        end
+    end
+    return blobs
+end
+
+function Dagger.scatter(accel::MPIAcceleration, xs; root::Integer=0, comm::MPI.Comm=accel.comm)
+    r = coll_check_root(comm, root)
+    isroot = MPI.Comm_rank(comm) == r
+    blob = coll_scatter_bytes(comm, r, isroot ? coll_encode_each(xs, comm, "scatter") : nothing)
+    return coll_decode(blob, r)
+end
+
+function Dagger.alltoall(accel::MPIAcceleration, xs; comm::MPI.Comm=accel.comm)
+    blocks = coll_alltoall_bytes(comm, coll_encode_each(xs, comm, "alltoall"))
+    return Any[coll_decode(b, r - 1) for (r, b) in enumerate(blocks)]
+end
+
 end # module MPIExt
