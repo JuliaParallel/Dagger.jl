@@ -75,6 +75,53 @@ compatible_processors(accel::Union{Acceleration,Nothing}, scope::AbstractScope=g
 uniform_execution(::DistributedAcceleration) = false
 uniform_execution() = uniform_execution(current_acceleration())
 
+"""
+    with_acceleration(f, accel::Acceleration)
+
+Run `f` with `accel` as the current acceleration of this task. The current acceleration
+is task-local, so this affects only the tasks spawned within `f` (and what they spawn);
+nothing process-global changes.
+"""
+function with_acceleration(f, accel::Acceleration)
+    old = ACCELERATION[]
+    ACCELERATION[] = accel
+    try
+        return f()
+    finally
+        ACCELERATION[] = old
+    end
+end
+
+"""
+    with_rank_local(f)
+
+Run `f` so that every task spawned in it belongs to a task graph that only this rank plans
+and runs (under MPI: a graph on a communicator of size one). Defined by the MPI extension;
+the other accelerations have no such notion.
+"""
+function with_rank_local end
+
+"""
+    localize_scope(accel, scope) -> scope
+
+Called by the scheduler on the scope a task asks for, before the scope is matched against the processors of the
+task's graph. A scope that names "this rank" means the same in every graph: inside a rank-local graph (see
+[`with_rank_local`](@ref)) the MPI extension rewrites a scope of the own rank's processors in the shared graph
+to the corresponding processors of the rank-local graph; a scope of another rank is left alone (and so matches
+nothing). Identity for every other acceleration.
+"""
+localize_scope(::Acceleration, scope) = scope
+
+"""
+    per_rank(f, T)
+
+SPMD operation (every rank calls it, from the driver task): every rank runs `f()` as a
+rank-local graph (see [`with_rank_local`](@ref)) and the result, which must have type `T`,
+is returned as a vector with one shared chunk per rank, chunk `r` owned by rank `r`, which
+shared tasks can take as an argument. Defined by the MPI extension.
+"""
+function per_rank end
+
 # SPMD uniformity checking. Under a uniform-execution acceleration (e.g. MPI),
 # planning-time values are hashed and compared across ranks to catch divergence
 # early. Core datadeps calls `check_uniform` unconditionally; the real checks

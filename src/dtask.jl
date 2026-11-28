@@ -152,3 +152,9 @@ function eager_next_id()
         return remotecall_fetch(eager_next_id, 1)::UInt64
     end
 end
+
+# The id of a task is allocated from a counter that belongs to its acceleration; the default
+# is the one global counter. An acceleration whose tasks are not seen by every process (a
+# rank-local task graph under MPI) must not draw from the counter that the ids of the shared
+# tasks, and so their MPI tags, are derived from.
+eager_next_id(::Union{Acceleration,Nothing}) = eager_next_id()

@@ -378,6 +378,36 @@ julia --project=test/mpi/env test/mpi/run.jl 4 2 test/mpi/cpu.jl
 julia --project=test/cudaenv test/mpi/run.jl 2 2 test/mpi/cuda.jl
 ```
 
+## Rank-local task graphs
+
+Under SPMD every rank plans every task. When a phase of a program has a
+data-dependent amount of work that differs per rank (building a local tree, say), the
+shared graph forces all ranks to plan all of it, and the task counts have to agree.
+[`Dagger.with_rank_local`](@ref) runs a block whose tasks only the calling rank plans
+and runs; the other ranks never see them:
+
+```julia
+sums = Dagger.with_rank_local() do
+    # a different number of tasks on every rank is fine here
+    fetch.([Dagger.@spawn(sum(local_pieces[i])) for i in 1:length(local_pieces)])
+end
+```
+
+[`Dagger.per_rank`](@ref)`(f, T)` hands the result over to the shared graph: every
+rank runs `f()` as a rank-local graph and gets a vector with one shared chunk per
+rank, owned by that rank. `T` is the element type of the result and must be given
+by the caller; it is checked against what the task returned.
+
+Rules for data crossing the two graphs:
+
+- A rank-local task may read a chunk of the shared graph that this rank owns, in place.
+- A shared task cannot read a rank-local chunk; use `per_rank`. This is an error.
+- A rank-local task cannot read a chunk owned by another rank. This is an error.
+- A scope `Dagger.scope(mpi_rank=me)` inside a rank-local block means this rank's
+  processors of that graph; a scope naming another rank matches nothing.
+- The graph is selected through the task-local acceleration, so tasks started with
+  `Threads.@spawn` inside the block do not belong to it.
+
 ## Limitations and tips
 
 - **Keep planning uniform.** The single most important rule: every rank must
