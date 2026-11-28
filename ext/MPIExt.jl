@@ -2429,6 +2429,145 @@ function mpi_execute_bcast_plan(f, args, proc::MPIProcessor)
     return (; need_type_bcast=false, nothrow, inferred)
 end
 
+# --- The rank gate: a ready queue with a concurrency limit and priorities for the tasks of a rank ---------------
+#
+# Under MPI every task has occupancy 0, so Dagger's processor queues never hold one back: each task that is ready
+# starts at once as a Julia task, and Julia runs them first come first served on the threads of the rank. A flood of
+# long tasks (say 250 tiles of 30 ms on 8 threads, ~0.9 s of backlog) then delays a small urgent task submitted after
+# it (an export other ranks wait for) by the whole backlog. The gate gives the rank what a shared-memory processor queue
+# has: at most `cap - reserve` ordinary tasks run at once (the rest wait, holding no thread), `reserve` slots are kept
+# for urgent tasks (`priority > 0`), and waiting tasks are granted slots by priority, then arrival. It wraps only the
+# call of the task's function (arguments are already moved, the result is not yet broadcast), so a task holds a slot
+# only while it computes. Opt-in: `Dagger.mpi_rank_gate!(true)`.
+mutable struct RankGate
+    const lock::ReentrantLock
+    const cap::Int
+    const reserve::Int
+    running::Int
+    seq::UInt64
+    const waiters::Vector{Tuple{Int,UInt64,Base.Event}}      # (priority, arrival, wake-up)
+end
+RankGate(cap::Int, reserve::Int) = RankGate(ReentrantLock(), max(1, cap), clamp(reserve, 0, max(0, cap - 1)), 0, UInt64(0),
+                                           Tuple{Int,UInt64,Base.Event}[])
+const MPI_RANK_GATE = Ref{Union{Nothing,RankGate}}(nothing)
+function Dagger.mpi_rank_gate!(on::Bool=true; cap::Int=Threads.nthreads(:default), reserve::Int=1)
+    MPI_RANK_GATE[] = on ? RankGate(cap, reserve) : nothing
+    return on
+end
+gate_limit(g::RankGate, priority::Int) = priority > 0 ? g.cap : g.cap - g.reserve
+
+function gate_acquire!(g::RankGate, priority::Int)
+    ev = nothing
+    @lock g.lock begin
+        if g.running < gate_limit(g, priority) && isempty(g.waiters)
+            g.running += 1
+        else
+            ev = Base.Event()
+            push!(g.waiters, (priority, g.seq += 1, ev))
+            # a slot may be free for this task even though others wait (they may be ordinary tasks blocked by the reserve)
+            gate_grant!(g)
+        end
+    end
+    ev === nothing && return
+    try
+        wait(ev)
+    catch
+        # Interrupted (a cancelled task) while waiting: leave the queue, or give back the slot that was
+        # granted in the meantime. Otherwise the slot is lost for good.
+        @lock g.lock begin
+            i = findfirst(w -> w[3] === ev, g.waiters)
+            if i === nothing
+                g.running -= 1
+            else
+                deleteat!(g.waiters, i)
+            end
+            gate_grant!(g)
+        end
+        rethrow()
+    end
+    return
+end
+# Grant free slots to the best waiters (highest priority, then earliest); the lock is held
+function gate_grant!(g::RankGate)
+    while !isempty(g.waiters)
+        best = 0
+        for i in eachindex(g.waiters)
+            pr, sq, _ = g.waiters[i]
+            g.running < gate_limit(g, pr) || continue
+            if best == 0 || pr > g.waiters[best][1] || (pr == g.waiters[best][1] && sq < g.waiters[best][2])
+                best = i
+            end
+        end
+        best == 0 && return
+        _, _, ev = g.waiters[best]
+        deleteat!(g.waiters, best)
+        g.running += 1
+        notify(ev)
+    end
+end
+function gate_release!(g::RankGate)
+    @lock g.lock begin
+        g.running -= 1
+        gate_grant!(g)
+    end
+    return
+end
+
+# `execute!` of the rank's own processor, through the gate when it is on
+@inline function mpi_gated_execute!(proc, f, args...; kwargs...)
+    gate = MPI_RANK_GATE[]
+    gate === nothing && return execute!(proc, f, args...; kwargs...)
+    return mpi_gated_execute!(gate, proc, f, args...; kwargs...)
+end
+# The slot a running task holds, found by its task id: the function of a task may run on another Julia task than the
+# one that took the slot (`execute!(::ThreadProc)` hands over), so task-local storage would not do
+mutable struct GateSlot
+    const gate::RankGate
+    const priority::Int
+    held::Bool
+end
+const GATE_SLOTS = LockedObject(Dict{Int,GateSlot}())
+mpi_gate_task_id() = Int(Dagger.get_tls().sch_handle.thunk_id.id)
+
+function mpi_gated_execute!(gate::RankGate, proc, f, args...; kwargs...)
+    spec = Dagger.get_tls().task_spec
+    opts = spec === nothing ? nothing : spec.options
+    slot = GateSlot(gate, opts === nothing ? 0 : something(opts.priority, 0), false)
+    gate_acquire!(gate, slot.priority)
+    slot.held = true
+    id = mpi_gate_task_id()
+    lock(GATE_SLOTS) do slots
+        slots[id] = slot
+    end
+    try
+        return execute!(proc, f, args...; kwargs...)
+    finally
+        lock(GATE_SLOTS) do slots
+            delete!(slots, id)
+        end
+        slot.held && gate_release!(gate)
+    end
+end
+
+# A task that waits for another task (`fetch`, `wait`) holds a thread but computes nothing: it gives its gate slot
+# back while it waits, so the tasks it waits for can run however few slots there are, and takes a slot again
+# before it goes on.
+function Dagger.task_blocked(::MPIAcceleration, f)
+    id = mpi_gate_task_id()
+    slot = lock(GATE_SLOTS) do slots
+        get(slots, id, nothing)
+    end
+    (slot === nothing || !slot.held) && return f()
+    slot.held = false
+    gate_release!(slot.gate)
+    try
+        return f()
+    finally
+        gate_acquire!(slot.gate, slot.priority)
+        slot.held = true
+    end
+end
+
 # A task that is not part of a Datadeps region (no tag option) generates ref ids only while it
 # is moved to and executed on its processor, never during planning, so once `execute!` returns
 # nobody takes another id for its thunk id and its sub-counter is dead. Without this the table
@@ -2484,7 +2623,7 @@ function mpi_execute_body(proc::MPIProcessor, f, args...; kwargs...)
     # type on every rank so chunktype stays SPMD-uniform.
     if !plan.need_type_bcast && plan.nothrow
         if islocal
-            result = execute!(proc.innerProc, f, raw_args...; kwargs...)
+            result = mpi_gated_execute!(proc.innerProc, f, raw_args...; kwargs...)
             space = mpi_result_space(result, proc)
             return tochunk(result, proc, space; type=plan.inferred)
         else
@@ -2498,7 +2637,7 @@ function mpi_execute_body(proc::MPIProcessor, f, args...; kwargs...)
     if !plan.need_type_bcast
         if islocal
             result = try
-                execute!(proc.innerProc, f, raw_args...; kwargs...)
+                mpi_gated_execute!(proc.innerProc, f, raw_args...; kwargs...)
             catch err
                 @opcounter :execute_bcast_send_yield
                 bcast_meta_yield(proc.comm, proc.rank, tag, (:error, mpi_wire_exception(err)))
@@ -2521,7 +2660,7 @@ function mpi_execute_body(proc::MPIProcessor, f, args...; kwargs...)
     # Non-concrete return type: full status + type/space (or error) broadcast
     if islocal
         result = try
-            execute!(proc.innerProc, f, raw_args...; kwargs...)
+            mpi_gated_execute!(proc.innerProc, f, raw_args...; kwargs...)
         catch err
             @opcounter :execute_bcast_send_yield
             bcast_meta_yield(proc.comm, proc.rank, tag, (:error, mpi_wire_exception(err)))
