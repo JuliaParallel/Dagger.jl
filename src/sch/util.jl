@@ -126,8 +126,25 @@ function store_result!(state, thunk, value; error::Bool=false)
         thunk.cache_ref = Some{Any}(value)
     end
     @atomic thunk.errored = error
+    error && task_failed!(thunk, value)
     return true
 end
+
+"""
+    task_failed!(thunk, value)
+
+Called once, by whoever recorded the failure of `thunk` (its own error or an
+upstream's), while the scheduler lock is held. Accelerations whose other
+processes cannot see this failure on their own override it for the tasks they
+need to tell; it must not block. Does nothing by default.
+"""
+function task_failed!(thunk, value)
+    accel = thunk.options.acceleration
+    accel === nothing || task_failed!(accel, thunk, value)
+    return
+end
+task_failed!(::Dagger.Acceleration, thunk, value) = nothing
+
 function clear_result!(state, thunk)
     @assert islocked(state.lock)
     thunk.cache_ref = nothing

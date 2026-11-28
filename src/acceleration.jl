@@ -75,6 +75,18 @@ compatible_processors(accel::Union{Acceleration,Nothing}, scope::AbstractScope=g
 uniform_execution(::DistributedAcceleration) = false
 uniform_execution() = uniform_execution(current_acceleration())
 
+"""
+    fetch_failed_uniform!(accel)
+
+Called when `fetch` of a task with a known owner (`DTask.owner`) throws because the
+task failed on this process. Under uniform execution a fetch of a task that did
+not fail takes part in a broadcast, which takes a task-id-derived tag on every
+process; a process that fails before it gets there must take the same ids, or the
+ids (and tags) of everything that follows differ across processes. Does nothing
+by default.
+"""
+fetch_failed_uniform!(::Acceleration) = nothing
+
 # SPMD uniformity checking. Under a uniform-execution acceleration (e.g. MPI),
 # planning-time values are hashed and compared across ranks to catch divergence
 # early. Core datadeps calls `check_uniform` unconditionally; the real checks
@@ -311,6 +323,50 @@ default_procgrid(accel, nblocks::NTuple{N,Int}) where N = nothing
 
 "Acceleration-specific finalization after array chunk tasks are spawned."
 post_stage_array_chunks!(accel::Acceleration, tasks, eltype::Type, nd::Int) = tasks
+
+"""
+    note_chunk_placement!(accel, task::DTask, scope)
+
+Called for every task that produces a block of an array, with the compute scope the block was
+placed with (a single processor for the deterministic placements: every rank computes the same
+grid). An acceleration that wants to know at spawn time where a block lives records it here;
+the default does nothing.
+"""
+note_chunk_placement!(::Acceleration, task, scope) = nothing
+
+"""
+    elision_stats() -> NamedTuple or nothing
+
+How many of the tasks this process planned were elided, run here, or planned in full and why
+(`:elided`, `:own_task`, `:no_owner_known`, `:not_failure_only`, `:syncdeps_or_restore`,
+`:return_type_not_concrete`, `:function_not_plain`, `:argument_not_positional`,
+`:argument_participates`, `:scope_conflict`, `:not_applicable`), cumulative since the start or the
+last [`reset_elision_stats!`](@ref). Only the accelerations that elide tasks (MPI) return anything.
+"""
+elision_stats() = elision_stats(current_acceleration())
+elision_stats(::Acceleration) = nothing
+
+"Reset the counters of [`elision_stats`](@ref)."
+reset_elision_stats!() = reset_elision_stats!(current_acceleration())
+reset_elision_stats!(::Acceleration) = nothing
+
+"""
+    traffic_stats() -> NamedTuple or nothing
+
+(MPI) Serialized messages and bytes this process received (`rx_*`: task values, statuses, failures and metadata,
+whether they arrive point to point or at the broadcast relay) and the messages it forwarded as a tree node or sent
+as the root of a metadata broadcast (`tx_*`), cumulative since the start or the last
+[`reset_traffic_stats!`](@ref). Raw array payloads (tile moves of Datadeps copies) are not counted, and neither are
+the point-to-point sends of a value (only receives of those), so `tx_*` is smaller than the traffic this
+process caused. Read it before and after a phase to see whether a result reaches ranks that do not need it. Other
+accelerations return `nothing`.
+"""
+traffic_stats() = traffic_stats(current_acceleration())
+traffic_stats(::Acceleration) = nothing
+
+"Reset the counters of [`traffic_stats`](@ref)."
+reset_traffic_stats!() = reset_traffic_stats!(current_acceleration())
+reset_traffic_stats!(::Acceleration) = nothing
 
 default_processor(space::CPURAMMemorySpace) = OSProc(space.owner)
 default_memory_space(accel::DistributedAcceleration) = CPURAMMemorySpace(myid())

@@ -346,6 +346,26 @@ hooks — `Dagger.mpi_device_direct`, `Dagger.mpi_device_sync`,
 `Dagger.mpi_library_gpu_aware`, and `Dagger.mpi_remap_space` — are overridable
 per backend for advanced setups.
 
+## Skipping tasks a rank takes no part in (owner elision)
+
+Under SPMD every rank plans every task, including tasks it neither runs nor owns
+data for. `Dagger.elide_foreign_tasks!(true)` lets such a rank skip the thunk,
+scheduling and placeholder execution of a task (it only takes the task id, so ids
+and tags stay equal on every rank). It is off by default, and every rank must set
+it to the same value at the same point of the program; changing it waits for the
+tasks already submitted.
+
+A task is only elided when its scope names a single rank, its return type is
+concrete, it has no explicit tag, and this rank owns none of its arguments.
+Tasks inside Datadeps regions and inside other tasks are never elided, and
+neither are tasks of another communicator or while `check_uniformity!(true)` is
+on.
+
+The consequence to be aware of: the owner of an elided task reports only
+failures. A rank that never fetches the task or consumes its result does not wait
+for it and does not notice that it finished or failed; a rank that does consume
+it sees the owner's error.
+
 ## Collecting and fetching results
 
 `collect(DA)` performs a deterministic, rank-uniform gather: it returns the full
