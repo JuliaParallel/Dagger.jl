@@ -2685,4 +2685,45 @@ accel_matches_proc(accel::MPIAcceleration, proc::MPIClusterProc) = true
 accel_matches_proc(accel::MPIAcceleration, proc::MPIProcessor) = true
 accel_matches_proc(accel::MPIAcceleration, proc) = false
 
+# Precompile workload: run one small Datadeps region on a single MPI rank, so that the first MPI region of
+# a process does not compile the concrete-MPI planner (its methods are specialized on the MPI types, which
+# the package's own workload cannot reach). The workload initializes MPI in the precompilation process and
+# shuts the scheduler down again afterwards; it is skipped if that fails.
+using PrecompileTools: @compile_workload
+function mpi_precompile_workload()
+    Dagger.accelerate!(MPIAcceleration(MPI.COMM_WORLD))
+    c1 = Dagger.tochunk(zeros(4, 4))
+    c2 = Dagger.tochunk(zeros(4, 4))
+    Dagger.spawn_datadeps() do
+        Dagger.spawn(copyto!, Dagger.InOut(c1), Dagger.In(c2))
+        Dagger.spawn(copyto!, Dagger.InOut(c2), Dagger.In(c1))
+    end
+    fetch(c1); fetch(c2)
+    Dagger.accelerate!(Dagger.DistributedAcceleration())
+    # What the workload cached describes the precompilation process (one thread, one rank). It must not be baked
+    # into the image: a process that loads the image would see that one-thread processor list on every rank.
+    lock(MPI_PROC_CACHE_LOCK) do
+        empty!(MPIClusterProcChildren)
+        empty!(MPIUniformProcsCache)
+    end
+    lock(MPI_INITIALIZED_COMMS) do comms; empty!(comms); end
+    lock(MPI_NODE_UUIDS) do m; empty!(m); end
+    return nothing
+end
+# `MPI_Init` aborts in a process that an MPI launcher started as a rank but that is not meant to be one (this is
+# the case when the extension is precompiled inside `mpiexec`/`prterun`): skip the workload there.
+mpi_launched() = any(k -> haskey(ENV, k), ("PMI_RANK", "PMIX_RANK", "OMPI_COMM_WORLD_RANK", "MPI_LOCALRANKID"))
+@compile_workload begin
+    if mpi_launched()
+        @warn "MPIExt precompile workload skipped: precompiling under an MPI launcher"
+    else
+        try
+            mpi_precompile_workload()
+            Dagger.shutdown_precompile_workload!()
+        catch err
+            @warn "MPIExt precompile workload skipped" exception=err
+        end
+    end
+end
+
 end # module MPIExt
