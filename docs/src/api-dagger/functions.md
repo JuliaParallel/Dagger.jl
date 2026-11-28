@@ -86,3 +86,14 @@ Sch.exec!
 Sch.halt!
 Sch.get_dag_ids
 ```
+
+## Thread Placement Functions
+
+These functions report where Julia's threads run (Linux only; elsewhere they
+return empty results) and pin them to the CPUs the process is allowed to use.
+
+```@docs
+Dagger.thread_cpus
+Dagger.allowed_cpus
+Dagger.pin_threads!
+```
