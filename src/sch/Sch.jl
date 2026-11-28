@@ -1736,6 +1736,10 @@ proc_state(proc::Processor) = proc_state(Dagger.get_tls().sch_uid, proc)
 
 task_tid_for_processor(::Processor) = nothing
 task_tid_for_processor(proc::Dagger.ThreadProc) = proc.tid
+# The thread the task for `task` should run on at `proc`. An acceleration whose processor wraps
+# a `ThreadProc` overrides this so the task starts pinned where `execute!(::ThreadProc)` would
+# otherwise have to create a second pinned task, hand the call over and wait for it.
+task_tid_for_processor(proc::Processor, task) = task_tid_for_processor(proc)
 
 stealing_permitted(::Processor) = true
 stealing_permitted(proc::Dagger.ThreadProc) = proc.owner != 1 || proc.tid != 1
@@ -1918,16 +1922,23 @@ function start_processor_runner!(istate::ProcessorInternalState, uid::UInt64, re
             # completes before the record exists, and DoTaskSpec's cleanup
             # loop then burned a sleep(0.1) per lost race — the dominant
             # multithreaded wall-time cost for small tasks.
-            @reusable_tasks :start_processor_runner!_task_cache 32 t->begin
-                tid = task_tid_for_processor(to_proc)
-                if tid !== nothing
-                    Dagger.set_task_tid!(t, tid)
-                else
-                    Dagger.set_task_migratable!(t)
+            # N.B. A pooled task is pinned (or made migratable) once, when its slot is created, and the
+            # slot is then reused for later tasks. The thread decision can differ per task (an
+            # acceleration that pins only the tasks that asked for a thread), so tasks that start
+            # pinned and tasks that start migratable must not share slots: a migratable task that
+            # reused a pinned slot would stay bound to that thread.
+            task_tid = task_tid_for_processor(to_proc, task)
+            if task_tid === nothing
+                @reusable_tasks :start_processor_runner!_task_cache_migratable 32 t->Dagger.set_task_migratable!(t) "thunk" DoTaskSpec(to_proc, return_queue, task, cancel_token) t->begin
+                    lock(istate.queue) do _
+                        tasks[thunk_id] = t
+                    end
                 end
-            end "thunk" DoTaskSpec(to_proc, return_queue, task, cancel_token) t->begin
-                lock(istate.queue) do _
-                    tasks[thunk_id] = t
+            else
+                @reusable_tasks :start_processor_runner!_task_cache 32 t->Dagger.set_task_tid!(t, task_tid) "thunk" DoTaskSpec(to_proc, return_queue, task, cancel_token) t->begin
+                    lock(istate.queue) do _
+                        tasks[thunk_id] = t
+                    end
                 end
             end
         end
