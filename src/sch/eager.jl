@@ -109,6 +109,19 @@ effective occupancy to 0, which allows a newly-spawned task to run.
 """
 function thunk_yield(f)
     if Dagger.in_task()
+        # The acceleration the task was spawned with, not the task-local one: the function of a task may run
+        # on a Julia task that never had it set
+        spec = Dagger.get_tls().task_spec
+        accel = spec === nothing ? Dagger.current_acceleration() :
+                something(spec.options.acceleration, Dagger.current_acceleration())
+        return Dagger.task_blocked(accel, () -> _thunk_yield(f))
+    else
+        return f()
+    end
+end
+
+function _thunk_yield(f)
+    if Dagger.in_task()
         h = sch_handle()
         tls = Dagger.get_tls()
         proc = Dagger.task_processor()

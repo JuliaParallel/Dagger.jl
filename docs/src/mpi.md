@@ -378,6 +378,36 @@ julia --project=test/mpi/env test/mpi/run.jl 4 2 test/mpi/cpu.jl
 julia --project=test/cudaenv test/mpi/run.jl 2 2 test/mpi/cuda.jl
 ```
 
+## Task priority and the rank gate
+
+The task option `priority` (an `Int`, default 0) orders tasks that wait for the same
+processor: a higher priority runs first. It is a hint for the critical path of an algorithm, not a
+guarantee, and a running task is never preempted.
+
+Under MPI no task waits for a processor: every ready task starts at once as a Julia task and the Julia
+scheduler runs them first come first served, so a flood of long tasks delays a small urgent task
+submitted after it by the whole backlog. [`Dagger.mpi_rank_gate!`](@ref)`(true)` turns on a gate in
+front of the function of every task a rank runs: at most `cap - reserve` ordinary tasks run at once
+(`cap` defaults to the number of default threads, `reserve` to 1), tasks with `priority > 0` may also use
+the reserved slot, and waiting tasks get slots by priority, then arrival. A task holds a slot only while
+its function computes; while it waits for another task (`fetch`, `wait`) it gives the slot back. The gate
+is off by default and costs about `1/cap` of the throughput of ordinary tasks, because one slot is kept free.
+
+## Delegating tasks to idle ranks
+
+With one task per tile, a rank that owns many ready tasks queues work while other ranks idle: ranks
+move data, not ready tasks. [`Dagger.enable_delegation!`](@ref)`()` (collective, before the first lendable
+task) lets the owner of a task lend its *execution* to an idle rank when the task is spawned with
+`lend=true`. The owner keeps everything else: the result stays a chunk of the owner, ids and tags do not change,
+and an exception on the thief comes back to the owner as the task's failure.
+
+`lend=true` is a promise that the task is pure: no writes to its arguments or to globals, no `spawn`, no chunk
+creation, no collectives. The thief runs the function on serialized copies of the arguments, so function and
+arguments must serialize; this is not checked. Tasks with a scope, a compute scope or a tag (Datadeps tasks) are
+never lent. `slots` limits how many lendable tasks a rank runs at once, and `max_bytes` keeps tasks with large
+arguments at home. [`Dagger.disable_delegation!`](@ref) undoes it (collective); tasks still lent at that moment
+fail with an error.
+
 ## Limitations and tips
 
 - **Keep planning uniform.** The single most important rule: every rank must
