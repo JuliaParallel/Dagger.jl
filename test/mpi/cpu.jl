@@ -831,6 +831,10 @@ end
 
 include("lu.jl")
 
+include("owner_computes.jl")
+include("owner_computes_chol.jl")
+include("owner_computes_regions.jl")
+
 @testset "Stencils" begin
     # Chunks are placed round-robin across ranks (see "Uniform chunk
     # creation" above), so this exercises cross-rank halo exchange for every

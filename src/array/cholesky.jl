@@ -18,6 +18,7 @@ function potrf_checked!(uplo, A, info_arr)
 end
 function LinearAlgebra._chol!(A::DArray{T,2}, ::Type{UpperTriangular}) where T
     LinearAlgebra.checksquare(A)
+    (r = owner_computes_chol!(A, 'U')) === nothing || return r      # opt-in owner-computes path; `nothing` = off or unsupported, use Datadeps below
 
     zone = one(T)
     mzone = -one(T)
@@ -59,10 +60,11 @@ function LinearAlgebra._chol!(A::DArray{T,2}, ::Type{UpperTriangular}) where T
         err isa PosDefException || rethrow()
     end
 
-    return UpperTriangular(A), info[1]
+    return UpperTriangular(A), owner_computes_agree_info(info[1])
 end
 function LinearAlgebra._chol!(A::DArray{T,2}, ::Type{LowerTriangular}) where T
     LinearAlgebra.checksquare(A)
+    (r = owner_computes_chol!(A, 'L')) === nothing || return r      # opt-in owner-computes path; `nothing` = off or unsupported, use Datadeps below
 
     zone = one(T)
     mzone = -one(T)
@@ -104,5 +106,5 @@ function LinearAlgebra._chol!(A::DArray{T,2}, ::Type{LowerTriangular}) where T
         err isa PosDefException || rethrow()
     end
 
-    return LowerTriangular(A), info[1]
+    return LowerTriangular(A), owner_computes_agree_info(info[1])
 end

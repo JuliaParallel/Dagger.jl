@@ -11,6 +11,7 @@ Pages = ["types.md"]
 ```@docs
 Thunk
 DTask
+LightTask
 ```
 
 ## Task Options Types

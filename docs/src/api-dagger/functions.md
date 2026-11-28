@@ -13,6 +13,13 @@ Pages = ["functions.md"]
 spawn
 ```
 
+## Light Task Functions/Macros
+```@docs
+@light
+light_spawn
+light_to_dtask
+```
+
 ## Task Options Functions/Macros
 ```@docs
 with_options

@@ -100,6 +100,8 @@ include("utils/system_uuid.jl")
 include("utils/caching.jl")
 include("sch/Sch.jl"); using .Sch
 include("tochunk.jl")
+include("microtask.jl")
+include("owner_computes.jl")
 
 # Data dependency task queue
 include("datadeps/aliasing.jl")
@@ -107,6 +109,7 @@ include("datadeps/chunkview.jl")
 include("datadeps/remainders.jl")
 include("datadeps/scheduling.jl")
 include("datadeps/queue.jl")
+include("datadeps/owner_computes.jl")
 include("datadeps/hierarchical.jl")
 
 # Stencils
@@ -137,6 +140,7 @@ include("array/sort.jl")
 include("array/permute.jl")
 include("array/linalg.jl")
 include("array/mul.jl")
+include("array/owner_computes.jl")
 include("array/cholesky.jl")
 include("array/trsm.jl")
 include("array/lu.jl")

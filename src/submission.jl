@@ -391,7 +391,10 @@ function eager_process_elem_submission_to_local!(arg::Argument)
     @assert !(T <: Thunk) "Cannot use `Thunk`s in `@spawn`/`spawn`"
     if T <: DTask
         task = value(arg)::DTask
-        if istaskstarted(task)
+        if task.stub isa TileStub
+            # A task of a region that ran on the owner-computes path has no thunk: its value (broadcast to every rank by `fetch`) is the argument
+            arg.value = fetch(task)
+        elseif istaskstarted(task)
             #=FIXME:UNIQUE=#
             arg.value = Sch.ThunkID(Int(task.uid), task.thunk_ref)
         end
@@ -401,7 +404,9 @@ function eager_process_elem_submission_to_local(arg::TypedArgument{T}) where T
     @assert !(T <: Thunk) "Cannot use `Thunk`s in `@spawn`/`spawn`"
     if T <: DTask
         task = value(arg)::DTask
-        if istaskstarted(task)
+        if task.stub isa TileStub
+            return TypedArgument(arg.pos, fetch(task))
+        elseif istaskstarted(task)
             #=FIXME:UNIQUE=#
             tid = Sch.ThunkID(Int(task.uid), task.thunk_ref)
             # Preserve the argument position by re-wrapping in a TypedArgument;

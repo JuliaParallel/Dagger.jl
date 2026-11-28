@@ -474,3 +474,49 @@ nt2_task = Dagger.@spawn (;a=1, b=3)
 getprop_task_from_dtask = Dagger.@spawn nt2_task.b
 @assert fetch(getprop_task_from_dtask) == fetch(nt2_task).b
 ```
+
+## Light tasks
+
+`Dagger.@spawn` does a lot for each task: it picks a processor, applies scopes
+and options, moves data and works across workers. For many tiny tasks in one
+process (a few microseconds of work each) that overhead dominates. `Dagger.@light`
+is an additive, opt-in alternative for exactly that case. It returns a
+[`LightTask`](@ref) that is handed to Julia's own scheduler once its
+dependencies are done.
+
+```julia
+using Dagger
+
+a = Dagger.@light sum(1:10)
+b = Dagger.@light a + 1          # `a` is a dependency and is passed as its value
+c = Dagger.@light a * b
+@assert fetch(c) == 55 * 56
+
+# `DTask`s can be dependencies of light tasks
+d = Dagger.@spawn sum(1:10)
+e = Dagger.@light d + 1
+@assert fetch(e) == 56
+
+# A light task can be turned into a `DTask`
+@assert fetch(Dagger.light_to_dtask(c)) == 55 * 56
+```
+
+A light task has no scopes, options, processors, chunks, Datadeps, logging
+events or cancellation, and it does not work with MPI or multiple workers: it
+always runs in the process that created it. Use `Dagger.@spawn` whenever you
+need any of those. Keyword arguments are not supported (wrap the call in a
+closure). The arguments are evaluated when `@light` is called, so mutating an
+array argument afterwards is visible to the task, as with `Threads.@spawn`.
+
+A failure in a light task (or in a `DTask` it depends on) is rethrown by
+`fetch`, and fails the light tasks that depend on it.
+
+A light task body runs as an ordinary Julia task on the default thread pool. It
+may spawn further light tasks and may block cooperatively (`wait`, `fetch`,
+`sleep`, locks), also on one thread. It must not busy-wait for another task to
+make progress, because that keeps the thread the other task needs.
+
+A `DTask` may `wait` or `fetch` a light task: while it waits it hands its
+processor back, as `wait` on a `DTask` does, so the tasks the light task depends
+on can run on it. `Dagger.light_to_dtask` is the other direction: it waits for
+the light task in the calling task and then creates a `DTask` holding its value.
