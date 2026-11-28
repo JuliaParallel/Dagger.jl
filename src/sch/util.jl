@@ -814,9 +814,11 @@ candidate lookups cost about 130 us for 16 threads and grew with the thread coun
     # Find all Chunks
     chunks = @reusable_vector :estimate_task_costs_chunks Union{Chunk,Nothing} nothing 32
     for input in task.inputs
-        if Dagger.valuetype(input) <: Chunk
-            push!(chunks, Dagger.value(input)::Chunk)
-        end
+        # `isa` on the value, not `<:` on its runtime type: `Chunk` is parametric, and the
+        # subtype query went through the type-matching machinery for every input of
+        # every scheduled task
+        v = Dagger.value(input)
+        v isa Chunk && push!(chunks, v)
     end
     have_chunks = !isempty(chunks)
 

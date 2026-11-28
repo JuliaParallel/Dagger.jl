@@ -163,9 +163,12 @@ recorded during planning rely on. `flush_batch!` is a *synchronous* drain, so
 the points that genuinely need a task to exist -- a value dependency's `fetch`,
 and the end of the region -- still get it.
 
-Not used under uniform execution: an MPI rank's submission runs collectives, and
-overlapping those with planning's own collectives makes the message order
-rank-dependent.
+Under uniform execution (MPI) the flat planner does not use it: a rank's
+submission can run collectives, and overlapping those with planning's own would
+make the message order rank-dependent. The hierarchical planner streams regions
+above `DATADEPS_UNIFORM_DEFER_MAX` tasks through it, which is safe because every
+task's tag is fixed while it is planned, so submitting a prepared spec needs no
+tag of its own (`test/mpi/streaming.jl` checks that the results agree).
 """
 mutable struct AsyncEnqueueQueue <: AbstractTaskQueue
     const inner::AbstractTaskQueue
@@ -275,6 +278,28 @@ planning them (see `schedule_partitions_sequential!`). For A/B measurement; the
 unbuffered behaviour serializes execution across ranks.
 """
 const DATADEPS_UNIFORM_DEFER = Ref(true)
+
+"""
+Largest region (in tasks) whose submission uniform planning still withholds
+until it is fully planned (see `schedule_partitions_sequential!`); a larger
+region is streamed through the asynchronous submitter, which overlaps planning
+with execution. Small regions (stencil sweeps, tens of tasks) stay deferred,
+which is what the limit exists for.
+"""
+const DATADEPS_UNIFORM_DEFER_MAX = 512
+
+"""
+How many tasks uniform (SPMD) planning places ahead so that the aliasing info of
+their remote slots is exchanged in one batch (`schedule_slot_window!`); 1 turns
+it off.
+
+Each remote slot's aliasing info is only known to the rank that owns the slot,
+and every rank needs it, so asking for it per slot makes planning a chain of
+blocking rendezvous (about 500 per 8192^2 / 256^2-tile Cholesky, 0.7 s of the
+planning thread at 2 ranks x 32 threads, where a rendezvous costs 1.4 ms while
+the peers compute).
+"""
+const DATADEPS_SLOT_WINDOW = 128
 
 ### Planning instrumentation ###
 #
@@ -725,79 +750,113 @@ function _collect_aliased_args_range!(task_metas::Vector{HierarchicalTaskMeta},
                                       task_to_idx::IdDict{DTask,Int})
     for task_idx in range
         pair = seen_tasks[task_idx]
-        spec = pair.spec
-        task = pair.task
-        fargs = spec.fargs
-
-        all_deps = HierarchicalTaskInfo[]
-        value_deps = Int[]
-        first_chunk = nothing
-        task_may_alias = false
-        task_inplace = false
-
-        for arg_idx in (is_typed(spec) ? (1:length(fargs)) : eachindex(fargs))
-            _arg = fargs[arg_idx]
-            _arg_with_deps = value(_arg)
-
-            arg_pre_unwrap, deps = unwrap_inout(_arg_with_deps)
-
-            # An unlaunched `DTask` argument cannot be `fetch`ed here -- that is
-            # what `distribute_task!` does later, once the producer has actually
-            # been submitted. For a *same-region* producer we record a value
-            # dependency, which `build_dependency_dag` turns into a hard edge;
-            # aliasing of its result is picked up in `distribute_task!`.
-            #
-            # N.B. An unlaunched producer from *outside* the region (`pred_idx ==
-            # 0`, reachable when the region is nested inside a `spawn_bulk` that
-            # has not flushed) is skipped entirely: no value dep and no aliasing
-            # entry. `distribute_task!` still fetches and tracks it, so the task
-            # itself is correct, but it contributes no DAG edges -- so if another
-            # in-region task aliases the same underlying data, the dependency
-            # between them is missed. Handling this needs the pre-scan to be able
-            # to wait on out-of-region producers.
-            if arg_pre_unwrap isa DTask && !istaskstarted(arg_pre_unwrap)
-                pred_idx = get(task_to_idx, arg_pre_unwrap, 0)
-                if pred_idx != 0 && pred_idx != task_idx
-                    push!(value_deps, pred_idx)
-                end
-                continue
-            end
-
-            arg = arg_pre_unwrap isa DTask ? fetch(arg_pre_unwrap; raw=true) : arg_pre_unwrap
-
-            may_alias = type_may_alias(typeof(arg))
-            inplace_move = may_alias && _cached_get!(supports_cache, cache_lock, arg) do
-                supports_inplace_move(arg)
-            end
-
-            if !may_alias || !inplace_move
-                continue
-            end
-
-            arg_chunk = _cached_get!(raw_arg_cache, cache_lock, arg) do
-                # Match `populate_task_info!`: acceleration-aware wrap (MPIRef
-                # under MPI) rather than a bare `tochunk` that can produce a
-                # rank-local DRef when TLS acceleration is unset.
-                arg isa Chunk ? arg : datadeps_arg_wrap(arg)
-            end
-
-            if first_chunk === nothing
-                first_chunk = arg_chunk
-                task_may_alias = true
-                task_inplace = true
-            end
-
-            for (dep_mod, readdep, writedep) in deps
-                arg_w = ArgumentWrapper(arg_chunk, dep_mod)
-                unique_arg_ws[arg_w] = arg_w
-                push!(all_deps, HierarchicalTaskInfo(arg_w, readdep, writedep))
-            end
-        end
-
-        task_metas[task_idx] = HierarchicalTaskMeta(
-            pair, first_chunk, task_may_alias, task_inplace, all_deps, value_deps
-        )
+        # One dispatch onto the concrete spec type per task (see `eager_launch!`)
+        task_metas[task_idx] = _collect_task_meta!(
+            pair.spec, pair, task_idx, unique_arg_ws, supports_cache, raw_arg_cache,
+            cache_lock, task_to_idx)
     end
+end
+function _collect_task_meta!(spec::DTaskSpec, pair::DTaskPair, task_idx::Int,
+                             unique_arg_ws::Dict{ArgumentWrapper,ArgumentWrapper},
+                             supports_cache::IdDict{Any,Bool},
+                             raw_arg_cache::IdDict{Any,Any},
+                             cache_lock::Union{ReentrantLock,Nothing},
+                             task_to_idx::IdDict{DTask,Int})
+    task = pair.task
+    fargs = spec.fargs
+
+    all_deps = HierarchicalTaskInfo[]
+    value_deps = Int[]
+    first_chunk = nothing
+    task_may_alias = false
+    task_inplace = false
+
+    for arg_idx in (is_typed(spec) ? (1:length(fargs)) : eachindex(fargs))
+        # N.B. Function barrier: `fargs[arg_idx]` is abstract here, and the
+        # fetched argument below is `Any`, so processing them inline makes
+        # `type_may_alias`, `unwrap_inout`'s result, the cache closures and
+        # `ArgumentWrapper` dynamic dispatches -- once per argument per
+        # task, on the serial (MPI) pre-pass. See `_populate_one_arg!`.
+        arg_chunk = _collect_arg_meta!(all_deps, value_deps, unique_arg_ws,
+                                       supports_cache, raw_arg_cache, cache_lock,
+                                       task_to_idx, task_idx, fargs[arg_idx])
+        if arg_chunk !== nothing && first_chunk === nothing
+            first_chunk = arg_chunk
+            task_may_alias = true
+            task_inplace = true
+        end
+    end
+
+    return HierarchicalTaskMeta(
+        pair, first_chunk, task_may_alias, task_inplace, all_deps, value_deps
+    )
+end
+
+# Per-argument body of `_collect_task_meta!`. Returns the argument's `Chunk` (or
+# raw handle) when it aliases and supports in-place move, else `nothing`.
+function _collect_arg_meta!(all_deps::Vector{HierarchicalTaskInfo}, value_deps::Vector{Int},
+                            unique_arg_ws::Dict{ArgumentWrapper,ArgumentWrapper},
+                            supports_cache::IdDict{Any,Bool}, raw_arg_cache::IdDict{Any,Any},
+                            cache_lock::Union{ReentrantLock,Nothing},
+                            task_to_idx::IdDict{DTask,Int}, task_idx::Int, _arg)
+    _arg_with_deps = value(_arg)
+    arg_pre_unwrap, deps = unwrap_inout(_arg_with_deps)
+
+    # An unlaunched `DTask` argument cannot be `fetch`ed here -- that is what
+    # `distribute_task!` does later, once the producer has actually been
+    # submitted. For a *same-region* producer we record a value dependency,
+    # which `build_dependency_dag` turns into a hard edge; aliasing of its
+    # result is picked up in `distribute_task!`.
+    #
+    # N.B. An unlaunched producer from *outside* the region (`pred_idx == 0`,
+    # reachable when the region is nested inside a `spawn_bulk` that has not
+    # flushed) is skipped entirely: no value dep and no aliasing entry.
+    # `distribute_task!` still fetches and tracks it, so the task itself is
+    # correct, but it contributes no DAG edges -- so if another in-region task
+    # aliases the same underlying data, the dependency between them is missed.
+    # Handling this needs the pre-scan to be able to wait on out-of-region
+    # producers.
+    if arg_pre_unwrap isa DTask
+        if !istaskstarted(arg_pre_unwrap)
+            pred_idx = get(task_to_idx, arg_pre_unwrap, 0)
+            if pred_idx != 0 && pred_idx != task_idx
+                push!(value_deps, pred_idx)
+            end
+            return nothing
+        end
+        # The fetched value's type is unknown; the barrier below specializes on it.
+        return _collect_arg_value!(all_deps, unique_arg_ws, supports_cache, raw_arg_cache,
+                                   cache_lock, fetch(arg_pre_unwrap; raw=true), deps)
+    end
+    return _collect_arg_value!(all_deps, unique_arg_ws, supports_cache, raw_arg_cache,
+                               cache_lock, arg_pre_unwrap, deps)
+end
+function _collect_arg_value!(all_deps::Vector{HierarchicalTaskInfo},
+                             unique_arg_ws::Dict{ArgumentWrapper,ArgumentWrapper},
+                             supports_cache::IdDict{Any,Bool}, raw_arg_cache::IdDict{Any,Any},
+                             cache_lock::Union{ReentrantLock,Nothing}, arg, deps)
+    may_alias = type_may_alias(typeof(arg))
+    inplace_move = may_alias && _cached_get!(supports_cache, cache_lock, arg) do
+        supports_inplace_move(arg)
+    end
+
+    if !may_alias || !inplace_move
+        return nothing
+    end
+
+    arg_chunk = _cached_get!(raw_arg_cache, cache_lock, arg) do
+        # Match `populate_task_info!`: acceleration-aware wrap (MPIRef under
+        # MPI) rather than a bare `tochunk` that can produce a rank-local DRef
+        # when TLS acceleration is unset.
+        arg isa Chunk ? arg : datadeps_arg_wrap(arg)
+    end
+
+    for (dep_mod, readdep, writedep) in deps
+        arg_w = ArgumentWrapper(arg_chunk, dep_mod)
+        unique_arg_ws[arg_w] = arg_w
+        push!(all_deps, HierarchicalTaskInfo(arg_w, readdep, writedep))
+    end
+    return arg_chunk
 end
 
 """
@@ -1164,7 +1223,7 @@ function partition_dag(dag::SimpleDiGraph, task_metas::Vector{HierarchicalTaskMe
         read_affinity = zeros(Int, n_owners)
         for v in 1:n
             meta = task_metas[v]
-            task_scope = @something(meta.pair.spec.options.compute_scope, meta.pair.spec.options.scope, default_scope)
+            task_scope = @something(getfield(getfield(meta.pair.spec, :options), :compute_scope), getfield(getfield(meta.pair.spec, :options), :scope), default_scope)
 
             # Owners whose processors are eligible under this task's scope.
             # A non-default scope that spans multiple owners must still spread
@@ -1243,7 +1302,7 @@ function partition_dag(dag::SimpleDiGraph, task_metas::Vector{HierarchicalTaskMe
         partition_load = zeros(Int, n_partitions)
         for v in topo
             meta = task_metas[v]
-            task_scope = @something(meta.pair.spec.options.compute_scope, meta.pair.spec.options.scope, default_scope)
+            task_scope = @something(getfield(getfield(meta.pair.spec, :options), :compute_scope), getfield(getfield(meta.pair.spec, :options), :scope), default_scope)
 
             if task_scope != default_scope
                 assigned = false
@@ -1310,24 +1369,96 @@ function _schedule_vertex!(v::Int, partition_id::Int,
                            vertex_to_partition::Vector{Int},
                            proc_to_scope_lfu,
                            write_num::Int,
-                           registry::Union{SharedChunkRegistry,Nothing})
+                           registry::Union{SharedChunkRegistry,Nothing};
+                           pre_proc=nothing)
     pair = seen_tasks[v]
     spec = pair.spec
     task = pair.task
 
-    if spec.options.syncdeps === nothing
-        spec.options.syncdeps = Set{ThunkSyncdep}()
+    # N.B. `spec` is abstractly typed here (`DTaskPair.spec`); read `options` with
+    # `getfield` rather than the dispatching `spec.options` (see `eager_launch!`)
+    opts = getfield(spec, :options)
+    if opts.syncdeps === nothing
+        opts.syncdeps = Set{ThunkSyncdep}()
     end
     for pred_v in inneighbors(dag, v)
         if vertex_to_partition[pred_v] != partition_id
             pred_task = seen_tasks[pred_v].task
-            push!(spec.options.syncdeps, ThunkSyncdep(pred_task))
+            push!(opts.syncdeps, ThunkSyncdep(pred_task))
         end
     end
 
     return distribute_task!(temp_queue, state, local_procs, local_scope,
                             spec, task, spec.fargs,
-                            proc_to_scope_lfu, write_num; ownership=registry)
+                            proc_to_scope_lfu, write_num; ownership=registry, pre_proc)
+end
+
+"""
+    schedule_slot_window!(state, task_metas, verts, procs, temp_queues,
+                          local_scopes, partition_procs, vertex_to_partition)
+
+Uniform (SPMD) planning only. Place the tasks `verts` (in order) and exchange the
+aliasing info of all their remote slots at once, leaving the chosen processors in
+`procs` for `distribute_task!` to use.
+
+A slot living on another rank is a fresh buffer there, so its aliasing info is
+known to that rank alone and every rank needs it: asked per slot, it is one
+blocking broadcast per (argument, rank), and each is a rendezvous that waits for
+the slowest rank to reach the same point in its own replay of the plan. Here the
+slots a window needs are generated first (allocation is rank-local for dense
+tiles), their ainfos go through one `batch_ainfos` exchange per owning rank, and
+the results land in the region memo, so the `aliasing!` calls `distribute_task!`
+makes afterwards find them and communicate nothing. What the planner does with
+them, and in what order, is unchanged.
+
+Asking the scheduler ahead of the planning of the earlier tasks of the window is
+only valid for a scheduler that never reads the planning state
+(`datadeps_schedule_is_stateless`); the caller checks that. Slots that this
+misses (an argument seen under another `dep_mod` while computing a remainder,
+say) still take the per-slot exchange, so this only ever removes communication.
+"""
+function schedule_slot_window!(state::DataDepsState,
+                               task_metas::Vector{HierarchicalTaskMeta},
+                               verts::Vector{Int}, procs::Vector{Processor},
+                               temp_queues, local_scopes, partition_procs,
+                               vertex_to_partition::Vector{Int})
+    resize!(procs, length(verts))
+    for (k, v) in enumerate(verts)
+        pid = vertex_to_partition[v]
+        spec = task_metas[v].pair.spec
+        task = task_metas[v].pair.task
+        DATADEPS_CURRENT_TASK[] = task
+        task_scope = @something(spec.options.compute_scope, spec.options.scope, DefaultScope())
+        procs[k] = datadeps_schedule_task(temp_queues[pid].scheduler, state,
+                                          partition_procs[pid], local_scopes[pid],
+                                          task_scope, spec, task)
+    end
+
+    objs = Any[]
+    dep_mods = Any[]
+    seen = Set{UInt}()
+    for (k, v) in enumerate(verts)
+        meta = task_metas[v]
+        meta.may_alias || continue
+        our_space = only(memory_spaces(procs[k]))
+        DATADEPS_CURRENT_TASK[] = meta.pair.task
+        for dep in meta.deps
+            arg = dep.arg_w.arg
+            arg isa Chunk || continue
+            memory_space(arg) == our_space && continue
+            slot = get_or_generate_slot!(state, our_space, arg)
+            key = ainfo_memo_key(slot, dep.arg_w.dep_mod)
+            (key in seen || has_memoized_ainfo(key)) && continue
+            push!(seen, key)
+            push!(objs, slot)
+            push!(dep_mods, dep.arg_w.dep_mod)
+        end
+    end
+    if !isempty(objs)
+        @opcounter :slot_window_ainfos length(objs)
+        batch_ainfos(current_acceleration(), objs, dep_mods)
+    end
+    return
 end
 
 """
@@ -1486,7 +1617,8 @@ function schedule_partitions_sequential!(queue::DataDepsTaskQueue,
                                          vertex_to_partition::Vector{Int},
                                          registry::Union{SharedChunkRegistry,Nothing},
                                          wait_all_queue,
-                                         value_dep_verts::Set{Int})
+                                         value_dep_verts::Set{Int},
+                                         task_metas::Vector{HierarchicalTaskMeta})
     n_partitions = length(partitions)
     temp_queues = Vector{DataDepsTaskQueue}(undef, n_partitions)
     local_scopes = Vector{AbstractScope}(undef, n_partitions)
@@ -1510,7 +1642,16 @@ function schedule_partitions_sequential!(queue::DataDepsTaskQueue,
     # Withholding submission until planning is done keeps every rank computing
     # nothing while it plans, so the rendezvous chain runs at metadata speed and
     # the tasks then execute concurrently across ranks.
-    submit_queue = if uniform_execution() && DATADEPS_UNIFORM_DEFER[]
+    #
+    # That is the right trade for a region of up to `DATADEPS_UNIFORM_DEFER_MAX`
+    # tasks, whose planning is short. For a larger one planning and execution run
+    # back to back instead of overlapping: a 5984-task Cholesky (8192^2, 256^2
+    # tiles) on one rank started its first task 0.97 s in and finished at 1.84 s;
+    # streaming the tasks through the asynchronous submitter finishes at 1.58 s.
+    # Planning then competes with the running tasks for threads, so the
+    # rendezvous are slower, but the overlap is worth more than that.
+    submit_queue = if uniform_execution() && DATADEPS_UNIFORM_DEFER[] &&
+                      length(seen_tasks) <= DATADEPS_UNIFORM_DEFER_MAX
         BatchedEnqueueQueue(wait_all_queue, queue_lock; limit=typemax(Int))
     else
         # Non-uniform (Distributed) still wants its tasks running while the rest
@@ -1552,20 +1693,44 @@ function schedule_partitions_sequential!(queue::DataDepsTaskQueue,
 
     # Copy tasks spawned from within `distribute_task!` go through the same queue
     # as the tasks they serve, so that they are held (or not) alongside them.
+    window = DATADEPS_SLOT_WINDOW
+    windowed = window > 1 && uniform_execution() &&
+               datadeps_schedule_is_stateless(queue.scheduler)
+    win_verts = Int[]
+    win_procs = Processor[]
     with_options(; task_queue=submit_queue) do
         try
-            for v in topo
-                pid = vertex_to_partition[v]
-                local_procs = partition_procs[pid]
-                isempty(local_procs) && continue
-                # A task taking an in-region task's *value* as an argument has
-                # `distribute_task!` `fetch` that producer, so it must really
-                # have been submitted; its own turn is topologically earlier.
-                v in value_dep_verts && maybe_flush_batch!(submit_queue)
-                write_num = _schedule_vertex!(
-                    v, pid, temp_queues[pid], shared_state, local_procs,
-                    local_scopes[pid], dag, seen_tasks, vertex_to_partition,
-                    proc_to_scope_lfus[pid], write_num, ownership)
+            i = 1
+            while i <= length(topo)
+                # Gather the next window of vertices (at most one when not
+                # windowed). A vertex taking an in-region producer's value starts
+                # a window: that producer must have been submitted before the
+                # vertex is prepared, so nothing may be placed ahead of the flush.
+                empty!(win_verts)
+                while i <= length(topo) && length(win_verts) < (windowed ? window : 1)
+                    v = topo[i]
+                    isempty(partition_procs[vertex_to_partition[v]]) && (i += 1; continue)
+                    isempty(win_verts) || !(v in value_dep_verts) || break
+                    push!(win_verts, v)
+                    i += 1
+                end
+                isempty(win_verts) && continue
+                windowed && schedule_slot_window!(
+                    shared_state, task_metas, win_verts, win_procs,
+                    temp_queues, local_scopes, partition_procs, vertex_to_partition)
+                for (k, v) in enumerate(win_verts)
+                    pid = vertex_to_partition[v]
+                    local_procs = partition_procs[pid]
+                    # A task taking an in-region task's *value* as an argument has
+                    # `distribute_task!` `fetch` that producer, so it must really
+                    # have been submitted; its own turn is topologically earlier.
+                    v in value_dep_verts && maybe_flush_batch!(submit_queue)
+                    write_num = _schedule_vertex!(
+                        v, pid, temp_queues[pid], shared_state, local_procs,
+                        local_scopes[pid], dag, seen_tasks, vertex_to_partition,
+                        proc_to_scope_lfus[pid], write_num, ownership;
+                        pre_proc=windowed ? win_procs[k] : nothing)
+                end
             end
         finally
             maybe_flush_batch!(submit_queue)
@@ -1754,7 +1919,7 @@ function _distribute_tasks_hierarchical!(queue::DataDepsTaskQueue,
             schedule_partitions_sequential!(
                 queue, queue_lock, partitions, dag, seen_tasks,
                 partition_procs, vertex_to_partition, registry,
-                wait_all_queue, value_dep_verts)
+                wait_all_queue, value_dep_verts, task_metas)
         else
             states = Vector{DataDepsState}(undef, n_partitions)
             @sync for pid in 1:n_partitions
