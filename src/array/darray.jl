@@ -83,7 +83,7 @@ isempty(a::ArrayDomain) = length(a) == 0
 
 The domain of an array is an ArrayDomain.
 """
-domain(x::AbstractArray) = ArrayDomain([1:l for l in size(x)])
+domain(x::AbstractArray) = ArrayDomain(map(l -> 1:l, size(x)))   # a tuple, not a Vector splat: no dynamic call, no allocation
 
 abstract type ArrayOp{T, N} <: AbstractArray{T, N} end
 Base.IndexStyle(::Type{<:ArrayOp}) = IndexCartesian()

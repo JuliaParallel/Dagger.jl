@@ -1,6 +1,6 @@
 import Dagger: ChunkView, Chunk, AbstractAliasing, MemorySpace, ArgumentWrapper
 import Dagger: aliasing, memory_space
-using LinearAlgebra, Graphs
+using LinearAlgebra, Graphs, Random
 
 @testset "Hierarchical timing gates" begin
     # Exercise both the identity slot and the general move_rewrap path. Timing
@@ -1310,5 +1310,229 @@ end
                 @test !isempty(taskdeps_for_task(logs, tid))
             end
         end
+    end
+end
+
+# Queues for the async-submission tests
+struct FlatFailingQueue <: Dagger.AbstractTaskQueue end
+Dagger.enqueue!(::FlatFailingQueue, ::Vector{Dagger.DTaskPair}) = error("submit failure")
+Dagger.enqueue!(::FlatFailingQueue, ::Dagger.DTaskPair) = error("submit failure")
+struct FlatCaptureQueue <: Dagger.AbstractTaskQueue
+    pairs::Vector{Dagger.DTaskPair}
+end
+Dagger.enqueue!(q::FlatCaptureQueue, p::Dagger.DTaskPair) = (push!(q.pairs, p); nothing)
+Dagger.enqueue!(q::FlatCaptureQueue, ps::Vector{Dagger.DTaskPair}) = (append!(q.pairs, ps); nothing)
+# Counts submissions made on the planning task and on other tasks, then forwards them
+struct FlatQueueRecorder <: Dagger.AbstractTaskQueue
+    caller::Task
+    lock::ReentrantLock
+    on_caller::Base.RefValue{Int}
+    off_caller::Base.RefValue{Int}
+end
+function _flat_record!(q::FlatQueueRecorder, n)
+    @lock q.lock (current_task() === q.caller ? (q.on_caller[] += n) : (q.off_caller[] += n))
+end
+Dagger.enqueue!(q::FlatQueueRecorder, p::Dagger.DTaskPair) = (_flat_record!(q, 1); Dagger.enqueue!(Dagger.DefaultTaskQueue(), p))
+Dagger.enqueue!(q::FlatQueueRecorder, ps::Vector{Dagger.DTaskPair}) = (_flat_record!(q, length(ps)); Dagger.enqueue!(Dagger.DefaultTaskQueue(), ps))
+
+@testset "Flat regions submitted asynchronously" begin
+    # Regions of DATADEPS_FLAT_ASYNC_MIN tasks and more go through the async submitter (when there
+    # is more than one thread). The FORCE switch makes the same path run for small regions and on
+    # one thread, so that it is exercised everywhere.
+    addone!(x, k) = (x .+= k; nothing)
+    function run_region(ntasks, narr; force)
+        arrs = [Dagger.tochunk(zeros(4)) for _ in 1:narr]
+        Dagger.with(Dagger.DATADEPS_FLAT_ASYNC_FORCE=>force) do
+            Dagger.spawn_datadeps(; hierarchical=false) do
+                for i in 1:ntasks
+                    Dagger.spawn(addone!, Dagger.InOut(arrs[mod1(i, narr)]), i)
+                end
+            end
+        end
+        return [fetch(a) for a in arrs]
+    end
+    expected(ntasks, narr) = [fill(float(sum(i for i in 1:ntasks if mod1(i, narr) == j; init=0)), 4) for j in 1:narr]
+
+    @testset "the async path is taken from DATADEPS_FLAT_ASYNC_MIN tasks, and only then" begin
+        @test Dagger.DATADEPS_FLAT_ASYNC_MIN == 256
+        regions(f) = (r0 = Dagger.DATADEPS_FLAT_ASYNC_REGIONS[]; f(); Dagger.DATADEPS_FLAT_ASYNC_REGIONS[] - r0)
+        multi = Threads.nthreads() > 1
+        @test regions(()->run_region(255, 5; force=false)) == 0
+        @test regions(()->run_region(256, 5; force=false)) == (multi ? 1 : 0)
+        @test regions(()->run_region(257, 5; force=false)) == (multi ? 1 : 0)
+        @test regions(()->run_region(3, 5; force=true)) == 1
+        @test regions(()->run_region(3, 5; force=false)) == 0
+        # The default planner sends a single-owner region to the flat planner, so it takes the same path
+        if nprocs() == 1
+            big = Dagger.tochunk(zeros(4))
+            @test regions() do
+                Dagger.spawn_datadeps() do
+                    for i in 1:256
+                        Dagger.spawn(addone!, Dagger.InOut(big), 1)
+                    end
+                end
+            end == (multi ? 1 : 0)
+        end
+        # Results are unchanged on both sides of the limit
+        @test run_region(255, 5; force=false) == expected(255, 5)
+        @test run_region(256, 5; force=false) == expected(256, 5)
+    end
+    @testset "copy and free tasks go through the async queue" begin
+        # Without a second worker no copy or free task exists
+        if nprocs() > 1
+            for force in (false, true)
+                rec = FlatQueueRecorder(current_task(), ReentrantLock(), Ref(0), Ref(0))
+                A = Dagger.tochunk(zeros(4), Dagger.OSProc(1))
+                Dagger.with(Dagger.DATADEPS_FLAT_ASYNC_FORCE=>force) do
+                    Dagger.with_options(; task_queue=rec) do
+                        Dagger.spawn_datadeps(; hierarchical=false) do
+                            for i in 1:8
+                                Dagger.with_options(; scope=Dagger.scope(worker=workers()[mod1(i, nworkers())])) do
+                                    Dagger.spawn(addone!, Dagger.InOut(A), 1)
+                                end
+                            end
+                        end
+                    end
+                end
+                @test fetch(A) == fill(8.0, 4)
+                # more submissions than compute tasks: copies and frees were among them
+                @test rec.on_caller[] + rec.off_caller[] > 8
+                # forced: every submission (compute, copy, free) came from the submitter; else none
+                @test (force ? rec.on_caller[] : rec.off_caller[]) == 0
+            end
+        end
+    end
+    @testset "a submitter failure reaches the planner and does not hang" begin
+        cap = FlatCaptureQueue(Dagger.DTaskPair[])
+        Dagger.with_options(; task_queue=cap) do
+            Dagger.spawn(identity, 1)
+        end
+        pair = only(cap.pairs)
+        for op in (Dagger.flush_batch!, Dagger.close_submitter!)
+            aeq = Dagger.AsyncEnqueueQueue(FlatFailingQueue(), ReentrantLock())
+            Dagger.enqueue!(aeq, pair)
+            t = Threads.@spawn try; op(aeq); :returned; catch err; err; end
+            @test timedwait(()->istaskdone(t), 30) == :ok
+            if istaskdone(t)
+                r = fetch(t)
+                @test r isa ErrorException && occursin("submit failure", r.msg)
+            end
+            try; Dagger.close_submitter!(aeq); catch; end
+        end
+    end
+    @testset "region above the threshold matches the sequential result" begin
+        n = Dagger.DATADEPS_FLAT_ASYNC_MIN + 44
+        @test run_region(n, 5; force=false) == expected(n, 5)
+        @test run_region(n, 5; force=true) == expected(n, 5)
+    end
+    @testset "forced small region matches the synchronous one" begin
+        @test run_region(12, 3; force=true) == run_region(12, 3; force=false)
+        @test run_region(12, 3; force=true) == expected(12, 3)
+    end
+    @testset "task consuming an earlier task's result" begin
+        A = Dagger.tochunk(zeros(4))
+        B = Dagger.tochunk(zeros(4))
+        t = nothing
+        Dagger.with(Dagger.DATADEPS_FLAT_ASYNC_FORCE=>true) do
+            Dagger.spawn_datadeps(; hierarchical=false) do
+                for i in 1:20
+                    Dagger.spawn(addone!, Dagger.InOut(A), 1)
+                end
+                t = Dagger.spawn(x->sum(x), Dagger.In(A))
+                Dagger.spawn((x, s)->(x .+= s; nothing), Dagger.InOut(B), t)
+            end
+        end
+        @test fetch(A) == fill(20.0, 4)
+        @test fetch(B) == fill(80.0, 4)
+    end
+    @testset "random regions match the sequential result" begin
+        # Mixed in-place updates (InOut/In on several arrays), tasks that consume an earlier task's value,
+        # and tasks with a scope of their own, at sizes around the threshold, with and without forcing.
+        rng = Random.MersenneTwister(2024)
+        mix!(dst, src, k) = (dst .= dst .* 0.5 .+ src .+ k; nothing)
+        bump!(dst, s) = (dst .+= s; nothing)
+        for ntasks in (3, Dagger.DATADEPS_FLAT_ASYNC_MIN - 1, Dagger.DATADEPS_FLAT_ASYNC_MIN,
+                       Dagger.DATADEPS_FLAT_ASYNC_MIN + 1, Dagger.DATADEPS_FLAT_ASYNC_MIN + 40),
+            force in (false, true)
+            narr = 6
+            arrs = [Dagger.tochunk(zeros(4)) for _ in 1:narr]
+            ref = [zeros(4) for _ in 1:narr]
+            plan = [(rand(rng, 1:3), rand(rng, 1:narr), rand(rng, 1:narr), rand(rng, 1:3), rand(rng, Bool)) for _ in 1:ntasks]
+            Dagger.with(Dagger.DATADEPS_FLAT_ASYNC_FORCE=>force) do
+                Dagger.spawn_datadeps(; hierarchical=false) do
+                    for (kind, a, b, k, scoped) in plan
+                        Dagger.with_options(; scope=(scoped ? Dagger.scope(worker=1) : nothing)) do
+                            if kind == 1 || a == b
+                                Dagger.spawn(bump!, Dagger.InOut(arrs[a]), k)
+                            elseif kind == 2
+                                Dagger.spawn(mix!, Dagger.InOut(arrs[a]), Dagger.In(arrs[b]), k)
+                            else
+                                v = Dagger.spawn(sum, Dagger.In(arrs[b]))
+                                Dagger.spawn(bump!, Dagger.InOut(arrs[a]), v)
+                            end
+                        end
+                    end
+                end
+            end
+            for (kind, a, b, k, _) in plan
+                if kind == 1 || a == b
+                    ref[a] .+= k
+                elseif kind == 2
+                    ref[a] .= ref[a] .* 0.5 .+ ref[b] .+ k
+                else
+                    ref[a] .+= sum(ref[b])
+                end
+            end
+            @test [fetch(a) for a in arrs] == ref
+        end
+    end
+    @testset "a planning error in the middle of a region reaches the caller" begin
+        # The failure is raised by the planner (no processor matches the scope), with earlier tasks
+        # already handed to the submitter
+        for force in (false, true)
+            A = Dagger.tochunk(zeros(4))
+            threw = false
+            try
+                Dagger.with(Dagger.DATADEPS_FLAT_ASYNC_FORCE=>force) do
+                    Dagger.spawn_datadeps(; hierarchical=false) do
+                        for i in 1:Dagger.DATADEPS_FLAT_ASYNC_MIN
+                            Dagger.spawn(addone!, Dagger.InOut(A), 1)
+                        end
+                        Dagger.with_options(scope=Dagger.ProcessScope(1000)) do
+                            Dagger.spawn(addone!, Dagger.InOut(A), 1)
+                        end
+                    end
+                end
+            catch err
+                threw = true
+            end
+            @test threw
+        end
+        @test run_region(10, 2; force=true) == expected(10, 2)
+    end
+    @testset "a failing task reaches the caller" begin
+        boom!(x) = error("boom in async region")
+        n = Dagger.DATADEPS_FLAT_ASYNC_MIN + 44
+        for force in (false, true)
+            A = Dagger.tochunk(zeros(4))
+            B = Dagger.tochunk(zeros(4))
+            threw = false
+            try
+                Dagger.with(Dagger.DATADEPS_FLAT_ASYNC_FORCE=>force) do
+                    Dagger.spawn_datadeps(; hierarchical=false) do
+                        for i in 1:n
+                            Dagger.spawn(addone!, Dagger.InOut(A), 1)
+                            i == n ÷ 2 && Dagger.spawn(boom!, Dagger.InOut(B))
+                        end
+                    end
+                end
+            catch err
+                threw = true
+                @test occursin("boom in async region", sprint(showerror, err))
+            end
+            @test threw
+        end
+        # The scheduler and the async submitter are still usable afterwards
+        @test run_region(10, 2; force=true) == expected(10, 2)
     end
 end

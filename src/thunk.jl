@@ -768,6 +768,11 @@ function spawn_macro(f, task_options::Options, args...; kwargs...)
 end
 typed_spawn_macro(f, task_options::Options, args...; kwargs...) =
     _typed_spawn_owned(f, task_options, args, kwargs)
+# One dispatch onto the concrete `NamedTuple` type: `scoped_options` is only known as `NamedTuple`
+# here, so asserting the type of its `keys` inline (`::NTuple{N,Symbol} where N`) was a runtime
+# subtype query on every spawn made under `with_options`.
+_append_option_names!(propagates::Vector{Symbol}, scoped_options::NamedTuple) =
+    append!(propagates, keys(scoped_options))
 function _spawn(args_kwargs, task_options)
     # Get all scoped options and determine which propagate beyond this task
     scoped_options = get_options()::NamedTuple
@@ -797,7 +802,7 @@ function _spawn(args_kwargs, task_options)
         Symbol[]
     end
     if propagates !== nothing
-        append!(propagates, keys(scoped_options)::NTuple{N,Symbol} where N)
+        _append_option_names!(propagates, scoped_options)
     end
 
     # N.B. Merges into task_options
