@@ -617,7 +617,7 @@ function stage(ctx::Context, d::Distribute)
             shape = size(chunks)
             scope = procgrid_scope(d.procgrid, I)
             options = Options(compute_scope=scope)
-            Dagger.spawn(options, shape, chunks...) do shape, parts...
+            t = Dagger.spawn(options, shape, chunks...) do shape, parts...
                 if prod(shape) == 0
                     return Array{T}(undef, shape)
                 end
@@ -625,6 +625,8 @@ function stage(ctx::Context, d::Distribute)
                 ps = reshape(Any[parts...], shape)
                 collect(treereduce_nd(dimcatfuncs, ps))
             end
+            note_chunk_placement!(current_acceleration(), t, scope)
+            t
         end
         cs = post_stage_array_chunks!(current_acceleration(), cs, T, Nd)
     else

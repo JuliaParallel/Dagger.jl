@@ -139,6 +139,30 @@ alloc_uninit(::CPURAMMemorySpace, ::Type{<:Array{T,N}}, dims::Dims{N}) where {T,
     alloc_libc_array(T, dims)
 
 """
+    tune_malloc!() -> Bool
+
+Keep freed memory in the process heap instead of returning it to the system (glibc only): a
+buffer of up to 16 MB comes from the heap, not from its own `mmap`, and the heap's free top is
+not trimmed. Datadeps slots and received tiles are libc buffers of tens to hundreds of KB that
+are allocated and freed in every region; with glibc's defaults each one is a fresh `mmap` or a
+trimmed heap top, so every use pays page faults (received tiles at ~0.7 GB/s). Called when the
+MPI acceleration starts (where tiles cross ranks). Returns whether the settings were applied;
+a no-op elsewhere.
+"""
+function tune_malloc!()
+    Sys.islinux() || return false
+    try
+        # mallopt parameters: M_TRIM_THRESHOLD = -1, M_TOP_PAD = -2, M_MMAP_THRESHOLD = -3
+        ok = ccall(:mallopt, Cint, (Cint, Cint), -3, 16 << 20) == 1
+        ok &= ccall(:mallopt, Cint, (Cint, Cint), -1, typemax(Int32)) == 1
+        ok &= ccall(:mallopt, Cint, (Cint, Cint), -2, 256 << 20) == 1
+        return ok
+    catch
+        return false
+    end
+end
+
+"""
     slot_may_be_uninit(from_space, to_space, ::Type{T}) -> Bool
 
 Whether a Datadeps slot of type `T` being created in `to_space` for data living

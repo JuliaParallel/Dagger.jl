@@ -222,6 +222,11 @@ function constrain(x::UnionScope, y::UnionScope)
     isempty(zs) && return InvalidScope(x, y)
     UnionScope(zs)
 end
+# Everything is allowed by `AnyScope`: the answer is `x` itself. Without this the generic method below wraps `AnyScope` in a
+# union and rebuilds a new `UnionScope` of all of `x`'s scopes (a `Set`, hashing, a fresh tuple): for the union of one rank's
+# processors that was ~90 us and 11 KB of garbage for every task the scheduler placed (`schedule_one!` constrains the compute
+# scope by `AnyScope()` when there is no result scope).
+constrain(x::UnionScope, ::AnyScope) = x
 constrain(x::UnionScope, y) = constrain(x, UnionScope((y,)))
 
 Base.isless(::NodeScope, ::NodeScope) = false

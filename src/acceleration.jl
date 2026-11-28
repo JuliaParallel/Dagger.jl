@@ -75,6 +75,18 @@ compatible_processors(accel::Union{Acceleration,Nothing}, scope::AbstractScope=g
 uniform_execution(::DistributedAcceleration) = false
 uniform_execution() = uniform_execution(current_acceleration())
 
+"""
+    fetch_failed_uniform!(accel)
+
+Called when `fetch` of a task with a known owner (`DTask.owner`) throws because the
+task failed on this process. Under uniform execution a fetch of a task that did
+not fail takes part in a broadcast, which takes a task-id-derived tag on every
+process; a process that fails before it gets there must take the same ids, or the
+ids (and tags) of everything that follows differ across processes. Does nothing
+by default.
+"""
+fetch_failed_uniform!(::Acceleration) = nothing
+
 # SPMD uniformity checking. Under a uniform-execution acceleration (e.g. MPI),
 # planning-time values are hashed and compared across ranks to catch divergence
 # early. Core datadeps calls `check_uniform` unconditionally; the real checks
@@ -311,6 +323,16 @@ default_procgrid(accel, nblocks::NTuple{N,Int}) where N = nothing
 
 "Acceleration-specific finalization after array chunk tasks are spawned."
 post_stage_array_chunks!(accel::Acceleration, tasks, eltype::Type, nd::Int) = tasks
+
+"""
+    note_chunk_placement!(accel, task::DTask, scope)
+
+Called for every task that produces a block of an array, with the compute scope the block was
+placed with (a single processor for the deterministic placements: every rank computes the same
+grid). An acceleration that wants to know at spawn time where a block lives records it here;
+the default does nothing.
+"""
+note_chunk_placement!(::Acceleration, task, scope) = nothing
 
 default_processor(space::CPURAMMemorySpace) = OSProc(space.owner)
 default_memory_space(accel::DistributedAcceleration) = CPURAMMemorySpace(myid())
