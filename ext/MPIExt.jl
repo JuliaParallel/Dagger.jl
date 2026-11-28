@@ -2976,6 +2976,41 @@ function Dagger.gather(accel::MPIAcceleration, x; root::Integer=0, comm::MPI.Com
     return Any[coll_decode(b, i - 1) for (i, b) in enumerate(blocks)]
 end
 
+# The task form of allgather: every rank contributes the results of the tasks it owns, so nothing is moved to a single rank first.
+function Dagger.allgather_tasks(accel::MPIAcceleration, tasks::AbstractVector)
+    comm = accel.comm
+    rank = MPI.Comm_rank(comm)
+    # The value of every task whose result this rank owns, or the failure it saw. Read from the task's future, not by
+    # `fetch(task)`: nothing here may take a task or reference id.
+    mine = Pair{Int,Any}[]
+    for (i, t) in enumerate(tasks)
+        try
+            raw = fetch(t.future; move_value=false, unwrap=false, uniform=false)
+            raw isa Chunk && raw.handle isa MPIRef ||
+                error("Dagger.allgather_tasks needs tasks whose results are MPI chunks, got $(typeof(raw))")
+            h = raw.handle
+            h.comm == comm || error("Dagger.allgather_tasks: a task belongs to another communicator than the current one")
+            h.rank == rank && push!(mine, i => poolget(h; uniform=false))
+        catch err
+            err isa InterruptException && rethrow()
+            push!(mine, i => CapturedException(err, catch_backtrace()))
+        end
+    end
+    values = Vector{Any}(undef, length(tasks))
+    filled = fill(false, length(tasks))
+    failure = nothing
+    for part in Dagger.allgather(accel, mine; comm), (i, v) in part
+        if v isa CapturedException
+            (failure === nothing || i < failure[1]) && (failure = (i, v))
+        else
+            values[i] = v; filled[i] = true
+        end
+    end
+    failure === nothing || throw(failure[2])
+    all(filled) || error("Dagger.allgather_tasks: no process owned the result of task $(findfirst(!, filled))")
+    return Any[v for v in values]
+end
+
 # One blob per rank from a vector with one element per rank; a wrong length or an element that cannot be sent becomes an
 # error blob for every rank, so that nobody is left waiting.
 function coll_encode_each(xs, comm::MPI.Comm, what::String)

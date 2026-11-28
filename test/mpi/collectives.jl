@@ -149,6 +149,46 @@ end
         Dagger.barrier()
     end
 
+    # the task form: the results of tasks that live on different ranks, gathered without moving them first
+    coll_task_value(r::Int) = r == 1 ? Float64[] : fill(Float64(r), 100 * (r + 1))     # sizes differ, rank 1's is empty
+    coll_task_fail(r::Int) = error("task of rank $r failed")
+    coll_task_maybe_fail(r::Int) = r == nranks - 1 ? coll_task_fail(r) : r
+    coll_task_list(f) = [Dagger.@spawn(scope=coll_last_thread(r), return_type=Any, f(r)) for r in 0:nranks-1]
+
+    @testset "allgather of tasks, native = $native" for native in (false, true)
+        MPIExt.with(MPIExt.MPI_ALLGATHER_NATIVE => native) do
+            ts = coll_task_list(coll_task_value)
+            got = Dagger.allgather(ts, Any)
+            @test got isa Vector{Any} && length(got) == nranks
+            @test all(r -> got[r + 1] == coll_task_value(r), 0:nranks-1)
+            @test Dagger.allgather_tasks(ts) == [coll_task_value(r) for r in 0:nranks-1]
+            # the typed form converts the result
+            ts = [Dagger.@spawn(scope=coll_last_thread(r), return_type=Int, r * 7) for r in 0:nranks-1]
+            typed = Dagger.allgather(ts, Int)
+            @test typed isa Vector{Int} && typed == [7r for r in 0:nranks-1]
+            # several tasks per rank, in an order that interleaves the owners
+            ts = [Dagger.@spawn(scope=coll_last_thread((i + 1) % nranks), return_type=Int, identity(i)) for i in 0:2nranks-1]
+            @test Dagger.allgather(ts, Int) == collect(0:2nranks-1)
+            # an empty list
+            @test Dagger.allgather_tasks(Dagger.DTask[]) == []
+        end
+    end
+
+    @testset "allgather of tasks: a failing task reaches every rank" begin
+        ts = [Dagger.@spawn(scope=coll_last_thread(r), return_type=Any, coll_task_maybe_fail(r)) for r in 0:nranks-1]
+        res = try Dagger.allgather_tasks(ts); nothing catch err; err end
+        @test res !== nothing                  # every rank throws, none is left waiting
+        @test occursin("task of rank $(nranks - 1) failed", sprint(showerror, res))
+        # the next collective, and the task form, still work
+        @test Dagger.allgather(rank) == collect(0:nranks-1)
+        @test Dagger.allgather(coll_task_list(r -> r), Int) == collect(0:nranks-1)
+    end
+
+    @testset "allgather of tasks: the value form is unchanged" begin
+        @test Dagger.allgather(rank) == collect(0:nranks-1)
+        @test Dagger.allgather([rank]) == [[r] for r in 0:nranks-1]   # a vector is a value here, not a task list
+    end
+
     @testset "called from a task" begin
         # one task per rank, each on its own rank: they run the collectives at the same time
         ts = [Dagger.@spawn(scope=coll_last_thread(r), return_type=Vector{Any}, Dagger.allgather(r)) for r in 0:nranks-1]

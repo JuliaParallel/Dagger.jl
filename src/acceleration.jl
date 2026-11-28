@@ -379,6 +379,20 @@ allgather(x; kwargs...) = allgather(current_acceleration(), x; kwargs...)
 allgather(::Acceleration, x; kwargs...) = Any[x]
 
 """
+    allgather_tasks(tasks) -> Vector
+    allgather(tasks, T) -> Vector{T}
+
+Wait for every task of `tasks` (the same list on every process, in the same order) and return their values on *every* process,
+`[fetch(t) for t in tasks]`. Under MPI each process contributes the values of the tasks whose result it owns and they are
+exchanged with [`allgather`](@ref), instead of moving every result to one process, gathering them in a task and broadcasting that.
+A task that failed makes every process throw its exception, after all have taken part. It takes no task or reference ids.
+`allgather(tasks, T)` converts the result to `Vector{T}` (the values arrive over the wire untyped).
+"""
+allgather_tasks(tasks::AbstractVector) = allgather_tasks(current_acceleration(), tasks)
+allgather_tasks(::Acceleration, tasks::AbstractVector) = Any[fetch(t) for t in tasks]
+allgather(tasks::AbstractVector, ::Type{T}) where {T} = convert(Vector{T}, allgather_tasks(tasks))
+
+"""
     gather(x; root=0, comm) -> Vector or nothing
 
 Like [`allgather`](@ref), but only process `root` receives the vector of contributions; the others get `nothing`.

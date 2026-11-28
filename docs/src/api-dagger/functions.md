@@ -93,6 +93,7 @@ barrier
 bcast
 gather
 allgather
+allgather_tasks
 scatter
 alltoall
 allreduce
