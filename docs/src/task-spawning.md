@@ -327,6 +327,32 @@ In comparison, the `outer_low_occupancy` snippet should show results like this:
   0.117239 seconds (87.95 k allocations: 5.372 MiB)
 ```
 
+## Loops of many cheap iterations
+
+A task costs on the order of 100 us, so a task per iteration of a loop with
+cheap iterations spends its time in the scheduler. [`Dagger.dynamic_for`](@ref)
+runs `f(i, args...)` for `i in 1:n` as a few self-scheduling worker tasks (one
+per thread by default): each worker takes the next chunk of indices from a
+shared atomic counter until none are left, so the scheduler is entered once per
+worker however many chunks there are. `args` are ordinary task arguments, so a
+`DTask` among them is waited for before any worker starts.
+[`Dagger.dynamic_for_async`](@ref) returns the worker tasks instead of waiting.
+
+```julia
+using Dagger
+
+out = zeros(1000)
+Dagger.dynamic_for(1000, out) do i, out
+    out[i] = sqrt(i)
+end
+```
+
+All workers share the counter, so they must run in one process. The default
+scope is the current worker's processors; under MPI pass a scope inside one
+rank, e.g. `scope=Dagger.scope(mpi_rank=r)`. [`Dagger.dynamic_reduce`](@ref)
+reduces `f(i, args...)` with an operator in a fixed combination order, so a
+floating-point result does not depend on the number of workers or on timing.
+
 ## Different ways to spawn tasks
 
 Beyond the standard function call syntax `Dagger.@spawn f(args...)`, Dagger also supports several other convenient ways to spawn tasks, mirroring Julia's own syntax variations.

@@ -86,3 +86,13 @@ Sch.exec!
 Sch.halt!
 Sch.get_dag_ids
 ```
+
+## Loop Functions
+```@docs
+dynamic_for
+dynamic_for_async
+dynamic_reduce
+dynamic_reduce_async
+local_scope
+loop_worker_scopes
+```

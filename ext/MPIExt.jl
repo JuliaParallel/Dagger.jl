@@ -2685,4 +2685,48 @@ accel_matches_proc(accel::MPIAcceleration, proc::MPIClusterProc) = true
 accel_matches_proc(accel::MPIAcceleration, proc::MPIProcessor) = true
 accel_matches_proc(accel::MPIAcceleration, proc) = false
 
+# --- Self-scheduling loops (`Dagger.dynamic_for`) under MPI --------------------------------------------------------------
+#
+# The default scope of a loop is the processors this rank owns. In a graph shared by several ranks that is ambiguous (every
+# rank plans the same tasks, so a scope that differs per rank would make them disagree about where a worker runs), so it is an
+# error there and the caller passes the same `scope=` on every rank. Built once per communicator (a union scope has one member
+# per thread).
+const MPI_LOCAL_SCOPE_CACHE = LockedObject(Dict{MPI.Comm,Any}())
+function Dagger.local_scope(accel::MPIAcceleration)
+    comm = accel.comm
+    MPI.Comm_size(comm) == 1 || throw(ArgumentError(
+        "the default scope of a self-scheduling loop is ambiguous in a graph shared by $(MPI.Comm_size(comm)) ranks; pass the same `scope=` on every rank, e.g. `Dagger.scope(mpi_rank=r)`"))
+    sc = lock(MPI_LOCAL_SCOPE_CACHE) do cache
+        get(cache, comm, nothing)
+    end
+    sc === nothing || return sc
+    procs = collect(Dagger.get_processors(MPIOSProc(comm, MPI.Comm_rank(comm))))
+    sc = Dagger.UnionScope(Dagger.ExactScope[Dagger.ExactScope(p) for p in procs])
+    lock(MPI_LOCAL_SCOPE_CACHE) do cache
+        cache[comm] = sc
+    end
+    return sc
+end
+
+# The workers of a loop under MPI. A scope over several threads of a rank does not bind a task to any of them, and the
+# scheduler's deterministic order would put every worker on the first thread; a scope that names ONE processor does bind. So a
+# scope that covers several threads of ONE rank becomes one exact scope per thread, in thread order, and thread 1 is left out
+# when the rank has three or more: it runs the driver and the broadcast relay, and a worker that holds it for the whole loop
+# blocks the tasks pinned there that other ranks wait for. Worker w then runs on its own thread and the workers cannot pile up.
+# A scope that is already a single processor, spans several ranks, or contains anything but thread processors is passed on
+# unchanged.
+function Dagger.loop_worker_scopes(accel::MPIAcceleration, scope::Dagger.AbstractScope, workers::Int)
+    procs = collect(Dagger.compatible_processors(accel, scope))
+    length(procs) >= 2 || return scope
+    all(p -> p isa MPIProcessor && p.innerProc isa Dagger.ThreadProc, procs) || return scope
+    first_p = first(procs)
+    all(p -> p.comm == first_p.comm && p.rank == first_p.rank && p.innerProc.owner == first_p.innerProc.owner, procs) || return scope
+    sort!(procs; by=p -> p.innerProc.tid)
+    if length(procs) >= 3
+        filtered = filter(p -> p.innerProc.tid != 1, procs)
+        isempty(filtered) || (procs = filtered)
+    end
+    return Dagger.AbstractScope[Dagger.ExactScope(p) for p in procs]
+end
+
 end # module MPIExt
